@@ -1,0 +1,820 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AmberDAV · web access</title>
+<style>
+  :root {
+    --bg: #0e0f13; --side: #0a0b0e; --panel: #16181f; --row: #14161d;
+    --line: #262a35; --line-soft: #1d2129;
+    --text: #d8dde5; --muted: #8b93a3; --dim: #5c6373;
+    --amber: #ffb454; --amber-soft: rgba(255,180,84,.14); --amber-hair: rgba(255,180,84,.30);
+    --danger: #ff6b6b;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); }
+  body {
+    color: var(--text); font-family: var(--sans);
+    display: grid; grid-template-columns: 224px 1fr;
+    /* Pin the single row to the viewport so children are height-bounded:
+       lets .listwrap scroll instead of overflowing, and keeps the sidebar
+       full-height when the file list is short. */
+    grid-template-rows: 100vh; height: 100vh; overflow: hidden;
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2a2f3a; border-radius: 6px; }
+
+  /* sidebar */
+  aside {
+    background: var(--side); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; padding: 1.1rem 0;
+    background-image: radial-gradient(120% 40% at 0% 0%, rgba(255,180,84,.06), transparent 60%);
+  }
+  .brand { font-family: var(--mono); font-size: 1.5rem; font-weight: 700; letter-spacing: .04em; padding: 0 1.2rem; }
+  .brand b { color: var(--amber); }
+  .tag { font-family: var(--mono); color: var(--dim); letter-spacing: .34em; text-transform: uppercase; font-size: .62rem; padding: .1rem 1.2rem 0; }
+  nav { margin-top: 1.6rem; display: flex; flex-direction: column; }
+  nav a {
+    font-family: var(--mono); font-size: .82rem; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); text-decoration: none; padding: .7rem 1.2rem; border-left: 2px solid transparent;
+    cursor: pointer; transition: color .12s, background .12s, border-color .12s;
+  }
+  nav a:hover { color: var(--text); background: rgba(255,255,255,.02); }
+  nav a.active { color: var(--amber); border-left-color: var(--amber); background: var(--amber-soft); }
+  .side-foot { margin-top: auto; padding: 0 1.2rem; }
+  .side-foot a { font-family: var(--mono); font-size: .74rem; color: var(--dim); text-decoration: none; }
+  .side-foot a:hover { color: var(--amber); }
+
+  /* main */
+  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; background: var(--bg); }
+  .crumbs {
+    font-family: var(--mono); font-size: .85rem; padding: .9rem 1.2rem; border-bottom: 1px solid var(--line-soft);
+    display: flex; align-items: center; gap: .2rem; flex-wrap: wrap; color: var(--muted);
+  }
+  .crumbs .seg { color: var(--amber); cursor: pointer; padding: .1rem .25rem; border-radius: 5px; }
+  .crumbs .seg:hover { background: var(--amber-soft); }
+  .crumbs .sep { color: var(--dim); }
+  .crumbs .seg.last { color: var(--text); cursor: default; }
+  .crumbs .seg.last:hover { background: none; }
+
+  .toolbar { display: flex; gap: .4rem; align-items: center; padding: .6rem 1.2rem; border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; }
+  .toolbar .spacer { flex: 1; }
+  .tbtn {
+    font-family: var(--mono); font-size: .76rem; letter-spacing: .03em;
+    color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: .42rem .7rem; cursor: pointer; transition: background .12s, border-color .12s, opacity .12s;
+    display: inline-flex; align-items: center; gap: .4rem;
+  }
+  .tbtn:hover:not(:disabled) { border-color: var(--amber-hair); background: #1b1e27; }
+  .tbtn.primary { color: #1a1206; background: var(--amber); border-color: var(--amber); font-weight: 600; }
+  .tbtn.primary:hover { filter: brightness(1.08); }
+  .tbtn:disabled { opacity: .35; cursor: default; }
+  .tbtn.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  .seg-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg-toggle button { background: var(--panel); color: var(--muted); border: 0; padding: .42rem .6rem; cursor: pointer; font-size: .85rem; }
+  .seg-toggle button.on { background: var(--amber-soft); color: var(--amber); }
+
+  .listwrap { flex: 1; min-height: 0; overflow: auto; }
+
+  /* list view */
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  thead th {
+    position: sticky; top: 0; background: var(--bg); z-index: 1;
+    text-align: left; font-family: var(--mono); font-weight: 500; font-size: .68rem;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
+    padding: .55rem 1.2rem; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  thead th.sortable { cursor: pointer; }
+  thead th.sortable:hover { color: var(--muted); }
+  thead th .arrow { color: var(--amber); margin-left: .3rem; }
+  th.size, td.size { text-align: right; white-space: nowrap; }
+  th.type, td.type, th.date, td.date { white-space: nowrap; color: var(--muted); }
+  tbody td { padding: .4rem 1.2rem; border-bottom: 1px solid var(--line-soft); }
+  tbody tr { cursor: default; user-select: none; }
+  tbody tr:hover { background: rgba(255,180,84,.05); }
+  tbody tr.sel { background: var(--amber-soft); box-shadow: inset 2px 0 0 var(--amber); }
+  td.name { display: flex; align-items: center; gap: .6rem; min-width: 0; }
+  td.name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.size, td.type, td.date { font-family: var(--mono); font-size: .82rem; }
+  .ic { width: 22px; height: 22px; flex: none; }
+  .ic.dir { color: var(--amber); }
+  .ic.file { color: var(--dim); }
+  .thumb { width: 30px; height: 30px; flex: none; object-fit: cover; border-radius: 4px; background: #0c0d11; }
+  .empty { padding: 3rem 1.2rem; color: var(--dim); font-family: var(--mono); text-align: center; }
+
+  /* grid view */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: .7rem; padding: 1rem 1.2rem; }
+  .gcard { border: 1px solid var(--line-soft); border-radius: 10px; padding: .6rem; cursor: default; user-select: none;
+    display: flex; flex-direction: column; align-items: center; gap: .5rem; transition: background .12s, border-color .12s; }
+  .gcard:hover { background: rgba(255,180,84,.05); }
+  .gcard.sel { background: var(--amber-soft); border-color: var(--amber-hair); }
+  .gthumb { width: 100%; aspect-ratio: 1; display: grid; place-items: center; background: #0c0d11; border-radius: 6px; overflow: hidden; }
+  .gthumb img { width: 100%; height: 100%; object-fit: cover; }
+  .gthumb .ic { width: 44px; height: 44px; }
+  .gname { font-size: .78rem; text-align: center; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* context menu */
+  .menu {
+    position: fixed; min-width: 210px; background: #1b1e27; border: 1px solid var(--line);
+    border-radius: 10px; padding: .35rem; z-index: 50; box-shadow: 0 18px 50px rgba(0,0,0,.55);
+    font-family: var(--mono); font-size: .82rem; display: none;
+  }
+  .menu .mi { padding: .5rem .7rem; border-radius: 7px; cursor: pointer; color: var(--text); }
+  .menu .mi:hover { background: var(--amber-soft); color: var(--amber); }
+  .menu .mi.disabled { color: var(--dim); pointer-events: none; }
+  .menu .sep { height: 1px; background: var(--line); margin: .3rem .3rem; }
+
+  /* status view */
+  #view-status { padding: 1.4rem; overflow: auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.2rem; margin-bottom: 1rem; max-width: 720px; }
+  .card h3 { margin: 0 0 .6rem; font-family: var(--mono); font-size: .72rem; letter-spacing: .16em; text-transform: uppercase; color: var(--dim); }
+  .kv { font-family: var(--mono); font-size: .88rem; line-height: 1.8; }
+  .kv b { color: var(--amber); font-weight: 600; }
+  .kv a { color: var(--amber); }
+  #buttons { display: flex; flex-wrap: wrap; gap: .4rem; min-height: 2.2rem; }
+  .pill { font-family: var(--mono); font-size: .8rem; padding: .3rem .6rem; border-radius: 999px; background: #2a2f3a; }
+  .pill.on { background: var(--amber); color: #1a1206; }
+  .axes { display: grid; grid-template-columns: auto 1fr; gap: .1rem .8rem; font-family: var(--mono); font-size: .82rem; margin-top: .6rem; }
+  .axes .v { color: var(--amber); }
+  .log { font-family: var(--mono); font-size: .76rem; color: var(--muted); max-height: 9rem; overflow: auto; white-space: pre; margin-top: .6rem; }
+
+  /* settings (read-only) */
+  #view-settings { padding: 1.4rem; overflow: auto; }
+  #view-settings code { background: #0c0d11; padding: .1rem .35rem; border-radius: 4px; color: var(--amber); }
+
+  /* drag overlay + toast */
+  .drop { position: absolute; inset: 0; display: none; place-items: center; z-index: 40;
+    background: rgba(14,15,19,.82); border: 2px dashed var(--amber); border-radius: 12px; margin: 8px; }
+  .drop.show { display: grid; }
+  .drop div { font-family: var(--mono); color: var(--amber); font-size: 1.1rem; letter-spacing: .05em; }
+  .toast { position: fixed; bottom: 1.2rem; left: 50%; transform: translateX(-50%);
+    background: #1b1e27; border: 1px solid var(--line); color: var(--text);
+    font-family: var(--mono); font-size: .82rem; padding: .6rem 1rem; border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5); opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 60; }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--danger); color: var(--danger); }
+
+  /* upload progress bar */
+  .uploadbar { position: fixed; bottom: 1.2rem; left: 50%; transform: translateX(-50%);
+    width: min(92vw, 460px); background: #1b1e27; border: 1px solid var(--line);
+    border-radius: 12px; padding: .7rem .9rem; box-shadow: 0 14px 44px rgba(0,0,0,.55);
+    z-index: 65; display: none; }
+  .uploadbar.show { display: block; }
+  .ub-text { font-family: var(--mono); font-size: .78rem; color: var(--text);
+    display: flex; justify-content: space-between; gap: 1rem; margin-bottom: .5rem; }
+  .ub-text .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ub-text .pct { color: var(--amber); flex: none; }
+  .ub-track { height: 6px; background: #0c0d11; border-radius: 999px; overflow: hidden; }
+  .ub-fill { height: 100%; width: 0; background: var(--amber); border-radius: 999px; transition: width .15s ease; }
+
+  /* preview modal */
+  .modal { position: fixed; inset: 0; z-index: 70; display: none; flex-direction: column;
+    background: rgba(8,9,12,.92); backdrop-filter: blur(3px); }
+  .modal.show { display: flex; }
+  .mhead { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    padding: .9rem 1.2rem; border-bottom: 1px solid var(--line); font-family: var(--mono); }
+  .mhead .mtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--amber); }
+  .mhead .actions { display: flex; gap: .6rem; align-items: center; flex: none; }
+  .mhead a { color: var(--text); text-decoration: none; font-size: .82rem; }
+  .mhead a:hover { color: var(--amber); }
+  .mhead .mcount { color: var(--muted); font-size: .8rem; }
+  .mhead .x { cursor: pointer; color: var(--muted); font-size: 1.2rem; }
+  .mhead .x:hover { color: var(--text); }
+  .mbody { flex: 1; min-height: 0; display: grid; place-items: center; padding: 1.2rem; overflow: auto; }
+  .mbody img, .mbody video { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
+  .mbody pre { width: 100%; max-width: 1000px; margin: 0; white-space: pre-wrap; word-break: break-word;
+    font-family: var(--mono); font-size: .82rem; color: var(--text); }
+  .mbody .note { color: var(--muted); font-family: var(--mono); }
+
+  /* text editor */
+  .editor { position: fixed; inset: 0; z-index: 75; display: none; flex-direction: column;
+    background: rgba(8,9,12,.96); backdrop-filter: blur(3px); }
+  .editor.show { display: flex; }
+  .editor .mhead .actions { gap: .9rem; }
+  .editor .ed-hint { color: var(--dim); font-size: .74rem; }
+  .editor .tbtn { padding: .3rem .8rem; }
+  .editor textarea {
+    flex: 1; min-height: 0; width: 100%; resize: none; border: 0; outline: none;
+    background: #0c0d11; color: var(--text); font-family: var(--mono); font-size: .85rem;
+    line-height: 1.55; padding: 1rem 1.2rem; tab-size: 2; white-space: pre; overflow: auto;
+  }
+</style>
+</head>
+<body>
+  <aside>
+    <div class="brand">Amber<b>DAV</b></div>
+    <div class="tag">web access</div>
+    <nav>
+      <a id="nav-files" class="active" data-view="files">Files</a>
+      <a id="nav-status" data-view="status">Status</a>
+      <a id="nav-settings" data-view="settings">Settings</a>
+    </nav>
+    <div class="side-foot"><a href="/logout">› log out</a></div>
+  </aside>
+
+  <main>
+    <section id="view-files" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+      <div class="crumbs" id="crumbs"></div>
+      <div class="toolbar">
+        <button class="tbtn primary" id="t-up">⬆ Upload</button>
+        <button class="tbtn" id="t-mkdir">＋ New Folder</button>
+        <button class="tbtn" id="t-dl" disabled>⬇ Download</button>
+        <button class="tbtn" id="t-rename" disabled>✎ Rename</button>
+        <button class="tbtn" id="t-cut" disabled>✂ Cut</button>
+        <button class="tbtn" id="t-copy" disabled>⧉ Copy</button>
+        <button class="tbtn" id="t-paste" disabled>⤵ Paste</button>
+        <button class="tbtn danger" id="t-del" disabled>🗑 Delete</button>
+        <button class="tbtn" id="t-refresh">↻</button>
+        <span class="spacer"></span>
+        <button class="tbtn" id="t-hidden" title="Show hidden files (dotfiles)">⊘ Hidden</button>
+        <span class="seg-toggle">
+          <button id="v-list" class="on" title="List view">≣</button>
+          <button id="v-grid" title="Grid view">▦</button>
+        </span>
+      </div>
+      <div class="listwrap" id="listwrap"></div>
+      <div class="drop" id="drop"><div>⬇ Drop to upload here</div></div>
+    </section>
+
+    <section id="view-status" style="display:none;">
+      <div class="card">
+        <h3>Connection</h3>
+        <div class="kv" id="conn">…</div>
+      </div>
+      <div class="card">
+        <h3>Live input <span style="color:var(--dim);text-transform:none;letter-spacing:0;">— press buttons / move sticks</span></h3>
+        <div id="buttons"></div>
+        <div class="axes" id="axes"></div>
+        <div class="log" id="ilog"></div>
+        <button class="tbtn" id="i-clear" style="margin-top:.6rem;">Clear</button>
+      </div>
+    </section>
+
+    <section id="view-settings" style="display:none;">
+      <div class="card">
+        <h3>Settings (read-only)</h3>
+        <div class="kv" id="set-view">…</div>
+      </div>
+      <div class="card">
+        <h3>How to change them</h3>
+        <p class="muted" style="font-family:var(--mono);font-size:.82rem;line-height:1.7;">
+          Settings are read from <code>config.json</code> in the app folder
+          (next to the binary, e.g. <code>Roms/APPS/webdav/config.json</code>).
+          Edit that file — directly on the card or over WebDAV — and relaunch
+          the app to apply changes.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <div class="menu" id="menu"></div>
+  <input type="file" id="filepick" multiple style="display:none;">
+  <div class="toast" id="toast"></div>
+  <div class="uploadbar" id="uploadbar">
+    <div class="ub-text"><span class="name" id="ub-name"></span><span class="pct" id="ub-pct"></span></div>
+    <div class="ub-track"><div class="ub-fill" id="ub-fill"></div></div>
+  </div>
+  <div class="modal" id="modal">
+    <div class="mhead">
+      <span class="mtitle" id="mtitle"></span>
+      <span class="actions"><span class="mcount" id="mcount"></span><a id="medit" href="#" style="display:none;">📝 Edit</a><a id="mdl" href="#">⬇ Download</a><span class="x" id="mclose">✕</span></span>
+    </div>
+    <div class="mbody" id="mbody"></div>
+  </div>
+  <div class="editor" id="editor">
+    <div class="mhead">
+      <span class="mtitle" id="ed-title"></span>
+      <span class="actions">
+        <span class="ed-hint">⌘/Ctrl+S to save · Esc to close</span>
+        <button class="tbtn primary" id="ed-save">💾 Save</button>
+        <span class="x" id="ed-close">✕</span>
+      </span>
+    </div>
+    <textarea id="ed-area" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+  </div>
+
+<script>
+let cwd = '';
+let entries = [];                 // raw listing from the API
+let view = [];                    // entries actually shown (hidden filtered + sorted)
+let showHidden = false;           // include dotfiles (e.g. macOS "._" sidecars)
+let selection = new Set();        // selected names in cwd
+let clipboard = null;             // { mode:'cut'|'copy', paths:[fullpath...] }
+let viewMode = 'list';            // 'list' | 'grid'
+let sortKey = 'name', sortDir = 1;
+let lastIndex = null;             // for shift-range selection
+let perm = 'read_write';          // live permission level from settings
+let defaultFolder = '';           // folder to open after login
+let editing = null;               // entry currently open in the text editor
+
+const $ = (id) => document.getElementById(id);
+const join = (dir, name) => dir ? dir + '/' + name : name;
+const enc = encodeURIComponent;
+
+// ---- file type helpers ----
+const IMG = ['png','jpg','jpeg','gif','bmp','webp','svg'];
+const VID = ['mp4','m4v','webm','mov','mkv'];
+const AUD = ['mp3','wav','ogg','flac','m4a','aac'];
+const TXT = ['txt','md','cfg','ini','log','conf','sh','json','xml','csv'];
+const ext = (n) => n.includes('.') ? n.split('.').pop().toLowerCase() : '';
+const isImg = (e) => !e.dir && IMG.includes(ext(e.name));
+const isVid = (e) => !e.dir && VID.includes(ext(e.name));
+const isAud = (e) => !e.dir && AUD.includes(ext(e.name));
+const isTxt = (e) => !e.dir && TXT.includes(ext(e.name));
+const previewable = (e) => isImg(e) || isVid(e) || isAud(e) || isTxt(e);
+
+const TYPES = { png:'Image',jpg:'Image',jpeg:'Image',gif:'Image',bmp:'Image',webp:'Image',svg:'Image',
+  mp3:'Audio',wav:'Audio',ogg:'Audio',flac:'Audio',m4a:'Audio',aac:'Audio',
+  mp4:'Video',m4v:'Video',mkv:'Video',avi:'Video',mov:'Video',webm:'Video',
+  zip:'Archive','7z':'Archive',rar:'Archive',gz:'Archive', txt:'Text',md:'Text',cfg:'Config',ini:'Config',json:'JSON',
+  sh:'Script', gb:'Game Boy',gbc:'Game Boy',gba:'GBA',nes:'NES',smc:'SNES',sfc:'SNES',n64:'N64',iso:'Disc Image',chd:'Disc Image' };
+function typeOf(name, dir) {
+  if (dir) return 'Folder';
+  const e = ext(name);
+  return TYPES[e] || (e ? e.toUpperCase() + ' File' : 'File');
+}
+
+// ---- icons ----
+const ICON_DIR = '<svg class="ic dir" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>';
+const ICON_FILE = '<svg class="ic file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
+const thumbUrl = (e) => '/api/raw?path=' + enc(join(cwd, e.name));
+// Build the generic file icon as a DOM node, used as a thumbnail fallback.
+function fileIcon() { const d = document.createElement('div'); d.innerHTML = ICON_FILE; return d.firstChild; }
+// A thumbnail failed to decode (e.g. a non-image with an image extension, like
+// a macOS "._" AppleDouble file): swap in the file icon. Done in JS rather than
+// an inline onerror that embeds the SVG — quoting an SVG (which contains ")
+// inside an HTML attribute broke the row markup and leaked a stray '"> as text.
+function thumbFail(img) { img.replaceWith(fileIcon()); }
+
+// ---- helpers ----
+function toast(msg, isErr) {
+  const t = $('toast'); t.textContent = msg; t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.className = 'toast', isErr ? 4000 : 2000);
+}
+function humanSize(n) {
+  if (n < 1024) return n + ' B';
+  const u = ['KiB','MiB','GiB','TiB']; let i = -1; do { n /= 1024; i++; } while (n >= 1024 && i < u.length-1);
+  return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
+}
+function fmtDate(ms) { if (!ms) return ''; const d = new Date(ms);
+  return d.toLocaleDateString(undefined,{day:'2-digit',month:'short',year:'numeric'}) + ' ' +
+         d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'}); }
+function escapeHtml(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(url, opts);
+  if (r.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  const ct = r.headers.get('content-type') || '';
+  return ct.includes('json') ? r.json() : r.text();
+}
+
+// ---- visible set (hidden filter) + sorting ----
+// Recompute `view` from the raw `entries`: drop dotfiles unless showHidden,
+// then sort. Call after a new listing, a sort change, or a hidden toggle.
+function rebuild() {
+  view = showHidden ? entries.slice() : entries.filter(e => !e.name.startsWith('.'));
+  sortView();
+  render();
+}
+function sortView() {
+  view.sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1;       // folders always first
+    let c = 0;
+    if (sortKey === 'size') c = a.size - b.size;
+    else if (sortKey === 'date') c = a.modified - b.modified;
+    else if (sortKey === 'type') c = typeOf(a.name,a.dir).localeCompare(typeOf(b.name,b.dir));
+    if (c === 0) c = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    return c * sortDir;
+  });
+}
+
+// ---- rendering ----
+function renderCrumbs() {
+  const c = $('crumbs'); c.innerHTML = '';
+  const segs = cwd ? cwd.split('/') : [];
+  const mk = (label, path, last) => {
+    const s = document.createElement('span'); s.className = 'seg' + (last ? ' last' : '');
+    s.textContent = label; if (!last) s.onclick = () => go(path); c.appendChild(s);
+  };
+  mk('Home', '', segs.length === 0);
+  let acc = '';
+  segs.forEach((seg, i) => {
+    const sep = document.createElement('span'); sep.className = 'sep'; sep.textContent = ' / '; c.appendChild(sep);
+    acc = acc ? acc + '/' + seg : seg;
+    mk(seg, acc, i === segs.length - 1);
+  });
+}
+
+function attachRowEvents(el, e, idx) {
+  el.onclick = (ev) => onRowClick(ev, e, idx);
+  el.ondblclick = () => onRowOpen(e);
+  el.oncontextmenu = (ev) => { ev.preventDefault();
+    if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; render(); syncToolbar(); }
+    openMenu(ev.clientX, ev.clientY); };
+}
+
+function render() { viewMode === 'grid' ? renderGrid() : renderList(); }
+
+function renderList() {
+  const arrow = (k) => sortKey === k ? `<span class="arrow">${sortDir>0?'▲':'▼'}</span>` : '';
+  const wrap = $('listwrap');
+  wrap.innerHTML =
+    `<table><thead><tr>
+      <th class="name sortable" data-k="name">Name${arrow('name')}</th>
+      <th class="size sortable" data-k="size">Size${arrow('size')}</th>
+      <th class="type sortable" data-k="type">Type${arrow('type')}</th>
+      <th class="date sortable" data-k="date">Modified${arrow('date')}</th>
+    </tr></thead><tbody id="rows"></tbody></table>` +
+    (view.length ? '' : '<div class="empty">— empty —</div>');
+  wrap.querySelectorAll('th.sortable').forEach(th => th.onclick = () => setSort(th.dataset.k));
+  const tb = $('rows');
+  view.forEach((e, idx) => {
+    const tr = document.createElement('tr');
+    if (selection.has(e.name)) tr.classList.add('sel');
+    const icon = e.dir ? ICON_DIR : (isImg(e)
+      ? `<img class="thumb" loading="lazy" src="${thumbUrl(e)}" onerror="thumbFail(this)">`
+      : ICON_FILE);
+    tr.innerHTML =
+      `<td class="name">${icon}<span class="nm">${escapeHtml(e.name)}</span></td>` +
+      `<td class="size">${e.dir ? '' : humanSize(e.size)}</td>` +
+      `<td class="type">${typeOf(e.name, e.dir)}</td>` +
+      `<td class="date">${fmtDate(e.modified)}</td>`;
+    attachRowEvents(tr, e, idx);
+    tb.appendChild(tr);
+  });
+}
+
+function renderGrid() {
+  const wrap = $('listwrap');
+  if (!view.length) { wrap.innerHTML = '<div class="empty">— empty —</div>'; return; }
+  const grid = document.createElement('div'); grid.className = 'grid';
+  view.forEach((e, idx) => {
+    const card = document.createElement('div'); card.className = 'gcard' + (selection.has(e.name) ? ' sel' : '');
+    const inner = e.dir ? ICON_DIR : (isImg(e)
+      ? `<img loading="lazy" src="${thumbUrl(e)}" onerror="thumbFail(this)">`
+      : ICON_FILE);
+    card.innerHTML = `<div class="gthumb">${inner}</div><div class="gname">${escapeHtml(e.name)}</div>`;
+    attachRowEvents(card, e, idx);
+    grid.appendChild(card);
+  });
+  wrap.innerHTML = ''; wrap.appendChild(grid);
+}
+
+function setSort(k) {
+  if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
+  sortView(); render();
+}
+function setView(v) {
+  viewMode = v; $('v-list').classList.toggle('on', v === 'list'); $('v-grid').classList.toggle('on', v === 'grid');
+  render();
+}
+
+function canWrite() { return perm !== 'read_only'; }
+function canDelete() { return perm === 'read_write_delete'; }
+
+function syncToolbar() {
+  const n = selection.size, w = canWrite();
+  $('t-up').disabled = !w;
+  $('t-mkdir').disabled = !w;
+  $('t-dl').disabled = n < 1;   // download (read) always allowed
+  $('t-rename').disabled = n !== 1 || !w;
+  $('t-cut').disabled = n < 1 || !w;
+  $('t-copy').disabled = n < 1 || !w;
+  $('t-del').disabled = n < 1 || !canDelete();
+  $('t-paste').disabled = !clipboard || !w;
+}
+
+// ---- navigation / selection ----
+async function go(path) {
+  cwd = path; selection = new Set(); lastIndex = null;
+  try { entries = await api('GET', '/api/list?path=' + enc(cwd)); }
+  catch (e) { toast(e.message, true); entries = []; }
+  renderCrumbs(); rebuild(); syncToolbar();
+}
+function onRowClick(ev, e, idx) {
+  if (ev.shiftKey && lastIndex !== null) {
+    const [lo, hi] = [Math.min(lastIndex, idx), Math.max(lastIndex, idx)];
+    selection = new Set(); for (let i = lo; i <= hi; i++) selection.add(view[i].name);
+  } else if (ev.ctrlKey || ev.metaKey) {
+    selection.has(e.name) ? selection.delete(e.name) : selection.add(e.name); lastIndex = idx;
+  } else { selection = new Set([e.name]); lastIndex = idx; }
+  render(); syncToolbar();
+}
+function onRowOpen(e) {
+  if (e.dir) go(join(cwd, e.name));
+  else if (previewable(e)) openPreview(e);
+  else downloadPaths([join(cwd, e.name)]);
+}
+
+// ---- actions ----
+function selectedPaths() { return [...selection].map(n => join(cwd, n)); }
+function downloadPaths(paths) {
+  paths.forEach((p, i) => setTimeout(() => {
+    const a = document.createElement('a'); a.href = '/api/download?path=' + enc(p); a.download = '';
+    document.body.appendChild(a); a.click(); a.remove();
+  }, i * 400));
+}
+// base64 of a UTF-8 JSON array (handles non-Latin filenames).
+function b64json(arr) { return btoa(unescape(encodeURIComponent(JSON.stringify(arr)))); }
+function downloadZip(paths) {
+  const a = document.createElement('a');
+  a.href = '/api/zip?p=' + enc(b64json(paths)); a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+// Single file → direct download; folders or multiple items → a zip.
+function doDownload() {
+  const names = [...selection]; if (!names.length) return;
+  if (names.length === 1) {
+    const e = entries.find(x => x.name === names[0]);
+    if (e && !e.dir) { downloadPaths([join(cwd, e.name)]); return; }
+  }
+  toast('Preparing zip…');
+  downloadZip(selectedPaths());
+}
+async function doMkdir() {
+  const name = prompt('New folder name:'); if (!name) return;
+  try { await api('POST', '/api/mkdir', { path: cwd, name }); toast('Folder created'); go(cwd); }
+  catch (e) { toast(e.message, true); }
+}
+async function doRename() {
+  const cur = [...selection][0]; if (!cur) return;
+  const name = prompt('Rename to:', cur); if (!name || name === cur) return;
+  try { await api('POST', '/api/rename', { path: join(cwd, cur), name }); toast('Renamed'); go(cwd); }
+  catch (e) { toast(e.message, true); }
+}
+async function doDelete() {
+  const paths = selectedPaths(); if (!paths.length) return;
+  if (!confirm('Delete ' + paths.length + ' item(s)? This cannot be undone.')) return;
+  try { await api('POST', '/api/delete', { paths }); toast('Deleted'); go(cwd); }
+  catch (e) { toast(e.message, true); }
+}
+function doCut() { clipboard = { mode: 'cut', paths: selectedPaths() }; toast('Cut ' + clipboard.paths.length + ' item(s)'); syncToolbar(); }
+function doCopy() { clipboard = { mode: 'copy', paths: selectedPaths() }; toast('Copied ' + clipboard.paths.length + ' item(s)'); syncToolbar(); }
+async function doPaste() {
+  if (!clipboard) return;
+  const ep = clipboard.mode === 'cut' ? '/api/move' : '/api/copy';
+  try { await api('POST', ep, { srcs: clipboard.paths, dest: cwd }); toast(clipboard.mode === 'cut' ? 'Moved' : 'Copied');
+        if (clipboard.mode === 'cut') clipboard = null; syncToolbar(); go(cwd); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ---- preview modal (navigable gallery) ----
+let previewList = [], previewIdx = -1, previewToken = 0;
+
+function openPreview(e) {
+  // Gallery = all previewable items currently shown, in display order.
+  previewList = view.filter(previewable);
+  previewIdx = previewList.findIndex(x => x.name === e.name);
+  if (previewIdx < 0) { previewList = [e]; previewIdx = 0; }
+  $('modal').classList.add('show');
+  showPreviewAt(previewIdx);
+}
+function navigatePreview(delta) {
+  if (previewIdx < 0 || previewList.length < 2) return;
+  previewIdx = (previewIdx + delta + previewList.length) % previewList.length;  // wrap
+  showPreviewAt(previewIdx);
+}
+async function showPreviewAt(i) {
+  const e = previewList[i]; if (!e) return;
+  const token = ++previewToken;                 // guards against stale async text loads
+  const p = join(cwd, e.name);
+  const url = '/api/raw?path=' + enc(p);
+  $('mtitle').textContent = e.name;
+  $('mcount').textContent = previewList.length > 1 ? (i + 1) + ' / ' + previewList.length : '';
+  $('mdl').href = '/api/download?path=' + enc(p);
+  // Offer in-place editing for text files when writable.
+  const medit = $('medit');
+  if (isTxt(e) && canWrite()) { medit.style.display = ''; medit.onclick = (ev) => { ev.preventDefault(); closePreview(); openEditor(e); }; }
+  else medit.style.display = 'none';
+  const body = $('mbody'); body.innerHTML = '<div class="note">Loading…</div>';
+  if (isImg(e)) body.innerHTML = `<img src="${url}">`;
+  else if (isVid(e)) body.innerHTML = `<video src="${url}" controls autoplay></video>`;
+  else if (isAud(e)) body.innerHTML = `<audio src="${url}" controls autoplay></audio>`;
+  else if (isTxt(e)) {
+    if (e.size > 2 * 1024 * 1024) { body.innerHTML = '<div class="note">File too large to preview — download instead.</div>'; return; }
+    try { const r = await fetch(url); const t = await r.text();
+      if (token !== previewToken) return;        // user navigated away while loading
+      const pre = document.createElement('pre'); pre.textContent = t; body.innerHTML = ''; body.appendChild(pre); }
+    catch (err) { if (token === previewToken) body.innerHTML = '<div class="note">' + escapeHtml(err.message) + '</div>'; }
+  }
+}
+function closePreview() { $('modal').classList.remove('show'); $('mbody').innerHTML = ''; previewIdx = -1; previewList = []; }
+
+// ---- text editor (config files etc.) ----
+async function openEditor(e) {
+  if (!canWrite()) { toast('Read-only — editing is disabled', true); return; }
+  editing = e;
+  $('ed-title').textContent = e.name;
+  const area = $('ed-area'); area.value = ''; area.disabled = true;
+  $('editor').classList.add('show');
+  // Fetch raw bytes directly (not via api(), which would JSON-parse .json).
+  try {
+    const r = await fetch('/api/raw?path=' + enc(join(cwd, e.name)));
+    if (r.status === 401) { location.href = '/login'; return; }
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    area.value = await r.text(); area.disabled = false; area.focus();
+  } catch (err) { toast(err.message, true); closeEditor(); }
+}
+async function saveEditor() {
+  if (!editing) return;
+  const name = editing.name;
+  try {
+    const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name),
+                          { method: 'PUT', body: $('ed-area').value });
+    if (r.status === 401) { location.href = '/login'; return; }
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    toast('Saved ' + name); closeEditor(); go(cwd);
+  } catch (err) { toast('Save failed: ' + err.message, true); }
+}
+function closeEditor() { $('editor').classList.remove('show'); $('ed-area').value = ''; editing = null; }
+
+// ---- uploads (XHR so we get upload progress) ----
+function showUpload() { $('uploadbar').classList.add('show'); }
+function hideUpload() { $('uploadbar').classList.remove('show'); $('ub-fill').style.width = '0'; }
+function setUpload(name, idx, n, overallFrac, filePct) {
+  $('ub-name').textContent = `${name}  (${idx}/${n})`;
+  $('ub-pct').textContent = filePct + '%';
+  $('ub-fill').style.width = (overallFrac * 100).toFixed(1) + '%';
+}
+function putFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', '/api/upload?path=' + enc(cwd) + '&name=' + enc(file.name));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      if (xhr.status === 401) { location.href = '/login'; return; }
+      (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(xhr.responseText || xhr.statusText));
+    };
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.send(file);
+  });
+}
+async function uploadFiles(fileList) {
+  const files = [...fileList]; if (!files.length) return;
+  showUpload();
+  let done = 0;
+  for (const f of files) {
+    const overall = (frac) => (done + frac) / files.length;
+    setUpload(f.name, done + 1, files.length, overall(0), 0);
+    try {
+      await putFile(f, (frac) => setUpload(f.name, done + 1, files.length, overall(frac), Math.round(frac * 100)));
+      done++;
+    } catch (e) { hideUpload(); toast('Upload failed: ' + e.message, true); go(cwd); return; }
+  }
+  hideUpload();
+  toast('Uploaded ' + done + ' file(s)');
+  go(cwd);
+}
+
+// ---- context menu ----
+function openMenu(x, y) {
+  const m = $('menu'); const n = selection.size;
+  const w = canWrite();
+  // The single selected entry, if exactly one — used to gate text editing.
+  const selEntry = n === 1 ? view.find(e => e.name === [...selection][0]) : null;
+  const canEdit = !!(selEntry && isTxt(selEntry) && w);
+  const items = [
+    { label: '＋ New Folder', fn: doMkdir, off: !w },
+    { label: '⬆ Upload Files', fn: () => $('filepick').click(), off: !w },
+    { label: '⬇ Download Selected', fn: doDownload, off: n < 1 },
+    'sep',
+    { label: '✂ Cut', fn: doCut, off: n < 1 || !w },
+    { label: '⧉ Copy', fn: doCopy, off: n < 1 || !w },
+    { label: '⤵ Paste', fn: doPaste, off: !clipboard || !w },
+    'sep',
+    { label: '🗑 Delete', fn: doDelete, off: n < 1 || !canDelete() },
+    { label: '✎ Rename', fn: doRename, off: n !== 1 || !w },
+    { label: '📝 Edit', fn: () => openEditor(selEntry), off: !canEdit },
+    'sep',
+    { label: '↻ Refresh', fn: () => go(cwd) },
+  ];
+  m.innerHTML = '';
+  for (const it of items) {
+    if (it === 'sep') { const s = document.createElement('div'); s.className = 'sep'; m.appendChild(s); continue; }
+    const d = document.createElement('div'); d.className = 'mi' + (it.off ? ' disabled' : ''); d.textContent = it.label;
+    if (!it.off) d.onclick = () => { closeMenu(); it.fn(); };
+    m.appendChild(d);
+  }
+  m.style.display = 'block';
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.min(x, innerWidth - r.width - 8) + 'px';
+  m.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
+}
+function closeMenu() { $('menu').style.display = 'none'; }
+
+// ---- status tab (live input) ----
+const held = new Map(), axes = new Map();
+function renderHeld() { const b = $('buttons'); b.innerHTML = '';
+  for (const l of held.values()) { const s = document.createElement('span'); s.className = 'pill on'; s.textContent = l; b.appendChild(s); } }
+function renderAxes() { const a = $('axes'); a.innerHTML = '';
+  for (const [k,v] of [...axes.entries()].sort()) { const kk=document.createElement('div'); kk.textContent=k;
+    const vv=document.createElement('div'); vv.className='v'; vv.textContent=v; a.appendChild(kk); a.appendChild(vv); } }
+function ilog(s){ const l=$('ilog'); l.textContent=(s+'\n'+l.textContent).slice(0,4000); }
+let es = null;
+function startInput() {
+  if (es) return; es = new EventSource('/events');
+  es.onmessage = (ev) => { const e = JSON.parse(ev.data); const id = e.device + ':' + e.name;
+    if (e.kind === 'button') { e.state === 'down' ? held.set(id, e.name) : e.state === 'up' && held.delete(id); renderHeld(); ilog(e.name+' ('+e.code+') '+e.state); }
+    else if (e.name.indexOf('HAT') !== -1) { e.value === 0 ? held.delete(id) : held.set(id, e.name+' '+(e.value>0?'+':'-')); renderHeld(); ilog(e.name+' = '+e.value); }
+    else { axes.set(e.name, e.value); renderAxes(); } };
+}
+async function loadConn() {
+  try { const i = await api('GET', '/api/info');
+    $('conn').innerHTML =
+      'Device IP: <b>' + i.ip + ':' + i.port + '</b><br>' +
+      'WebDAV mount: <a href="' + i.dav + '">' + i.dav + '</a><br>' +
+      'Serving: ' + escapeHtml(i.root) + '<br>' +
+      'Screen: ' + escapeHtml(i.screen);
+  } catch (e) { $('conn').textContent = e.message; }
+}
+
+// ---- settings (read-only view) ----
+async function loadSettings() {
+  try {
+    const s = await api('GET', '/api/settings');
+    const row = (k, v) => k + ': <b>' + v + '</b>';
+    $('set-view').innerHTML = [
+      row('Password', s.password ? 'fixed code' : 'random (new each launch)'),
+      row('Show code on screen', s.display_password ? 'yes' : 'no'),
+      row('Permission', s.permission),
+      row('Default folder', s.default_folder || '(Home)'),
+      row('Root', s.root || '(default)'),
+    ].join('<br>');
+  } catch (e) { $('set-view').textContent = e.message; }
+}
+
+// ---- view switching ----
+function showView(v) {
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === v));
+  $('view-files').style.display = v === 'files' ? 'flex' : 'none';
+  $('view-status').style.display = v === 'status' ? 'block' : 'none';
+  $('view-settings').style.display = v === 'settings' ? 'block' : 'none';
+  if (v === 'status') { loadConn(); startInput(); }
+  if (v === 'settings') loadSettings();
+}
+
+// ---- wire up ----
+$('t-up').onclick = () => $('filepick').click();
+$('t-mkdir').onclick = doMkdir;
+$('t-dl').onclick = doDownload;
+$('t-rename').onclick = doRename;
+$('t-cut').onclick = doCut; $('t-copy').onclick = doCopy; $('t-paste').onclick = doPaste;
+$('t-del').onclick = doDelete; $('t-refresh').onclick = () => go(cwd);
+$('v-list').onclick = () => setView('list'); $('v-grid').onclick = () => setView('grid');
+$('t-hidden').onclick = () => { showHidden = !showHidden; $('t-hidden').classList.toggle('on', showHidden);
+  selection = new Set(); lastIndex = null; rebuild(); syncToolbar(); };
+$('ed-save').onclick = saveEditor;
+$('ed-close').onclick = closeEditor;
+$('filepick').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
+$('i-clear').onclick = () => { held.clear(); axes.clear(); $('ilog').textContent=''; renderHeld(); renderAxes(); };
+document.querySelectorAll('nav a').forEach(a => a.onclick = () => showView(a.dataset.view));
+$('mclose').onclick = closePreview;
+$('modal').onclick = (e) => { if (e.target === $('modal')) closePreview(); };
+document.addEventListener('keydown', (e) => {
+  // Editor captures its own keys (don't let Esc bubble to the file list).
+  if ($('editor').classList.contains('show')) {
+    if (e.key === 'Escape') { e.preventDefault(); closeEditor(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveEditor(); }
+    return;
+  }
+  if (e.key === 'Escape') { closePreview(); closeMenu(); return; }
+  if ($('modal').classList.contains('show')) {
+    if (e.key === 'ArrowRight') { e.preventDefault(); navigatePreview(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); navigatePreview(-1); }
+  }
+});
+
+// click-away to clear selection / close menu
+document.addEventListener('click', (e) => { closeMenu();
+  if (e.target.closest('#view-files .listwrap') && !e.target.closest('tr') && !e.target.closest('.gcard')) {
+    selection = new Set(); render(); syncToolbar(); } });
+$('listwrap').oncontextmenu = (e) => { if (!e.target.closest('tr') && !e.target.closest('.gcard')) {
+  e.preventDefault(); selection = new Set(); render(); syncToolbar(); openMenu(e.clientX, e.clientY); } };
+
+// drag & drop upload
+const main = document.querySelector('main'); let dragDepth = 0;
+['dragenter','dragover'].forEach(ev => main.addEventListener(ev, (e) => {
+  if (![...e.dataTransfer.types].includes('Files')) return; e.preventDefault();
+  if (ev === 'dragenter') dragDepth++; $('drop').classList.add('show');
+}));
+main.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop').classList.remove('show'); } });
+main.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; $('drop').classList.remove('show');
+  if (!e.dataTransfer.files.length) return;
+  if (!canWrite()) { toast('Read-only — uploads are disabled', true); return; }
+  uploadFiles(e.dataTransfer.files); });
+
+// Read settings (permission + default folder) before the first listing.
+(async () => {
+  try { const s = await api('GET', '/api/settings'); perm = s.permission || 'read_write'; defaultFolder = s.default_folder || ''; }
+  catch (e) { /* fall back to defaults */ }
+  go(defaultFolder);
+})();
+</script>
+</body>
+</html>

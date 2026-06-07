@@ -1,0 +1,3 @@
+Build amber-dav and copy the binary here:
+  cargo zigbuild --release --target aarch64-unknown-linux-musl
+  cp target/aarch64-unknown-linux-musl/release/amber-dav ./amber-dav
