@@ -10,6 +10,9 @@ use crate::{auth::Session, AppState};
 /// GitHub repo to check for releases.
 const REPO: &str = "KyleJamesWalker/AmberDAV";
 
+static UPDATE_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Returns the release asset name for the current platform, or `None` if the
 /// platform is not a known release target.
 pub fn asset_name() -> Option<&'static str> {
@@ -121,7 +124,30 @@ pub async fn apply(
 }
 
 async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use std::sync::atomic::Ordering;
+    if UPDATE_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("an update is already in progress".into());
+    }
+    // Ensure we always clear the flag when this function returns.
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            UPDATE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _guard = Guard;
+
     let exe = std::env::current_exe()?;
+    // Guard against SSRF: only allow GitHub release asset domains.
+    let allowed = asset_url.starts_with("https://github.com/")
+        || asset_url.starts_with("https://objects.githubusercontent.com/")
+        || asset_url.starts_with("https://github-releases.githubusercontent.com/");
+    if !allowed {
+        return Err("asset_url must be a github.com release asset".into());
+    }
     let new_path = exe.with_extension("new");
     let old_path = exe.with_extension("old");
 
@@ -153,7 +179,12 @@ async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error +
 
     // Atomic rename dance: current → .old, .new → current.
     std::fs::rename(&exe, &old_path)?;
-    std::fs::rename(&new_path, &exe)?;
+    if let Err(e) = std::fs::rename(&new_path, &exe) {
+        // Best-effort rollback: restore the old binary.
+        let _ = std::fs::rename(&old_path, &exe);
+        let _ = std::fs::remove_file(&new_path);
+        return Err(e.into());
+    }
 
     Ok(format!(
         "Update applied. Old binary saved as {}. Restart the app to use the new version.",
