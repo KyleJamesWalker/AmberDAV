@@ -412,8 +412,7 @@ function renderCrumbs() {
 }
 
 function attachRowEvents(el, e, idx) {
-  el.onclick = (ev) => onRowClick(ev, e, idx);
-  el.ondblclick = () => onRowOpen(e);
+  el.onclick = (ev) => { if (ev.detail >= 2) { onRowOpen(e); return; } onRowClick(ev, e, idx); };
   el.oncontextmenu = (ev) => { ev.preventDefault();
     if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; render(); syncToolbar(); }
     openMenu(ev.clientX, ev.clientY); };
