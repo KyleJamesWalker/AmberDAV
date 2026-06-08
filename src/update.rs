@@ -103,13 +103,62 @@ async fn fetch_latest_release() -> Result<GhRelease, reqwest::Error> {
         .await
 }
 
-/// POST /api/update/apply
+/// POST /api/update/apply — downloads asset_url and replaces the running binary.
+/// The running process is NOT restarted; caller must relaunch after this returns Ok.
 pub async fn apply(
     _: Session,
     _: State<AppState>,
-    Json(_body): Json<ApplyRequest>,
+    Json(body): Json<ApplyRequest>,
 ) -> Response {
-    todo!()
+    match do_apply(&body.asset_url).await {
+        Ok(msg) => Json(ApplyResult { ok: true, message: msg }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApplyResult { ok: false, message: e.to_string() }),
+        )
+            .into_response(),
+    }
+}
+
+async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let exe = std::env::current_exe()?;
+    let new_path = exe.with_extension("new");
+    let old_path = exe.with_extension("old");
+
+    // Stream download to <exe>.new
+    let resp = reqwest::Client::builder()
+        .user_agent("amber-dav")
+        .build()?
+        .get(asset_url)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let mut file = tokio::fs::File::create(&new_path).await?;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        file.write_all(&chunk?).await?;
+    }
+    file.flush().await?;
+    drop(file);
+
+    // Make the new binary executable (no-op on Windows).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&new_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&new_path, perms)?;
+    }
+
+    // Atomic rename dance: current → .old, .new → current.
+    std::fs::rename(&exe, &old_path)?;
+    std::fs::rename(&new_path, &exe)?;
+
+    Ok(format!(
+        "Update applied. Old binary saved as {}. Restart the app to use the new version.",
+        old_path.display()
+    ))
 }
 
 #[cfg(test)]
