@@ -43,6 +43,7 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         "dav": format!("http://{}:{}{}", ip, info.port, crate::webdav::MOUNT),
         "root": state.root.to_string_lossy(),
         "screen": screen,
+        "version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response()
 }

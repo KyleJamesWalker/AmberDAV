@@ -8,6 +8,7 @@ mod input;
 mod password;
 mod screen;
 mod ui;
+mod update;
 mod webdav;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};
@@ -186,6 +187,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/move", post(files::move_))
         .route("/api/copy", post(files::copy))
         .route("/api/settings", get(ui::get_settings))
+        .route("/api/update/check", get(update::check))
+        .route("/api/update/apply", post(update::apply))
         // `any` routes every method — including WebDAV's PROPFIND/MKCOL/etc.
         // The wildcard matches one-or-more segments, so the collection root
         // (`/dav` and `/dav/`) needs its own routes for clients to mount it.
