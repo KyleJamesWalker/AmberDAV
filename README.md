@@ -1,13 +1,14 @@
-# amber-dav
+# AmberDAV
 
-A tiny, single-binary file server and utility for Anbernic handhelds. Point a
-browser at the device and you get a full file manager; mount it as a
-network drive over WebDAV; and read the device's IP, password, and a scannable
-QR code straight off the handheld's own screen — no need to know its IP first.
+A tiny, single-binary file server and utility originally designed for Anbernic
+handhelds, but expanded to Windows and macOS. Point a browser at the device
+and you get a full file manager; mount it as a network drive over WebDAV;
+and read the device's IP, password, and a scannable QR code straight off
+the device's screen, or terminal.
 
 Built and tested on the **RG35XX Pro** and **RG34XXSP** (Allwinner H700 /
 aarch64, stock Anbernic OS). The whole thing is one statically-linked binary
-with no runtime dependencies — drop it on the SD card and run it.
+with no runtime dependencies.
 
 ## Features
 
@@ -74,14 +75,14 @@ Each [GitHub Release](../../releases) ships a prebuilt binary per platform:
 | `amber-dav-x86_64-macos` | macOS, Intel |
 | `amber-dav-x86_64-windows` | Windows |
 
-Note: macOS/Windows binaries are headless — a quick way to host a folder as a file
-server + WebDAV mount from a desktop:
+Note: macOS/Windows binaries are simple CLI tools that write to stdout — a
+quick way to host a folder as a file server + WebDAV mount from a desktop:
 
 ```sh
 amber-dav /path/to/folder 8080   # serve <folder> on http://localhost:8080/
 ```
 
-## Install on the device
+## Install on Anbernic device
 
 The stock OS launches apps from `Roms/APPS/` on the SD card: a `*.sh` script
 there appears in the Apps menu, and the filename becomes the menu label. This
@@ -173,9 +174,7 @@ Edit it on the SD card or over WebDAV, then relaunch the app to apply changes.
 `display_password`, `root`, and `bounce_screen` are bound at boot — relaunch to
 apply.
 
-## On-device controls
-
-The gamepad drives the app directly, no browser needed:
+## Device controls
 
 | Button | evdev code | Action |
 |--------|:---:|--------|
@@ -191,7 +190,27 @@ configured it simply blanks to black, which still protects the panel.
 
 Override the quit key with `AMBERDAV_EXIT_KEY=<code>` if your device differs.
 
-## Updating a running device over WebDAV
+## Updating via the web UI
+
+The **Settings tab** has a Software Update card. Click **Check for update** and
+AmberDAV queries the GitHub Releases API to compare the running version against
+the latest release. If a newer build is available, click **Apply update** to
+download and install it in place:
+
+1. The matching platform binary is downloaded from GitHub Releases.
+2. The current binary is renamed to `amber-dav.old` (in the same directory),
+   replacing any previous `.old` file.
+3. The new binary is moved into place.
+4. Relaunch the app to run the new version — the process is **not** restarted
+   automatically.
+
+If anything goes wrong during the rename step, the original binary is restored.
+
+> The update check and apply are only available on the four prebuilt platforms
+> (aarch64-linux, aarch64-macos, x86_64-macos, x86_64-windows). Custom builds
+> will see a "no asset for this platform" response.
+
+## Updating via WebDAV (local builds)
 
 You can replace the binary without pulling the SD card. Because you can't write
 over a running executable (`ETXTBSY`), upload to a temp name and `MOVE` it into
@@ -248,6 +267,7 @@ level is enforced on every mutating request.
 | `src/input.rs` | evdev reader → broadcast channel; drives screen controls (Linux only) |
 | `src/screen.rs` | draws IP/password/QR to `/dev/fb0`; blank + bounce screensaver (Linux only) |
 | `src/ui.rs` | landing/login pages, status/info endpoint, settings (read-only), SSE stream |
+| `src/update.rs` | in-app update: GitHub Releases check + binary download/rename dance |
 | `src/password.rs` | per-boot password generator |
 | `src/web/` | `login.html`, `app.html` (the single-page file manager) |
 | `example_APPS/` | ready-to-copy `WebDAV.sh` launcher + SD-card layout |
@@ -255,4 +275,3 @@ level is enforced on every mutating request.
 ## License
 
 MIT — see `LICENSE`.
-```
