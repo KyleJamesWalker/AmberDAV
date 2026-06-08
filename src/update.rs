@@ -186,6 +186,8 @@ async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error +
     }
 
     // Atomic rename dance: current → .old, .new → current.
+    // Remove stale .old first — Windows rename fails if the destination exists.
+    let _ = std::fs::remove_file(&old_path);
     std::fs::rename(&exe, &old_path)?;
     if let Err(e) = std::fs::rename(&new_path, &exe) {
         // Best-effort rollback: restore the old binary.
