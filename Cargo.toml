@@ -1,7 +1,7 @@
 [package]
 name = "amber-dav"
 # Version passed at build time by GHA
-version = "0.0.7"
+version = "0.0.0"
 edition = "2021"
 
 [dependencies]
