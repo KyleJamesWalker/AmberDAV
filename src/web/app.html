@@ -50,8 +50,9 @@
 
   /* main */
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; background: var(--bg); }
+  .crumbs-row { display: flex; align-items: center; border-bottom: 1px solid var(--line-soft); }
   .crumbs {
-    font-family: var(--mono); font-size: .85rem; padding: .9rem 1.2rem; border-bottom: 1px solid var(--line-soft);
+    font-family: var(--mono); font-size: .85rem; padding: .9rem 1.2rem; flex: 1;
     display: flex; align-items: center; gap: .2rem; flex-wrap: wrap; color: var(--muted);
   }
   .crumbs .seg { color: var(--amber); cursor: pointer; padding: .1rem .25rem; border-radius: 5px; }
@@ -189,6 +190,28 @@
     font-family: var(--mono); font-size: .82rem; color: var(--text); }
   .mbody .note { color: var(--muted); font-family: var(--mono); }
 
+  /* hamburger toggle (mobile only) */
+  .menu-toggle {
+    display: none; background: none; border: none; color: var(--muted);
+    font-size: 1.25rem; cursor: pointer; padding: .35rem .6rem; line-height: 1;
+    border-radius: 6px; flex: none;
+  }
+  .menu-toggle:hover { color: var(--text); background: rgba(255,255,255,.04); }
+
+  /* dim overlay behind open sidebar on mobile */
+  .side-overlay { display: none; position: fixed; inset: 0; z-index: 79; background: rgba(0,0,0,.5); }
+  .side-overlay.show { display: block; }
+
+  @media (max-width: 680px) {
+    body { grid-template-columns: 1fr; }
+    aside {
+      position: fixed; left: -240px; top: 0; bottom: 0; width: 224px;
+      z-index: 80; transition: left .22s ease;
+    }
+    aside.open { left: 0; }
+    .menu-toggle { display: inline-flex; align-items: center; }
+  }
+
   /* text editor */
   .editor { position: fixed; inset: 0; z-index: 75; display: none; flex-direction: column;
     background: rgba(8,9,12,.96); backdrop-filter: blur(3px); }
@@ -217,10 +240,14 @@
 
   <main>
     <section id="view-files" style="display:flex;flex-direction:column;flex:1;min-height:0;">
-      <div class="crumbs" id="crumbs"></div>
+      <div class="crumbs-row">
+        <button class="menu-toggle" id="menu-toggle" title="Menu">☰</button>
+        <div class="crumbs" id="crumbs"></div>
+      </div>
       <div class="toolbar">
         <button class="tbtn primary" id="t-up">⬆ Upload</button>
         <button class="tbtn" id="t-mkdir">＋ New Folder</button>
+        <button class="tbtn" id="t-open" disabled>↗ Open</button>
         <button class="tbtn" id="t-dl" disabled>⬇ Download</button>
         <button class="tbtn" id="t-rename" disabled>✎ Rename</button>
         <button class="tbtn" id="t-cut" disabled>✂ Cut</button>
@@ -270,6 +297,7 @@
     </section>
   </main>
 
+  <div class="side-overlay" id="side-overlay"></div>
   <div class="menu" id="menu"></div>
   <input type="file" id="filepick" multiple style="display:none;">
   <div class="toast" id="toast"></div>
@@ -481,6 +509,7 @@ function syncToolbar() {
   const n = selection.size, w = canWrite();
   $('t-up').disabled = !w;
   $('t-mkdir').disabled = !w;
+  $('t-open').disabled = n !== 1;
   $('t-dl').disabled = n < 1;   // download (read) always allowed
   $('t-rename').disabled = n !== 1 || !w;
   $('t-cut').disabled = n < 1 || !w;
@@ -513,6 +542,11 @@ function onRowOpen(e) {
 
 // ---- actions ----
 function selectedPaths() { return [...selection].map(n => join(cwd, n)); }
+function doOpen() {
+  const names = [...selection]; if (names.length !== 1) return;
+  const e = entries.find(x => x.name === names[0]);
+  if (e) onRowOpen(e);
+}
 function downloadPaths(paths) {
   paths.forEach((p, i) => setTimeout(() => {
     const a = document.createElement('a'); a.href = '/api/download?path=' + enc(p); a.download = '';
@@ -761,6 +795,7 @@ function showView(v) {
 // ---- wire up ----
 $('t-up').onclick = () => $('filepick').click();
 $('t-mkdir').onclick = doMkdir;
+$('t-open').onclick = doOpen;
 $('t-dl').onclick = doDownload;
 $('t-rename').onclick = doRename;
 $('t-cut').onclick = doCut; $('t-copy').onclick = doCopy; $('t-paste').onclick = doPaste;
@@ -772,7 +807,16 @@ $('ed-save').onclick = saveEditor;
 $('ed-close').onclick = closeEditor;
 $('filepick').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
 $('i-clear').onclick = () => { held.clear(); axes.clear(); $('ilog').textContent=''; renderHeld(); renderAxes(); };
-document.querySelectorAll('nav a').forEach(a => a.onclick = () => showView(a.dataset.view));
+function closeSidebar() {
+  document.querySelector('aside').classList.remove('open');
+  $('side-overlay').classList.remove('show');
+}
+$('menu-toggle').onclick = () => {
+  const open = document.querySelector('aside').classList.toggle('open');
+  $('side-overlay').classList.toggle('show', open);
+};
+$('side-overlay').onclick = closeSidebar;
+document.querySelectorAll('nav a').forEach(a => a.onclick = () => { showView(a.dataset.view); closeSidebar(); });
 $('mclose').onclick = closePreview;
 $('modal').onclick = (e) => { if (e.target === $('modal')) closePreview(); };
 document.addEventListener('keydown', (e) => {
