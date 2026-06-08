@@ -71,7 +71,9 @@ jobs:
 
       - name: Install Zig
         if: matrix.zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
+        with:
+          zig-version: "0.16.0"
 
       - name: Install cargo-zigbuild
         if: matrix.zig
