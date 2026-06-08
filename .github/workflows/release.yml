@@ -35,11 +35,13 @@ jobs:
             target: aarch64-unknown-linux-musl
             asset: amber-dav-aarch64-linux
             zig: true
-          # Desktop CLI builds (native on each runner).
+          # Desktop CLI builds. Both macOS targets run on macos-latest (Apple
+          # Silicon); x86_64-apple-darwin is cross-compiled — the Apple SDK on
+          # arm64 runners supports both architectures, so no special linker needed.
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: amber-dav-aarch64-macos
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             asset: amber-dav-x86_64-macos
           - os: windows-latest
