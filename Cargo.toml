@@ -19,6 +19,13 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = { version = "0.3", features = ["io"] }
 async_zip = { version = "0.0.18", features = ["tokio", "deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# CLI parsing and free --help/--version. (Env-var fallbacks are resolved
+# manually so CLI > env > file > default precedence stays predictable, including
+# for the positional root/port args.)
+clap = { version = "4", features = ["derive"] }
+# Platform-standard config directory for desktop/server (non-handheld) builds.
+# Only referenced under cfg(not(feature = "handheld")); idle weight otherwise.
+directories = "6"
 
 # The handheld feature gates the on-device UI (framebuffer screen + gamepad
 # input + the DVD-bounce screensaver). Opt-in, not default: headless desktop
