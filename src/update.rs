@@ -1,6 +1,11 @@
 //! In-app update: check the GitHub Releases API and apply a downloaded binary.
 
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -108,16 +113,19 @@ async fn fetch_latest_release() -> Result<GhRelease, reqwest::Error> {
 
 /// POST /api/update/apply — downloads asset_url and replaces the running binary.
 /// The running process is NOT restarted; caller must relaunch after this returns Ok.
-pub async fn apply(
-    _: Session,
-    _: State<AppState>,
-    Json(body): Json<ApplyRequest>,
-) -> Response {
+pub async fn apply(_: Session, _: State<AppState>, Json(body): Json<ApplyRequest>) -> Response {
     match do_apply(&body.asset_url).await {
-        Ok(msg) => Json(ApplyResult { ok: true, message: msg }).into_response(),
+        Ok(msg) => Json(ApplyResult {
+            ok: true,
+            message: msg,
+        })
+        .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApplyResult { ok: false, message: e.to_string() }),
+            Json(ApplyResult {
+                ok: false,
+                message: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -219,7 +227,13 @@ mod tests {
         let exe = std::path::PathBuf::from("/some/dir/amber-dav");
         let new_path = exe.with_extension("new");
         let old_path = exe.with_extension("old");
-        assert_eq!(new_path, std::path::PathBuf::from("/some/dir/amber-dav.new"));
-        assert_eq!(old_path, std::path::PathBuf::from("/some/dir/amber-dav.old"));
+        assert_eq!(
+            new_path,
+            std::path::PathBuf::from("/some/dir/amber-dav.new")
+        );
+        assert_eq!(
+            old_path,
+            std::path::PathBuf::from("/some/dir/amber-dav.old")
+        );
     }
 }
