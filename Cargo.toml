@@ -18,6 +18,7 @@ serde_json = "1"
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = { version = "0.3", features = ["io"] }
 async_zip = { version = "0.0.18", features = ["tokio", "deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Linux-only: the binary only ever runs on the device.
 [target.'cfg(target_os = "linux")'.dependencies]

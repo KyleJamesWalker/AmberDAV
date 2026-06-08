@@ -8,6 +8,7 @@ mod input;
 mod password;
 mod screen;
 mod ui;
+mod update;
 mod webdav;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};
