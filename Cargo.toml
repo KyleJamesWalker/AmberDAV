@@ -20,14 +20,21 @@ futures-util = { version = "0.3", features = ["io"] }
 async_zip = { version = "0.0.18", features = ["tokio", "deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# Linux-only: the binary only ever runs on the device.
+# The handheld feature gates the on-device UI (framebuffer screen + gamepad
+# input + the DVD-bounce screensaver). Opt-in, not default: headless desktop
+# and server builds leave it off and ship without the device-only deps.
+[features]
+handheld = ["dep:evdev", "dep:framebuffer", "dep:font8x8", "dep:image"]
+
+# Device-only deps. Linux-only crates (framebuffer/evdev), pulled in solely by
+# the `handheld` feature, which is only ever built for the aarch64 device.
 [target.'cfg(target_os = "linux")'.dependencies]
-evdev = { version = "0.13", features = ["tokio"] }
-framebuffer = "0.3"
-font8x8 = "0.3"
+evdev = { version = "0.13", features = ["tokio"], optional = true }
+framebuffer = { version = "0.3", optional = true }
+font8x8 = { version = "0.3", optional = true }
 # Decodes images for the burn-in "DVD bounce" screensaver. Pure-Rust decoders
 # only, so the static musl build keeps working.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"], optional = true }
 
 # Small, static-friendly release binary for the handhelds.
 [profile.release]

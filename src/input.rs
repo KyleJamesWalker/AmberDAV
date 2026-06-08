@@ -1,6 +1,7 @@
-//! Gamepad/button input. On Linux we read `/dev/input/event*` via evdev and
-//! publish every event to a broadcast channel for the live web view.
-//! On non-Linux hosts (dev machines) this compiles to a no-op stub.
+//! Gamepad/button input. On handheld builds we read `/dev/input/event*` via
+//! evdev and publish every event to a broadcast channel for the live web view.
+//! Without the `handheld` feature (desktop/server builds, dev machines) this
+//! compiles to a no-op stub.
 //!
 //! Buttons/keys arrive as `EV_KEY`; the d-pad and analog sticks arrive as
 //! `EV_ABS` absolute axes (e.g. ABS_HAT0X for the d-pad, ABS_X/Y for sticks),
@@ -27,7 +28,7 @@ pub struct InputUpdate {
 
 /// evdev key code that quits the app. Default 354 = KEY_GOTO, the Anbernic
 /// menu/function button. Override with AMBERDAV_EXIT_KEY.
-#[cfg(target_os = "linux")]
+#[cfg(feature = "handheld")]
 fn exit_key() -> u16 {
     std::env::var("AMBERDAV_EXIT_KEY")
         .ok()
@@ -35,7 +36,7 @@ fn exit_key() -> u16 {
         .unwrap_or(354)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "handheld")]
 pub fn spawn(
     tx: broadcast::Sender<InputUpdate>,
     mode: crate::screen::ModeHandle,
@@ -128,11 +129,11 @@ pub fn spawn(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(feature = "handheld"))]
 pub fn spawn(
     _tx: broadcast::Sender<InputUpdate>,
     _mode: crate::screen::ModeHandle,
     _bounce_enabled: bool,
 ) {
-    eprintln!("input: evdev is Linux-only; live input view disabled on this host");
+    eprintln!("input: gamepad support is a handheld-only feature; live input view disabled");
 }

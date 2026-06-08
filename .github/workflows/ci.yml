@@ -28,16 +28,25 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # The Linux-only screen/input code (evdev, framebuffer, font8x8, image)
-      # compiles on the Ubuntu runner, so CI exercises the device code paths.
       - name: Format check
         run: cargo fmt --all -- --check
 
+      # Default (headless) build: the server/desktop configuration, no
+      # device-only deps. This is what the x86_64-linux release asset ships.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --all-targets
+
+      # The device-only screen/input code (evdev, framebuffer, font8x8, image)
+      # is gated behind --features handheld, so exercise it explicitly here —
+      # this mirrors the aarch64-linux release asset's feature set.
+      - name: Clippy (handheld)
+        run: cargo clippy --all-targets --features handheld -- -D warnings
+
+      - name: Test (handheld)
+        run: cargo test --all-targets --features handheld
 
   # The macOS/Windows CLI builds ship as release assets, so make sure they keep
   # compiling on every change — the device's Linux-only code is cfg'd out there.

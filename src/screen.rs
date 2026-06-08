@@ -1,6 +1,7 @@
 //! On-device screen output. Draws the connection info (IP, password) and a QR
 //! code straight to the Linux framebuffer (`/dev/fb0`) so the handheld is
-//! usable without already knowing its IP. Linux-only; a no-op elsewhere.
+//! usable without already knowing its IP. Compiled in only with the `handheld`
+//! feature; a no-op stub otherwise (desktop/server builds).
 //!
 //! The displayed mode is shared with the input thread so the gamepad can drive
 //! it: the A button blanks the screen, and the X button starts a "DVD bounce"
@@ -19,6 +20,9 @@ use std::{
 pub type Status = Arc<Mutex<String>>;
 
 /// What the screen is currently showing. Toggled live from the input thread.
+// The Black/Bounce variants are only constructed on handheld builds (and in
+// tests); the headless stub never leaves Info.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     /// Connection info + QR code (the default).
@@ -33,7 +37,9 @@ pub enum Mode {
 pub type ModeHandle = Arc<Mutex<Mode>>;
 
 /// evdev key codes for the face buttons that drive the screen.
+#[allow(dead_code)] // read by the handheld input thread only
 pub const BTN_SOUTH: u16 = 304; // "A" → blank
+#[allow(dead_code)] // read by the handheld input thread only
 pub const BTN_NORTH: u16 = 307; // "X" → bounce screensaver
 
 /// Create the shared mode handle (starts on [`Mode::Info`]).
@@ -43,6 +49,7 @@ pub fn mode_handle() -> ModeHandle {
 
 /// Toggle between `target` and [`Mode::Info`]: pressing the button again (or
 /// the other mode's button) returns to the info screen.
+#[allow(dead_code)] // driven by the handheld input thread; also exercised in tests
 pub fn toggle(handle: &ModeHandle, target: Mode) {
     if let Ok(mut m) = handle.lock() {
         *m = if *m == target { Mode::Info } else { target };
@@ -55,7 +62,7 @@ fn set(status: &Status, msg: String) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "handheld")]
 pub fn show(
     port: u16,
     password: Option<String>,
@@ -135,7 +142,7 @@ pub fn show(
     });
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(feature = "handheld"))]
 pub fn show(
     _port: u16,
     _password: Option<String>,
@@ -143,12 +150,12 @@ pub fn show(
     _mode: ModeHandle,
     _bounce_paths: Vec<PathBuf>,
 ) {
-    set(&status, "disabled (non-Linux build)".to_string());
+    set(&status, "disabled (headless build)".to_string());
 }
 
 /// Logical canvas dimensions for a given rotation and physical resolution.
 /// For 90/270 the canvas is authored landscape then turned to fit the panel.
-#[allow(dead_code)] // used on Linux (device) builds and in tests
+#[allow(dead_code)] // used on handheld (device) builds and in tests
 fn logical_dims(rot: u32, xres: usize, yres: usize) -> (usize, usize) {
     if rot == 90 || rot == 270 {
         (yres, xres)
@@ -158,7 +165,7 @@ fn logical_dims(rot: u32, xres: usize, yres: usize) -> (usize, usize) {
 }
 
 /// Inverse rotation map: physical pixel (px,py) -> source logical pixel (lx,ly).
-#[allow(dead_code)] // used on Linux (device) builds and in tests
+#[allow(dead_code)] // used on handheld (device) builds and in tests
 fn logical_coords(
     rot: u32,
     px: usize,
@@ -216,7 +223,7 @@ mod tests {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "handheld")]
 mod imp {
     use std::net::IpAddr;
     use std::path::PathBuf;

@@ -4,14 +4,18 @@ name: Release
 # `gh release create`). The release tag drives the version; this workflow builds
 # a binary per platform and attaches each to the release.
 #
-#   amber-dav-aarch64-linux    static musl build for the Anbernic device
+#   amber-dav-aarch64-linux-handheld  static musl build for the Anbernic device
+#   amber-dav-aarch64-linux           static musl build for ARM servers/Pi/NAS (headless)
+#   amber-dav-x86_64-linux            static musl build for x86 servers/NAS (headless)
 #   amber-dav-aarch64-macos    Apple Silicon CLI build
 #   amber-dav-x86_64-macos     Intel macOS CLI build
 #   amber-dav-x86_64-windows   Windows CLI build
+#   amber-dav-aarch64-windows  ARM Windows CLI build (Snapdragon/Copilot+ PCs)
 #
-# Off-Linux the on-device UI (framebuffer/gamepad) is compiled out, so the
-# macOS/Windows binaries are headless WebDAV/file-server CLIs for hosting a
-# folder from a desktop.
+# Assets follow `amber-dav-<arch>-<os>[-handheld]`. Only the `-handheld` asset is
+# built with `--features handheld` (the on-device framebuffer screen + gamepad
+# input); every other asset is a plain headless WebDAV/file-server CLI with the
+# device-only deps left out entirely.
 on:
   release:
     types: [published]
@@ -31,9 +35,23 @@ jobs:
       matrix:
         include:
           # Device build: fully static aarch64 musl, cross-linked with Zig.
+          # The only build with --features handheld (framebuffer + gamepad UI).
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset: amber-dav-aarch64-linux-handheld
+            features: handheld
+            zig: true
+          # Headless ARM server build: same aarch64 musl target, no handheld
+          # feature. For Raspberry Pi, ARM NAS, and ARM cloud (Graviton/Ampere).
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             asset: amber-dav-aarch64-linux
+            zig: true
+          # Headless x86 server build: fully static musl, cross-linked with Zig.
+          # For NAS boxes, home servers, Docker — no device-only deps compiled in.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: amber-dav-x86_64-linux
             zig: true
           # Desktop CLI builds. Both macOS targets run on macos-latest (Apple
           # Silicon); x86_64-apple-darwin is cross-compiled — the Apple SDK on
@@ -44,9 +62,15 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             asset: amber-dav-x86_64-macos
+          # Windows CLI builds. windows-latest (x86_64 runner) builds the native
+          # x86_64 target and cross-compiles the aarch64 (ARM) target via MSVC.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: amber-dav-x86_64-windows
+            ext: .exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            asset: amber-dav-aarch64-windows
             ext: .exe
     steps:
       - uses: actions/checkout@v6
@@ -59,7 +83,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # Keyed per asset, not per target: the handheld and headless aarch64
+          # builds share a target triple but compile different feature sets.
+          key: ${{ matrix.asset }}
 
       # The release tag is the single source of truth for the version. Cargo.toml
       # carries only a 0.0.0 placeholder, so stamp the tag in here before building:
@@ -83,11 +109,11 @@ jobs:
 
       - name: Build (zigbuild)
         if: matrix.zig
-        run: cargo zigbuild --release --target ${{ matrix.target }} --locked
+        run: cargo zigbuild --release --target ${{ matrix.target }} --locked ${{ matrix.features && format('--features {0}', matrix.features) }}
 
       - name: Build (cargo)
         if: ${{ !matrix.zig }}
-        run: cargo build --release --target ${{ matrix.target }} --locked
+        run: cargo build --release --target ${{ matrix.target }} --locked ${{ matrix.features && format('--features {0}', matrix.features) }}
 
       - name: Stage asset
         shell: bash
