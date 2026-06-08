@@ -59,9 +59,48 @@ struct GhAsset {
     browser_download_url: String,
 }
 
-/// GET /api/update/check
+/// GET /api/update/check — compares current version against the latest GitHub release.
 pub async fn check(_: Session, _: State<AppState>) -> Response {
-    todo!()
+    let current = env!("CARGO_PKG_VERSION").to_string();
+
+    match fetch_latest_release().await {
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Ok(release) => {
+            // Tags are "vX.Y.Z"; strip the leading "v" for comparison.
+            let latest = release.tag_name.trim_start_matches('v').to_string();
+            let asset_url = asset_name().and_then(|name| {
+                release
+                    .assets
+                    .iter()
+                    .find(|a| a.name == name)
+                    .map(|a| a.browser_download_url.clone())
+            });
+            Json(CheckResult {
+                up_to_date: latest == current,
+                current,
+                latest,
+                asset_url,
+            })
+            .into_response()
+        }
+    }
+}
+
+async fn fetch_latest_release() -> Result<GhRelease, reqwest::Error> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    reqwest::Client::builder()
+        .user_agent("amber-dav")
+        .build()?
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<GhRelease>()
+        .await
 }
 
 /// POST /api/update/apply
