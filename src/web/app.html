@@ -286,6 +286,15 @@
         <div class="kv" id="set-view">…</div>
       </div>
       <div class="card">
+        <h3>Software Update</h3>
+        <div class="kv" id="upd-version" style="margin-bottom:.7rem;">Checking version…</div>
+        <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+          <button class="tbtn" id="upd-check">↻ Check for Updates</button>
+          <button class="tbtn primary" id="upd-apply" style="display:none;">⬇ Apply Update</button>
+        </div>
+        <div id="upd-status" style="font-family:var(--mono);font-size:.8rem;margin-top:.6rem;"></div>
+      </div>
+      <div class="card">
         <h3>How to change them</h3>
         <p class="muted" style="font-family:var(--mono);font-size:.82rem;line-height:1.7;">
           Settings are read from <code>config.json</code> in the app folder
@@ -780,6 +789,67 @@ async function loadSettings() {
       row('Root', s.root || '(default)'),
     ].join('<br>');
   } catch (e) { $('set-view').textContent = e.message; }
+  loadVersion();
+}
+
+// ---- software update ----
+let updCheckResult = null;
+
+async function loadVersion() {
+  try {
+    const info = await api('GET', '/api/info');
+    $('upd-version').innerHTML = 'Installed version: <b>' + (info.version || '0.0.0') + '</b>';
+  } catch (e) {
+    $('upd-version').textContent = 'Version unknown';
+  }
+}
+
+async function checkUpdate() {
+  const btn = $('upd-check');
+  const status = $('upd-status');
+  btn.disabled = true;
+  $('upd-apply').style.display = 'none';
+  status.style.color = '';
+  status.textContent = 'Checking…';
+  try {
+    updCheckResult = await api('GET', '/api/update/check');
+    if (updCheckResult.up_to_date) {
+      status.textContent = 'Already up to date (v' + updCheckResult.current + ').';
+    } else if (!updCheckResult.asset_url) {
+      status.textContent = 'Update available (v' + updCheckResult.latest + ') but no binary for this platform.';
+    } else {
+      status.innerHTML = 'Update available: <b>v' + updCheckResult.current + '</b> → <b>v' + updCheckResult.latest + '</b>';
+      $('upd-apply').style.display = '';
+    }
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = 'Check failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function applyUpdate() {
+  if (!updCheckResult || !updCheckResult.asset_url) return;
+  const btn = $('upd-apply');
+  const status = $('upd-status');
+  btn.disabled = true;
+  $('upd-check').disabled = true;
+  status.style.color = '';
+  status.textContent = 'Downloading and applying update… (this may take a moment)';
+  try {
+    await api('POST', '/api/update/apply', { asset_url: updCheckResult.asset_url });
+    $('upd-apply').style.display = 'none';
+    status.style.color = 'var(--amber)';
+    status.textContent = '✓ Update applied to v' + updCheckResult.latest + '. Restart the app to use the new version.';
+    loadVersion();
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = 'Update failed: ' + e.message;
+    btn.disabled = false;
+  } finally {
+    $('upd-check').disabled = false;
+  }
 }
 
 // ---- view switching ----
@@ -805,6 +875,8 @@ $('t-hidden').onclick = () => { showHidden = !showHidden; $('t-hidden').classLis
   selection = new Set(); lastIndex = null; rebuild(); syncToolbar(); };
 $('ed-save').onclick = saveEditor;
 $('ed-close').onclick = closeEditor;
+$('upd-check').onclick = checkUpdate;
+$('upd-apply').onclick = applyUpdate;
 $('filepick').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
 $('i-clear').onclick = () => { held.clear(); axes.clear(); $('ilog').textContent=''; renderHeld(); renderAxes(); };
 function closeSidebar() {
