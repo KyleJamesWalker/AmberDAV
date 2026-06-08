@@ -1,0 +1,96 @@
+name: Release
+
+# Triggered when a GitHub Release is published (created via the Releases UI or
+# `gh release create`). The release tag drives the version; this workflow builds
+# a binary per platform and attaches each to the release.
+#
+#   amber-dav-aarch64-linux    static musl build for the Anbernic device
+#   amber-dav-aarch64-macos    Apple Silicon CLI build
+#   amber-dav-x86_64-macos     Intel macOS CLI build
+#   amber-dav-x86_64-windows   Windows CLI build
+#
+# Off-Linux the on-device UI (framebuffer/gamepad) is compiled out, so the
+# macOS/Windows binaries are headless WebDAV/file-server CLIs for hosting a
+# folder from a desktop.
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write # upload assets to the release
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Device build: fully static aarch64 musl, cross-linked with Zig.
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset: amber-dav-aarch64-linux
+            zig: true
+          # Desktop CLI builds (native on each runner).
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: amber-dav-aarch64-macos
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: amber-dav-x86_64-macos
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: amber-dav-x86_64-windows
+            ext: .exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # The release tag is the single source of truth for the version. Cargo.toml
+      # carries only a 0.0.0 placeholder, so stamp the tag in here before building:
+      # env!("CARGO_PKG_VERSION") is compiled into the binary (and drawn on the
+      # device screen), so it must reflect the release, not the placeholder.
+      - name: Stamp version from release tag
+        shell: bash
+        run: |
+          cargo install cargo-edit --locked
+          cargo set-version "${GITHUB_REF_NAME#v}"
+
+      - name: Install Zig
+        if: matrix.zig
+        uses: mlugg/setup-zig@v1
+
+      - name: Install cargo-zigbuild
+        if: matrix.zig
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build (zigbuild)
+        if: matrix.zig
+        run: cargo zigbuild --release --target ${{ matrix.target }} --locked
+
+      - name: Build (cargo)
+        if: ${{ !matrix.zig }}
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Stage asset
+        shell: bash
+        run: cp "target/${{ matrix.target }}/release/amber-dav${{ matrix.ext }}" "${{ matrix.asset }}${{ matrix.ext }}"
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}${{ matrix.ext }}" --clobber

@@ -1,0 +1,37 @@
+[package]
+name = "amber-dav"
+# Version passed at build time by GHA
+version = "0.0.7"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io", "compat"] }
+axum = "0.8"
+dav-server = "0.11"
+rand = "0.9"
+qrcode = "0.14"
+local-ip-address = "0.6"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = { version = "0.3", features = ["io"] }
+async_zip = { version = "0.0.18", features = ["tokio", "deflate"] }
+
+# Linux-only: the binary only ever runs on the device.
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = { version = "0.13", features = ["tokio"] }
+framebuffer = "0.3"
+font8x8 = "0.3"
+# Decodes images for the burn-in "DVD bounce" screensaver. Pure-Rust decoders
+# only, so the static musl build keeps working.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+
+# Small, static-friendly release binary for the handhelds.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AmberDAV · web access</title>
+<style>
+  :root {
+    --bg: #0e0f13; --panel: #16181f; --line: #262a35;
+    --text: #d8dde5; --muted: #8b93a3; --amber: #ffb454; --amber-dim: #b97e2e;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--mono);
+    display: grid; place-items: center;
+    background-image:
+      radial-gradient(120% 80% at 50% -10%, rgba(255,180,84,.10), transparent 60%),
+      repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.012) 3px 4px);
+  }
+  .card {
+    width: min(92vw, 420px); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 16px; padding: 2.2rem 2rem;
+    box-shadow: 0 30px 80px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.03);
+  }
+  .brand { font-size: 2rem; font-weight: 700; letter-spacing: .06em; }
+  .brand b { color: var(--amber); font-weight: 700; }
+  .tag {
+    color: var(--muted); letter-spacing: .35em; text-transform: uppercase;
+    font-size: .72rem; margin-top: .15rem;
+  }
+  .prompt { color: var(--muted); font-size: .85rem; margin: 1.6rem 0 .5rem; }
+  .field {
+    display: flex; align-items: center; gap: .5rem;
+    border: 1px solid var(--line); border-radius: 10px; background: #0c0d11;
+    padding: .1rem .8rem; transition: border-color .15s, box-shadow .15s;
+  }
+  .field:focus-within { border-color: var(--amber-dim); box-shadow: 0 0 0 3px rgba(255,180,84,.12); }
+  .field .caret { color: var(--amber); }
+  input {
+    flex: 1; background: transparent; border: 0; outline: 0; color: var(--text);
+    font-family: var(--mono); font-size: 1.4rem; letter-spacing: .3em; padding: .7rem 0;
+  }
+  button {
+    margin-top: 1.2rem; width: 100%; cursor: pointer;
+    font-family: var(--mono); font-size: 1rem; font-weight: 600; letter-spacing: .05em;
+    color: #1a1206; background: var(--amber); border: 0; border-radius: 10px; padding: .8rem;
+    transition: filter .15s, transform .05s;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:active { transform: translateY(1px); }
+  .err { color: #ff6b6b; font-size: .82rem; min-height: 1.1em; margin-top: .8rem; }
+  .hint { color: var(--muted); font-size: .78rem; margin-top: 1.4rem; line-height: 1.5; }
+  .hint b { color: var(--amber); }
+</style>
+</head>
+<body>
+  <form class="card" method="post" action="/login" autocomplete="off">
+    <div class="brand">Amber<b>DAV</b></div>
+    <div class="tag">web access</div>
+
+    <div class="prompt">Enter the access code shown on your device:</div>
+    <label class="field">
+      <span class="caret">&gt;</span>
+      <input type="password" name="password" id="pw" inputmode="text"
+             autocapitalize="off" autocorrect="off" spellcheck="false" autofocus>
+    </label>
+    <div class="err" id="err"></div>
+    <button type="submit">Continue</button>
+
+    <div class="hint">The code appears on the handheld's screen and changes
+      every time the app restarts. It is never displayed here.</div>
+  </form>
+<script>
+  if (new URLSearchParams(location.search).has('e')) {
+    document.getElementById('err').textContent = 'Incorrect code — check your device screen.';
+    document.getElementById('pw').focus();
+  }
+</script>
+</body>
+</html>
