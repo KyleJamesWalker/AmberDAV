@@ -2,6 +2,7 @@
 //! Anbernic handhelds (Allwinner H700, aarch64 Linux).
 
 mod auth;
+mod canvas;
 mod cli;
 mod config;
 mod files;

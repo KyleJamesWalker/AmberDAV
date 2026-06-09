@@ -108,9 +108,9 @@ pub fn show(
                             // Re-query the IP each paint so the screen recovers
                             // once Wi-Fi connects after launch.
                             let ip = crate::current_ip();
-                            imp::info_canvas(&geom, ip, port, pw.as_deref())
+                            crate::canvas::info_canvas(geom.lw, geom.lh, ip, port, pw.as_deref()).px
                         }
-                        Mode::Black => vec![[0u8; 3]; geom.lw * geom.lh],
+                        Mode::Black => crate::canvas::black_canvas(geom.lw, geom.lh).px,
                         Mode::Bounce => {
                             bounce.step(&geom);
                             bounce.canvas(&geom)
@@ -225,16 +225,12 @@ mod tests {
 
 #[cfg(feature = "handheld")]
 mod imp {
-    use std::net::IpAddr;
     use std::path::PathBuf;
 
-    use font8x8::legacy::BASIC_LEGACY;
     use framebuffer::{Bitfield, Framebuffer, VarScreeninfo};
-    use qrcode::{Color, QrCode};
     use rand::Rng;
 
     const BLACK: [u8; 3] = [0, 0, 0];
-    const WHITE: [u8; 3] = [255, 255, 255];
 
     fn rotation() -> u32 {
         std::env::var("AMBERDAV_FB_ROTATE")
@@ -287,96 +283,6 @@ mod imp {
                 var,
             })
         }
-    }
-
-    /// Build the connection-info canvas: IP, credentials, and a QR code.
-    pub fn info_canvas(g: &Geom, ip: IpAddr, port: u16, password: Option<&str>) -> Vec<[u8; 3]> {
-        let (lw, lh) = (g.lw, g.lh);
-        let mut canvas = vec![WHITE; lw * lh];
-
-        let scale = (lw / 240).max(2);
-        let line_h = 8 * scale + scale * 2;
-        let margin = scale * 3;
-
-        // App version, pinned to the bottom-right corner. Drawn first so it is
-        // present on both the "waiting for Wi-Fi" and full info screens (the
-        // QR/info view), and the centered QR never lands on top of it.
-        draw_version(&mut canvas, lw, lh, margin, scale);
-
-        let mut y = margin;
-
-        draw_text(
-            &mut canvas,
-            lw,
-            lh,
-            margin,
-            y,
-            "amber-dav  file access",
-            scale,
-        );
-        y += line_h;
-
-        // No network yet (0.0.0.0): a QR to http://0.0.0.0/ is useless, so just
-        // ask the user to wait. The render loop repaints every ~2s, so once
-        // Wi-Fi connects this recovers into the full info screen on its own.
-        if ip.is_unspecified() {
-            draw_text(&mut canvas, lw, lh, margin, y, "Waiting for Wi-Fi…", scale);
-            return canvas;
-        }
-
-        draw_text(
-            &mut canvas,
-            lw,
-            lh,
-            margin,
-            y,
-            &format!("IP:   {ip}:{port}"),
-            scale,
-        );
-        y += line_h;
-        draw_text(&mut canvas, lw, lh, margin, y, "User: anything", scale);
-        y += line_h;
-        let pass_line = match password {
-            Some(p) => format!("Pass: {p}"),
-            None => "Pass: (hidden)".to_string(),
-        };
-        draw_text(&mut canvas, lw, lh, margin, y, &pass_line, scale);
-        y += line_h + scale * 2;
-
-        // QR of the status page URL, centered below the text.
-        let url = format!("http://{ip}:{port}/");
-        if let Ok(code) = QrCode::new(url.as_bytes()) {
-            let w = code.width();
-            let modules = code.to_colors();
-            let quiet = 4usize;
-            let total = w + quiet * 2;
-            let avail_w = lw.saturating_sub(margin * 2);
-            let avail_h = lh.saturating_sub(y + line_h + margin);
-            let qs = (avail_w.min(avail_h) / total).max(1);
-            let qpix = total * qs;
-            let qx = lw.saturating_sub(qpix) / 2;
-            let qy = y;
-
-            for my in 0..w {
-                for mx in 0..w {
-                    if modules[my * w + mx] == Color::Dark {
-                        fill_rect(
-                            &mut canvas,
-                            lw,
-                            lh,
-                            qx + (mx + quiet) * qs,
-                            qy + (my + quiet) * qs,
-                            qs,
-                            qs,
-                            BLACK,
-                        );
-                    }
-                }
-            }
-            draw_text(&mut canvas, lw, lh, qx, qy + qpix, "Scan to connect", scale);
-        }
-
-        canvas
     }
 
     /// Blit a logical RGB canvas to the framebuffer (applying rotation + the
@@ -631,72 +537,4 @@ mod imp {
         chan(r, &var.red) | chan(g, &var.green) | chan(b, &var.blue)
     }
 
-    // Low-level blit helpers: explicit canvas dims + position read clearly at
-    // the call sites, so the positional argument count is intentional.
-    #[allow(clippy::too_many_arguments)]
-    fn fill_rect(
-        buf: &mut [[u8; 3]],
-        w: usize,
-        h: usize,
-        x: usize,
-        y: usize,
-        rw: usize,
-        rh: usize,
-        val: [u8; 3],
-    ) {
-        for yy in y..(y + rh).min(h) {
-            for xx in x..(x + rw).min(w) {
-                buf[yy * w + xx] = val;
-            }
-        }
-    }
-
-    /// Draw the crate version (e.g. `v0.1.0`) flush against the bottom-right
-    /// corner, inset by `margin`. The string is short enough to never reach the
-    /// centered QR, so it shares the info screen without overlapping anything.
-    fn draw_version(buf: &mut [[u8; 3]], w: usize, h: usize, margin: usize, scale: usize) {
-        let text = concat!("v", env!("CARGO_PKG_VERSION"));
-        let text_w = text.chars().count() * 8 * scale;
-        let text_h = 8 * scale;
-        let x = w.saturating_sub(text_w + margin);
-        let y = h.saturating_sub(text_h + margin);
-        draw_text(buf, w, h, x, y, text, scale);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_text(
-        buf: &mut [[u8; 3]],
-        w: usize,
-        h: usize,
-        x: usize,
-        y: usize,
-        text: &str,
-        scale: usize,
-    ) {
-        let mut cx = x;
-        for ch in text.chars() {
-            let glyph = BASIC_LEGACY
-                .get(ch as usize)
-                .copied()
-                .unwrap_or(BASIC_LEGACY[' ' as usize]);
-            for (row, bits) in glyph.iter().enumerate() {
-                for col in 0..8 {
-                    // font8x8 is LSB-first: bit 0 is the leftmost column.
-                    if bits & (1 << col) != 0 {
-                        fill_rect(
-                            buf,
-                            w,
-                            h,
-                            cx + col * scale,
-                            y + row * scale,
-                            scale,
-                            scale,
-                            BLACK,
-                        );
-                    }
-                }
-            }
-            cx += 8 * scale;
-        }
-    }
 }

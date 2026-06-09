@@ -11,6 +11,7 @@ axum = "0.8"
 dav-server = "0.11"
 rand = "0.9"
 qrcode = "0.14"
+font8x8 = "0.3"
 local-ip-address = "0.6"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
@@ -31,14 +32,13 @@ directories = "6"
 # input + the DVD-bounce screensaver). Opt-in, not default: headless desktop
 # and server builds leave it off and ship without the device-only deps.
 [features]
-handheld = ["dep:evdev", "dep:framebuffer", "dep:font8x8", "dep:image"]
+handheld = ["dep:evdev", "dep:framebuffer", "dep:image"]
 
 # Device-only deps. Linux-only crates (framebuffer/evdev), pulled in solely by
 # the `handheld` feature, which is only ever built for the aarch64 device.
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { version = "0.13", features = ["tokio"], optional = true }
 framebuffer = { version = "0.3", optional = true }
-font8x8 = { version = "0.3", optional = true }
 # Decodes images for the burn-in "DVD bounce" screensaver. Pure-Rust decoders
 # only, so the static musl build keeps working.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"], optional = true }
