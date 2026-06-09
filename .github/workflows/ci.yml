@@ -117,9 +117,11 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: amber-dav-x86_64-windows
+            ext: .exe
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             asset: amber-dav-aarch64-windows
+            ext: .exe
     steps:
       - uses: actions/checkout@v6
 
@@ -156,3 +158,20 @@ jobs:
       - name: Build (cargo)
         if: ${{ !matrix.zig }}
         run: cargo build --target ${{ matrix.target }} --locked ${{ matrix.features && format('--features {0}', matrix.features) }}
+
+      # Publish each build as a downloadable artifact so reviewers can grab a
+      # binary straight off the PR's checks page (or `gh run download`) to test
+      # on real hardware. These are debug builds — unoptimized and large, but
+      # the same feature set as the matching release asset. Rename to the asset
+      # name first so the extracted file is recognizable, not a bare `amber-dav`.
+      - name: Stage artifact
+        shell: bash
+        run: cp "target/${{ matrix.target }}/debug/amber-dav${{ matrix.ext }}" "${{ matrix.asset }}${{ matrix.ext }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}${{ matrix.ext }}
+          # Test artifacts, not releases — expire them quickly to avoid bloat.
+          retention-days: 14
