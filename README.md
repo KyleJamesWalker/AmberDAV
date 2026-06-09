@@ -76,25 +76,26 @@ The same aarch64 binary runs on both the RG35XX Pro and the RG34XXSP.
 
 Each [GitHub Release](../../releases) ships a prebuilt binary per platform:
 
-Assets follow `amber-dav-<arch>-<os>[-handheld]`: plain `<arch>-<os>` is the
-standard headless build, and the `-handheld` suffix marks the one build with the
-on-device UI compiled in.
+Assets follow `amber-dav-<arch>-<os>[-fb|-sdl]`: plain `<arch>-<os>` is the
+standard headless build, the `-fb` suffix marks the static build with the
+on-device framebuffer/Wayland UI compiled in, and `-sdl` is the dynamic
+on-screen build (links the system libSDL2).
 
 | Asset | Platform | Build |
 | --- | --- | --- |
-| `amber-dav-aarch64-linux-handheld` | the Anbernic device (static musl) | handheld |
+| `amber-dav-aarch64-linux-fb` | the Anbernic device (static musl) | handheld |
 | `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali` on-screen QR) | handheld+sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
 | `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
-| `amber-dav-x86_64-linux-handheld` | Steam Deck (Game Mode, static framebuffer) / x86 Linux handhelds | handheld |
+| `amber-dav-x86_64-linux-fb` | Steam Deck (Game Mode, static framebuffer) / x86 Linux handhelds | handheld |
 | `amber-dav-x86_64-linux-sdl` | Steam Deck (Game Mode, on-screen QR) | handheld+sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
 | `amber-dav-x86_64-macos` | macOS, Intel | headless |
 | `amber-dav-x86_64-windows` | Windows | headless |
 | `amber-dav-aarch64-windows` | Windows on ARM (Snapdragon/Copilot+ PCs) | headless |
 
-Only the `-handheld` asset is built with `--features handheld`: it includes the
-on-device framebuffer screen and gamepad viewer. Every other asset is a
+The `-fb` and `-sdl` assets are built with `--features handheld`: they include
+the on-device screen and gamepad viewer. Every other asset is a
 **headless** WebDAV/file-server CLI that writes to stdout — a quick way to host
 a folder from a desktop or server:
 

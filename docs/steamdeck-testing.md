@@ -1,6 +1,6 @@
 # Steam Deck Verification Checklist
 
-Build/transfer the `amber-dav-x86_64-linux-handheld` asset to the Deck.
+Build/transfer the `amber-dav-x86_64-linux-fb` asset to the Deck.
 
 ## Desktop Mode (sanity)
 - [ ] `WAYLAND_DISPLAY` is set under KDE; `amber-dav .` opens the connection

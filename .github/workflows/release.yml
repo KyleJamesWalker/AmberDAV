@@ -4,10 +4,10 @@ name: Release
 # `gh release create`). The release tag drives the version; this workflow builds
 # a binary per platform and attaches each to the release.
 #
-#   amber-dav-aarch64-linux-handheld  static musl build for the Anbernic device
+#   amber-dav-aarch64-linux-fb        static musl build for the Anbernic device
 #   amber-dav-aarch64-linux           static musl build for ARM servers/Pi/NAS (headless)
 #   amber-dav-x86_64-linux            static musl build for x86 servers/NAS (headless)
-#   amber-dav-x86_64-linux-handheld   static musl build for Steam Deck / x86 handhelds
+#   amber-dav-x86_64-linux-fb         static musl build for Steam Deck / x86 handhelds
 #   amber-dav-x86_64-linux-sdl        SDL2 on-screen build for Steam Deck (Game Mode)
 #   amber-dav-aarch64-linux-sdl       SDL2 on-screen build for Anbernic handhelds
 #   amber-dav-aarch64-macos    Apple Silicon CLI build
@@ -15,8 +15,8 @@ name: Release
 #   amber-dav-x86_64-windows   Windows CLI build
 #   amber-dav-aarch64-windows  ARM Windows CLI build (Snapdragon/Copilot+ PCs)
 #
-# Assets follow `amber-dav-<arch>-<os>[-handheld|-sdl]`. The `-handheld` assets use
-# `--features handheld` (framebuffer screen + gamepad input); the `-sdl` assets use
+# Assets follow `amber-dav-<arch>-<os>[-fb|-sdl]`. The `-fb` assets use
+# `--features handheld` (framebuffer/Wayland screen + gamepad input); the `-sdl` assets use
 # `--features handheld,sdl` (SDL2 on-screen display, dynamically linked); every
 # other asset is a plain headless WebDAV/file-server CLI with device-only deps
 # left out entirely.
@@ -39,10 +39,10 @@ jobs:
       matrix:
         include:
           # Device build: fully static aarch64 musl, cross-linked with Zig.
-          # The only build with --features handheld (framebuffer + gamepad UI).
+          # Built with --features handheld (framebuffer + gamepad UI).
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            asset: amber-dav-aarch64-linux-handheld
+            asset: amber-dav-aarch64-linux-fb
             features: handheld
             zig: true
           # Headless ARM server build: same aarch64 musl target, no handheld
@@ -61,7 +61,7 @@ jobs:
           # handheld (Wayland connection-info screen + gamepad viewer).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            asset: amber-dav-x86_64-linux-handheld
+            asset: amber-dav-x86_64-linux-fb
             features: handheld
             zig: true
           # SDL2 on-screen build for the Steam Deck (Game Mode): native x86_64

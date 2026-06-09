@@ -21,20 +21,20 @@ static UPDATE_IN_PROGRESS: std::sync::atomic::AtomicBool =
 /// Returns the release asset name for the current platform, or `None` if the
 /// platform/build is not a published release target.
 ///
-/// Assets follow `amber-dav-<arch>-<os>[-handheld]`: plain `<arch>-<os>` is the
-/// standard headless build, and the `-handheld` suffix marks the build that
-/// compiles in the device UI (framebuffer/Wayland screen + gamepad). Splitting
-/// the Linux branches on the `handheld` feature means a device never
-/// self-updates to a headless binary (no screen/input) and a server never pulls
-/// the heavier device build. Both aarch64 (Anbernic) and x86_64 (Steam Deck)
-/// ship a `-handheld` asset, so each maps to its own.
+/// Assets follow `amber-dav-<arch>-<os>[-fb]`: plain `<arch>-<os>` is the
+/// standard headless build, and the `-fb` suffix marks the build that compiles
+/// in the device UI (framebuffer/Wayland screen + gamepad). Splitting the Linux
+/// branches on the `handheld` feature means a device never self-updates to a
+/// headless binary (no screen/input) and a server never pulls the heavier
+/// device build. Both aarch64 (Anbernic) and x86_64 (Steam Deck) ship a `-fb`
+/// asset, so each maps to its own.
 pub fn asset_name() -> Option<&'static str> {
     if cfg!(all(
         target_arch = "aarch64",
         target_os = "linux",
         feature = "handheld"
     )) {
-        Some("amber-dav-aarch64-linux-handheld") // device build
+        Some("amber-dav-aarch64-linux-fb") // device build
     } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
         Some("amber-dav-aarch64-linux") // headless ARM (Pi/NAS/Graviton)
     } else if cfg!(all(
@@ -42,7 +42,7 @@ pub fn asset_name() -> Option<&'static str> {
         target_os = "linux",
         feature = "handheld"
     )) {
-        Some("amber-dav-x86_64-linux-handheld") // Steam Deck (Game Mode) build
+        Some("amber-dav-x86_64-linux-fb") // Steam Deck (Game Mode) build
     } else if cfg!(all(
         target_arch = "x86_64",
         target_os = "linux",
