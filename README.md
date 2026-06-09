@@ -161,9 +161,11 @@ plugin can read (e.g. `--connection-file ~/.local/share/amber-dav/connection.jso
 ### Anbernic — SDL on-screen QR (optional)
 
 The **`amber-dav-aarch64-linux-sdl`** asset renders the same screen via SDL's
-`mali` vendor driver (what the stock emulators use). It's an alternative to the
-static framebuffer build; launch it from an APPS-menu `*.sh` script that exports
-`SDL_VIDEODRIVER=mali` before running the binary.
+`mali` vendor driver (what the stock emulators use), as an alternative to the
+static framebuffer build. Just launch it from an APPS-menu `*.sh` script like
+any other binary — the SDL driver is auto-selected (`mali` on the Anbernic, once
+`x11` is found unavailable), so no `SDL_VIDEODRIVER` is needed. Set
+`SDL_VIDEODRIVER=mali` only to force it and skip the auto-detection.
 
 ## First launch
 
