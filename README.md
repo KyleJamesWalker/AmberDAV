@@ -149,8 +149,8 @@ libSDL2; the SDL build is the one that displays in Steam Game Mode.
 1. In Desktop Mode, copy the binary somewhere persistent (e.g. `~/Applications`).
 2. Add it to Steam as a **Non-Steam Game**, then switch to Game Mode and launch it.
 3. The connection screen appears; scan the QR or read the IP/password.
-4. Quit with the configured exit button (`AMBERDAV_EXIT_KEY`) or by closing the
-   window from the Steam overlay.
+4. Quit with the configured exit button (the **☰ Menu** button by default; see
+   `exit_keys`) or by closing the window from the Steam overlay.
 
 Optionally point `--connection-file` at a path a launcher script or a Decky
 plugin can read (e.g. `--connection-file ~/.local/share/amber-dav/connection.json`).
@@ -209,6 +209,9 @@ one place, the highest layer wins:
 | Screensaver on | `--bounce-screen` / `--no-bounce-screen` | `AMBERDAV_BOUNCE_SCREEN` | `bounce_screen.enabled` |
 | Screensaver folders | `--bounce-folders <a,b,…>` | `AMBERDAV_BOUNCE_FOLDERS` | `bounce_screen.folders` |
 | Connection file | `--connection-file <path>` | `AMBERDAV_CONNECTION_FILE` | `connection_file` |
+| Exit key codes | `--exit-keys <a,b,…>` | `AMBERDAV_EXIT_KEYS` | `exit_keys` |
+| Blank-screen key codes | `--blank-keys <a,b,…>` | `AMBERDAV_BLANK_KEYS` | `blank_keys` |
+| Bounce-toggle key codes | `--bounce-keys <a,b,…>` | `AMBERDAV_BOUNCE_KEYS` | `bounce_keys` |
 | Display sink | — | `AMBERDAV_DISPLAY` | — |
 
 ### Config file location
@@ -283,16 +286,16 @@ Edit the file directly or over WebDAV, then relaunch the app to apply changes.
 | `read_write_delete` | ✅ | ✅ | ✅ |
 
 `permission` and `default_folder` take effect per request. `password`,
-`display_password`, `root`, and `bounce_screen` are bound at boot — relaunch to
-apply.
+`display_password`, `root`, `bounce_screen`, and the `*_keys` lists are bound at
+boot — relaunch to apply.
 
 ## Device controls
 
 | Button | evdev code | Action |
 |--------|:---:|--------|
-| **Menu** (`KEY_GOTO`) | 354 | Quit the app and return to the OS menu |
-| **A** (`BTN_SOUTH`) | 304 | Blank the screen (all black); press again to restore |
-| **X** (`BTN_NORTH`) | 307 | Toggle the bounce screensaver (if `bounce_screen.enabled`) |
+| **Menu** (`KEY_GOTO`, Anbernic) / **☰** (`BTN_START`, Steam Deck) | 354, 315 | Quit the app and return to the OS menu (`exit_keys`) |
+| **A** (`BTN_SOUTH`) | 304 | Blank the screen (all black); press again to restore (`blank_keys`) |
+| **X** (`BTN_NORTH`) | 307 | Toggle the bounce screensaver, if `bounce_screen.enabled` (`bounce_keys`) |
 
 The **bounce screensaver** drifts a random image around a black screen,
 DVD-logo style, swapping images as it ricochets off the edges — preventing
@@ -300,7 +303,12 @@ burn-in on OLED/AMOLED panels during long idle periods. It draws from the
 images in `bounce_screen.folders` (PNG, JPEG, GIF, BMP, WebP). With no images
 configured it simply blanks to black, which still protects the panel.
 
-Override the quit key with `AMBERDAV_EXIT_KEY=<code>` if your device differs.
+Each control is a **list** of evdev codes, so a button can differ per device
+(the defaults above already cover the Anbernic and the Steam Deck). Retarget
+them from the config file (`exit_keys`/`blank_keys`/`bounce_keys`), the
+`AMBERDAV_EXIT_KEYS`/`AMBERDAV_BLANK_KEYS`/`AMBERDAV_BOUNCE_KEYS` env vars
+(comma-separated), or `--exit-keys`/`--blank-keys`/`--bounce-keys`. Find a
+button's code in the web UI Status tab's live input view.
 
 ## Updating via the web UI
 

@@ -19,14 +19,17 @@ Build/transfer the `amber-dav-x86_64-linux-fb` asset to the Deck.
 ## Gamepad viewer (Game Mode + Desktop Mode)
 - [ ] Status tab streams button/axis events when the Deck's controls are pressed
       (confirms evdev still sees the devices under Steam Input/Gamescope).
-- [ ] Record the evdev codes for a convenient quit button (e.g. STEAM, QAM "…",
-      L4/R4) and set `AMBERDAV_EXIT_KEY=<code>`; confirm it quits the app. Note
-      the default 354 (KEY_GOTO) is Anbernic-only and will not fire on the Deck.
+- [ ] Confirm the default exit key works: `exit_keys` now defaults to
+      `[354, 315]`, so 315 (`BTN_START`, the ☰ Menu button) should quit the app
+      on the Deck (354/`KEY_GOTO` is the Anbernic key). If the Deck button you
+      want differs, read its code from the Status tab and set it via `exit_keys`
+      (config), `AMBERDAV_EXIT_KEYS=<a,b,…>`, or `--exit-keys`.
 - [ ] Note whether A (304) / X (307) reach the app or whether Steam Input remaps
-      them. Under Wayland, A (Black) DOES blank the screen; X (Bounce) has no
-      visible effect — the DVD-bounce screensaver is framebuffer-only and falls
-      back to the info screen under Wayland (file a follow-up if a Wayland
-      screensaver is wanted).
+      them. A (Black) blanks the screen; X (Bounce) animates on the SDL build.
+      Retarget these per device via `blank_keys` / `bounce_keys` (config), the
+      `AMBERDAV_BLANK_KEYS` / `AMBERDAV_BOUNCE_KEYS` env vars, or the matching
+      `--blank-keys` / `--bounce-keys` flags if Steam Input occupies the
+      defaults.
 
 ## Record findings
 - [ ] File issues/follow-ups for anything that didn't work (exit-key default,
