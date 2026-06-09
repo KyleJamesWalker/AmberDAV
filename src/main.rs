@@ -12,6 +12,8 @@ mod password;
 mod screen;
 mod ui;
 mod update;
+#[cfg(all(target_os = "linux", feature = "handheld"))]
+mod wayland;
 mod webdav;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};
