@@ -82,6 +82,10 @@ pub struct Settings {
     /// Burn-in "DVD bounce" screensaver configuration.
     #[serde(default)]
     pub bounce_screen: BounceScreen,
+    /// Path to write a `connection.json` sidecar (IP/port/password/URL) for
+    /// external launchers and Decky. Empty/unset → not written.
+    #[serde(default)]
+    pub connection_file: Option<String>,
 }
 
 impl Default for Settings {
@@ -95,6 +99,7 @@ impl Default for Settings {
             default_folder: String::new(),
             permission: Permission::ReadWrite,
             bounce_screen: BounceScreen::default(),
+            connection_file: None,
         }
     }
 }

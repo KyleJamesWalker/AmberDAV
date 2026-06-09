@@ -67,6 +67,9 @@ pub struct Cli {
     /// [env: AMBERDAV_BOUNCE_FOLDERS]
     #[arg(long = "bounce-folders", value_name = "PATHS", value_delimiter = ',')]
     bounce_folders: Option<Vec<String>>,
+    /// Write a connection.json sidecar here (IP/port/password/URL). [env: AMBERDAV_CONNECTION_FILE]
+    #[arg(long, value_name = "PATH")]
+    connection_file: Option<String>,
 
     /// Write the fully-resolved configuration to the config file, then exit.
     #[arg(long)]
@@ -134,6 +137,13 @@ impl Cli {
             .or_else(|| env_list("AMBERDAV_BOUNCE_FOLDERS"))
         {
             s.bounce_screen.folders = v;
+        }
+        if let Some(v) = self
+            .connection_file
+            .clone()
+            .or_else(|| env_str("AMBERDAV_CONNECTION_FILE"))
+        {
+            s.connection_file = Some(v);
         }
         s
     }
