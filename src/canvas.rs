@@ -16,7 +16,6 @@ use font8x8::legacy::BASIC_LEGACY;
 use qrcode::{Color, QrCode};
 
 const BLACK: [u8; 3] = [0, 0, 0];
-const WHITE: [u8; 3] = [255, 255, 255];
 
 // Web-UI palette (kept in sync with src/web/*.html `:root`) so the on-screen
 // info matches the browser theme instead of being a jarring white page.
@@ -99,11 +98,10 @@ pub fn info_canvas(w: usize, h: usize, ip: IpAddr, port: u16, password: Option<&
         let qpix = total * qs;
         let qx = w.saturating_sub(qpix) / 2;
         let qy = y;
-        // A white "card" behind the code (its qpix square already includes the
-        // 4-module quiet zone, so this is the required light border). Keeping the
-        // QR dark-on-light on this card stays reliably scannable even though the
-        // surrounding screen is the dark web-UI theme.
-        fill_rect(&mut c, qx, qy, qpix, qpix, WHITE);
+        // No card: the QR sits straight on the dark background, with its data
+        // modules drawn in the amber accent. The surrounding (and inter-module)
+        // background is the screen's dark colour, so the code reads inverted —
+        // amber-on-dark — which current phone cameras scan fine.
         for my in 0..qw {
             for mx in 0..qw {
                 if modules[my * qw + mx] == Color::Dark {
@@ -113,21 +111,13 @@ pub fn info_canvas(w: usize, h: usize, ip: IpAddr, port: u16, password: Option<&
                         qy + (my + quiet) * qs,
                         qs,
                         qs,
-                        BLACK,
+                        AMBER,
                     );
                 }
             }
         }
-        // Label below the card, on the dark background (so it reads in TEXT, not
-        // on the white card where a light colour would vanish).
-        draw_text(
-            &mut c,
-            qx,
-            qy + qpix + scale,
-            "Scan to connect",
-            scale,
-            TEXT,
-        );
+        // Label just below the QR, on the dark background, in body text.
+        draw_text(&mut c, qx, qy + qpix, "Scan to connect", scale, TEXT);
     }
     c
 }
@@ -181,10 +171,9 @@ mod tests {
         assert_eq!(c.w, 480);
         assert_eq!(c.h, 320);
         assert_eq!(c.px.len(), 480 * 320);
-        // Themed: dark background, with content (text + the white QR card) on top.
+        // Themed: dark background, with amber content (heading + QR) drawn on it.
         assert!(c.px.contains(&BG), "background not the dark theme");
-        assert!(c.px.contains(&WHITE), "QR card (white) not drawn");
-        assert!(c.px.contains(&AMBER), "amber heading not drawn");
+        assert!(c.px.contains(&AMBER), "amber content not drawn");
     }
 
     #[test]
@@ -193,17 +182,12 @@ mod tests {
         assert_eq!((c.w, c.h), (480, 320));
         // The heading is drawn even while waiting for Wi-Fi.
         assert!(c.px.contains(&AMBER));
-        // Center stays the dark background: the QR/white card was skipped.
+        // Center stays the dark background: the QR was skipped.
         let (cx, cy) = (c.w / 2, c.h / 2);
         assert_eq!(
             c.px[cy * c.w + cx],
             BG,
             "QR should not appear on unspecified IP"
-        );
-        // No white QR card on the waiting screen.
-        assert!(
-            !c.px.contains(&WHITE),
-            "QR card should be absent while waiting"
         );
     }
 
