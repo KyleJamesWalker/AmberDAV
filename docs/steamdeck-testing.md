@@ -51,6 +51,12 @@ is auto-selected (`x11` → `mali` → `wayland` → `kmsdrm` → `fbcon`).
 
 ### Both
 - [ ] The gamepad viewer still streams events (evdev is unaffected by the SDL sink).
-- [ ] The static framebuffer build still works on the Anbernic (no regression).
+- [ ] A (304) blanks the screen; pressing it again returns to the info screen.
+- [ ] X (307) starts the DVD-bounce screensaver (image drifts and reflects off
+      the edges, swapping picture on each bounce); pressing it again returns to
+      the info screen. The web status page shows `mode=Bounce`. Requires the
+      bounce screensaver enabled in config with image folder(s) set.
+- [ ] The static framebuffer build still works on the Anbernic (no regression),
+      including its DVD bounce.
 - [ ] No CPU pinned at idle on the static info screen (the loop is rate-limited
-      even when a driver ignores vsync).
+      even when a driver ignores vsync); bounce animates at ~12.5 fps.
