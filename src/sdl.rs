@@ -6,6 +6,16 @@
 //! driver on Anbernic. Compiled only with the `sdl` feature; links the system
 //! libSDL2 dynamically so each device's own driver is available at runtime.
 
+#[cfg(feature = "sdl")]
+use crate::canvas::{black_canvas, info_canvas};
+#[cfg(feature = "sdl")]
+use crate::screen::{Mode, ModeHandle, Status};
+
+#[cfg(feature = "sdl")]
+use sdl2::event::Event;
+#[cfg(feature = "sdl")]
+use sdl2::pixels::PixelFormatEnum;
+
 /// Video drivers to try, in order, when `SDL_VIDEODRIVER` isn't forced. `x11`
 /// is first so the Steam Deck gets an Xwayland window (the surface Steam
 /// foregrounds); `mali` covers Anbernic. `wayland` is tried before raw `kmsdrm`
@@ -16,12 +26,129 @@ const DRIVER_PREFERENCE: &[&str] = &["x11", "mali", "wayland", "kmsdrm", "fbcon"
 /// The ordered list of SDL video drivers to attempt. A non-empty forced value
 /// (e.g. `$SDL_VIDEODRIVER`) is the sole candidate; otherwise the preference
 /// list. Pure so it can be unit-tested without a display.
-// used by run() in the next task
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn driver_candidates(forced: Option<&str>) -> Vec<String> {
     match forced.map(str::trim).filter(|s| !s.is_empty()) {
         Some(d) => vec![d.to_string()],
         None => DRIVER_PREFERENCE.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Open a fullscreen SDL window and paint the connection-info canvas, trying
+/// each candidate video driver until one initializes. Returns only on error or
+/// when the window is closed; blocks the calling thread.
+// called by main.rs once the SDL sink is wired up (next task)
+#[cfg(feature = "sdl")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn run(
+    port: u16,
+    password: Option<String>,
+    status: Status,
+    mode: ModeHandle,
+) -> Result<(), String> {
+    let forced = std::env::var("SDL_VIDEODRIVER").ok();
+    let candidates = driver_candidates(forced.as_deref());
+    let mut last_err = String::from("no candidates");
+    for driver in &candidates {
+        // SDL selects the driver from this env var; set it per attempt. (Done in
+        // this sink thread at startup; the brief window before the input thread
+        // reads env is acceptable.)
+        std::env::set_var("SDL_VIDEODRIVER", driver);
+        match run_with_driver(port, password.clone(), &status, &mode) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = format!("{driver}: {e}");
+                eprintln!("sdl: driver {driver} unavailable ({e}); trying next");
+            }
+        }
+    }
+    Err(format!(
+        "no usable SDL video driver (tried {candidates:?}): {last_err}"
+    ))
+}
+
+#[cfg(feature = "sdl")]
+fn set_status(status: &Status, msg: String) {
+    if let Ok(mut s) = status.lock() {
+        *s = msg;
+    }
+}
+
+#[cfg(feature = "sdl")]
+fn run_with_driver(
+    port: u16,
+    password: Option<String>,
+    status: &Status,
+    mode: &ModeHandle,
+) -> Result<(), String> {
+    let sdl = sdl2::init().map_err(|e| e.to_string())?;
+    let video = sdl.video().map_err(|e| e.to_string())?;
+    let driver = video.current_video_driver().to_string();
+
+    let window = video
+        .window("amber-dav", 1280, 800)
+        .fullscreen_desktop()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut canvas = window
+        .into_canvas()
+        .present_vsync()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let (w, h) = canvas.output_size().map_err(|e| e.to_string())?;
+
+    let creator = canvas.texture_creator();
+    let mut texture = creator
+        .create_texture_streaming(PixelFormatEnum::RGB24, w, h)
+        .map_err(|e| e.to_string())?;
+
+    let mut pump = sdl.event_pump().map_err(|e| e.to_string())?;
+    eprintln!("sdl: using driver {driver} at {w}x{h}");
+
+    let mut last_mode: Option<Mode> = None;
+    let mut frame: u64 = 0;
+    loop {
+        for ev in pump.poll_iter() {
+            if let Event::Quit { .. } = ev {
+                // Window closed (e.g. Steam stopped the game) — quit the whole
+                // app, mirroring the input thread's exit-key behaviour.
+                std::process::exit(0);
+            }
+        }
+
+        let cur = mode.lock().map(|m| *m).unwrap_or(Mode::Info);
+        // Static screens (Info/Black) only re-render on a mode change or
+        // periodically (to re-query the IP after late Wi-Fi). Bounce is
+        // framebuffer-only; under SDL it shows the info screen.
+        let refresh = last_mode != Some(cur) || frame.is_multiple_of(30);
+        if refresh {
+            let cv = match cur {
+                Mode::Black => black_canvas(w as usize, h as usize),
+                Mode::Info | Mode::Bounce => info_canvas(
+                    w as usize,
+                    h as usize,
+                    crate::current_ip(),
+                    port,
+                    password.as_deref(),
+                ),
+            };
+            // canvas.px is a contiguous Vec<[u8;3]> == w*h*3 bytes of RGB24.
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 3)
+            };
+            texture
+                .update(None, bytes, (w as usize) * 3)
+                .map_err(|e| e.to_string())?;
+            set_status(status, format!("ok (sdl {driver} {w}x{h}) frame={frame}"));
+            last_mode = Some(cur);
+        }
+
+        canvas.clear();
+        canvas.copy(&texture, None, None)?;
+        canvas.present();
+        frame = frame.wrapping_add(1);
+        // Floor the loop rate so we never busy-spin when a driver ignores vsync
+        // (kmsdrm/fbcon often do). A static info screen doesn't need high fps.
+        std::thread::sleep(std::time::Duration::from_millis(16));
     }
 }
 
