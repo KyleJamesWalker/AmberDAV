@@ -83,9 +83,11 @@ on-device UI compiled in.
 | Asset | Platform | Build |
 | --- | --- | --- |
 | `amber-dav-aarch64-linux-handheld` | the Anbernic device (static musl) | handheld |
+| `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali` on-screen QR) | handheld+sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
 | `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
-| `amber-dav-x86_64-linux-handheld` | Steam Deck (Game Mode) / x86 Linux handhelds | handheld |
+| `amber-dav-x86_64-linux-handheld` | Steam Deck (Game Mode, static framebuffer) / x86 Linux handhelds | handheld |
+| `amber-dav-x86_64-linux-sdl` | Steam Deck (Game Mode, on-screen QR) | handheld+sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
 | `amber-dav-x86_64-macos` | macOS, Intel | headless |
 | `amber-dav-x86_64-windows` | Windows | headless |
@@ -128,12 +130,17 @@ rotation — it's commented.
 
 ## Install on Steam Deck (Game Mode)
 
-Use the `amber-dav-x86_64-linux-handheld` asset. In **Game Mode** the screen is
-owned by Gamescope, so amber-dav paints its connection info (IP, password, QR)
-as a fullscreen **Wayland** client. The sink is auto-selected (`$WAYLAND_DISPLAY`
-present → Wayland; `/dev/fb0` is not accessible under Gamescope, and with no
-compositor it falls back to headless). Force a sink with
-`AMBERDAV_DISPLAY=wayland|fb|headless` if needed.
+### Steam Deck (Game Mode) — on-screen QR via SDL
+
+Use the **`amber-dav-x86_64-linux-sdl`** asset. Unlike the framebuffer/Wayland
+build (whose native-Wayland surface Steam never foregrounds in Game Mode), the
+SDL build opens an **X11/Xwayland** window — the kind Steam *does* foreground —
+so the IP/password/QR screen shows. Add it as a Non-Steam Game and launch it.
+
+The SDL build links the system `libSDL2` (present on SteamOS) and auto-selects
+the video driver (`x11` on the Deck). Force one with `SDL_VIDEODRIVER` if needed.
+The static framebuffer build still works for the Anbernic and for any OS without
+libSDL2; the SDL build is the one that displays in Steam Game Mode.
 
 1. In Desktop Mode, copy the binary somewhere persistent (e.g. `~/Applications`).
 2. Add it to Steam as a **Non-Steam Game**, then switch to Game Mode and launch it.
@@ -146,6 +153,12 @@ plugin can read (e.g. `--connection-file ~/.local/share/amber-dav/connection.jso
 
 > A Decky Loader plugin would live in its own repo and bundle this same binary;
 > amber-dav needs no Decky-specific code.
+
+### Anbernic — SDL on-screen QR (optional)
+
+The **`amber-dav-aarch64-linux-sdl`** asset renders the same screen via SDL's
+`mali` vendor driver (what the stock emulators use). It's an alternative to the
+static framebuffer build; see `docs/anbernic-sdl/SDL.sh` for an APPS-menu launcher.
 
 ## First launch
 
