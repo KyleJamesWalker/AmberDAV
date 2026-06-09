@@ -1,7 +1,7 @@
 //! Connection-info canvas: the IP, credentials, and QR rendered into a plain
 //! RGB pixel buffer. This is the device-screen *content*, kept independent of
 //! how it reaches a panel — the framebuffer sink (Anbernic/TTY/Desktop Mode)
-//! and the Wayland sink (Steam Deck Game Mode) both present the same `Canvas`.
+//! and the Wayland sink (Steam Deck) both present the same `Canvas`.
 //! Pure and platform-independent, so it is unit-tested on every host.
 
 // On headless builds the canvas API is not called (the framebuffer/Wayland and

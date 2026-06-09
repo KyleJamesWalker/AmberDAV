@@ -7,8 +7,8 @@ name: Release
 #   amber-dav-aarch64-linux-fb        static musl build for the Anbernic device
 #   amber-dav-aarch64-linux           static musl build for ARM servers/Pi/NAS (headless)
 #   amber-dav-x86_64-linux            static musl build for x86 servers/NAS (headless)
-#   amber-dav-x86_64-linux-fb         static musl build for Steam Deck / x86 handhelds
-#   amber-dav-x86_64-linux-sdl        SDL2 on-screen build for Steam Deck (Game Mode)
+#   amber-dav-x86_64-linux-fb         static musl build for x86 handhelds
+#   amber-dav-x86_64-linux-sdl        SDL2 on-screen build for Steam Deck
 #   amber-dav-aarch64-linux-sdl       SDL2 on-screen build for Anbernic handhelds
 #   amber-dav-aarch64-macos    Apple Silicon CLI build
 #   amber-dav-x86_64-macos     Intel macOS CLI build
@@ -57,14 +57,14 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux
             zig: true
-          # Steam Deck Game Mode build: x86_64 static musl with --features fb
+          # x86_64 static musl with --features fb
           # (Wayland connection-info screen + gamepad viewer).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux-fb
             features: fb
             zig: true
-          # SDL2 on-screen build for the Steam Deck (Game Mode): native x86_64
+          # SDL2 on-screen build for the Steam Deck: native x86_64
           # gnu, dynamically links the system libSDL2. Uses --features sdl.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu

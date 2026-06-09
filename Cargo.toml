@@ -35,11 +35,11 @@ directories = "6"
 # display sink. Opt-in, not default: headless desktop/server builds leave both
 # off and ship without any of the device-only deps.
 [features]
-# Static framebuffer/Wayland sink (Anbernic; Steam Deck Game Mode without SDL).
+# Static framebuffer/Wayland sink (Anbernic; Steam Deck without SDL).
 fb = ["dep:evdev", "dep:framebuffer", "dep:image", "dep:smithay-client-toolkit"]
 # Dynamic SDL2 on-screen sink: links the system libSDL2 (not static musl) and
 # brings its own sink, so it does not pull the framebuffer/Wayland crates. Steam
-# Deck (Game Mode) + Anbernic. If both `fb` and `sdl` are enabled, `sdl` wins.
+# Deck + Anbernic. If both `fb` and `sdl` are enabled, `sdl` wins.
 sdl = ["dep:evdev", "dep:image", "dep:sdl2"]
 
 # Device-only deps. Linux-only crates (framebuffer/evdev/sdl2), pulled in solely
@@ -51,7 +51,7 @@ framebuffer = { version = "0.3", optional = true }
 # only, so the static musl build keeps working.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"], optional = true }
 # Pure-Rust Wayland client (no libwayland; static-musl friendly). Drives the
-# Steam Deck Game Mode screen, where Gamescope owns DRM and /dev/fb0 is hidden.
+# Steam Deck screen, where Gamescope owns DRM and /dev/fb0 is hidden.
 # default-features disabled on purpose: the defaults pull in `xkbcommon` (a C
 # library, breaks the static-musl build) and `calloop` for keyboard/seat
 # handling we do not use — we dispatch the queue directly and only need the

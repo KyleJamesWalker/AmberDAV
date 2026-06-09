@@ -89,8 +89,8 @@ on-screen build (links the system libSDL2).
 | `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali` on-screen QR) | sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
 | `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
-| `amber-dav-x86_64-linux-fb` | Steam Deck (Game Mode, static framebuffer) / x86 Linux handhelds | fb |
-| `amber-dav-x86_64-linux-sdl` | Steam Deck (Game Mode, on-screen QR) | sdl (dynamic, needs libSDL2) |
+| `amber-dav-x86_64-linux-fb` | x86 Linux handhelds without libSDL2 | fb |
+| `amber-dav-x86_64-linux-sdl` | Steam Deck (on-screen QR) | sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
 | `amber-dav-x86_64-macos` | macOS, Intel | headless |
 | `amber-dav-x86_64-windows` | Windows | headless |
@@ -132,9 +132,9 @@ rotation — it's commented.
 > current dir, `8080`). CLI flags and `AMBERDAV_*` env vars take precedence over
 > `config.json`, so a launcher can override the file without editing it.
 
-## Install on Steam Deck (Game Mode)
+## Install on Steam Deck
 
-### Steam Deck (Game Mode) — on-screen QR via SDL
+### Steam Deck — on-screen QR via SDL
 
 Use the **`amber-dav-x86_64-linux-sdl`** asset. Unlike the framebuffer/Wayland
 build (whose native-Wayland surface Steam never foregrounds in Game Mode), the
@@ -162,7 +162,8 @@ plugin can read (e.g. `--connection-file ~/.local/share/amber-dav/connection.jso
 
 The **`amber-dav-aarch64-linux-sdl`** asset renders the same screen via SDL's
 `mali` vendor driver (what the stock emulators use). It's an alternative to the
-static framebuffer build; see `docs/anbernic-sdl/SDL.sh` for an APPS-menu launcher.
+static framebuffer build; launch it from an APPS-menu `*.sh` script that exports
+`SDL_VIDEODRIVER=mali` before running the binary.
 
 ## First launch
 

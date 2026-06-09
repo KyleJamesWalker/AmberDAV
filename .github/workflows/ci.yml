@@ -87,14 +87,14 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux
             zig: true
-          # Steam Deck (Game Mode): x86_64 static musl WITH the fb feature — the
+          # x86_64 static musl WITH the fb feature — the
           # on-device Wayland screen + gamepad viewer compiled for x86.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux-fb
             features: fb
             zig: true
-          # SDL2 on-screen build for the Steam Deck (Game Mode): native x86_64
+          # SDL2 on-screen build for the Steam Deck: native x86_64
           # gnu, dynamically links the system libSDL2. Uses --features sdl.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
