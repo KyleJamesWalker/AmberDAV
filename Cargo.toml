@@ -34,9 +34,10 @@ directories = "6"
 [features]
 handheld = ["dep:evdev", "dep:framebuffer", "dep:image", "dep:smithay-client-toolkit"]
 # Opt-in SDL2 display sink for the Steam Deck (Game Mode) + Anbernic. Builds a
-# dynamic binary linking the system libSDL2 (not static musl), built alongside
-# `handheld`: `--features handheld,sdl`.
-sdl = ["dep:sdl2"]
+# dynamic binary linking the system libSDL2 (not static musl). Implies
+# `handheld` (the SDL sink is the on-device screen, and reuses the gamepad/canvas
+# code), so `--features sdl` alone is a complete build.
+sdl = ["handheld", "dep:sdl2"]
 
 # Device-only deps. Linux-only crates (framebuffer/evdev), pulled in solely by
 # the `handheld` feature, which is only ever built for the aarch64 device.
