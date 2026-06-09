@@ -76,9 +76,10 @@ pub fn show(
     use crate::display::{detect, DisplayKind};
     match detect() {
         DisplayKind::Wayland => {
+            let socket = crate::display::wayland_socket();
             set(&status, "wayland: starting…".to_string());
             std::thread::spawn(move || {
-                if let Err(e) = crate::wayland::run(port, password, status.clone(), mode) {
+                if let Err(e) = crate::wayland::run(port, password, status.clone(), mode, socket) {
                     set(&status, format!("wayland failed: {e}"));
                     eprintln!(
                         "screen: wayland sink failed ({e}); connection info is in the log only"
