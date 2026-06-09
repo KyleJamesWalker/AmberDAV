@@ -206,6 +206,7 @@ one place, the highest layer wins:
 | Password | `--password <pw>` | `AMBERDAV_PASSWORD` | `password` |
 | Show password | `--display-password` / `--no-display-password` | `AMBERDAV_DISPLAY_PASSWORD` | `display_password` |
 | Default folder | `--default-folder <path>` | `AMBERDAV_DEFAULT_FOLDER` | `default_folder` |
+| Sidebar favorites | — | — | `favorites` |
 | Permission | `--permission <level>` | `AMBERDAV_PERMISSION` | `permission` |
 | Screensaver on | `--bounce-screen` / `--no-bounce-screen` | `AMBERDAV_BOUNCE_SCREEN` | `bounce_screen.enabled` |
 | Screensaver folders | `--bounce-folders <a,b,…>` | `AMBERDAV_BOUNCE_FOLDERS` | `bounce_screen.folders` |
@@ -263,6 +264,15 @@ amber-dav --root /mnt/media --password secret --permission read_only --save
   // Folder (relative to root) to open right after login. "" = root.
   "default_folder": "Roms",
 
+  // Named folder shortcuts shown in the web UI sidebar, in order. Each `path`
+  // is relative to the served root (same as default_folder; "" = root). Omit
+  // or leave empty for no Favorites section. Handy on device builds for
+  // jumping between a few frequently-used folders.
+  "favorites": [
+    { "name": "Game Boy", "path": "Roms/GB" },
+    { "name": "Screenshots", "path": "Roms/Imgs" }
+  ],
+
   // Allowed operations: "read_only" | "read_write" | "read_write_delete".
   "permission": "read_write_delete",
 
@@ -286,7 +296,7 @@ Edit the file directly or over WebDAV, then relaunch the app to apply changes.
 | `read_write` | ✅ | ✅ | ❌ |
 | `read_write_delete` | ✅ | ✅ | ✅ |
 
-`permission` and `default_folder` take effect per request. `password`,
+`permission`, `default_folder`, and `favorites` take effect per request. `password`,
 `display_password`, `root`, `bounce_screen`, and the `*_keys` lists are bound at
 boot — relaunch to apply.
 
