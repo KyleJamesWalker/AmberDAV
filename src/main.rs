@@ -5,6 +5,7 @@ mod auth;
 mod canvas;
 mod cli;
 mod config;
+mod display;
 mod files;
 mod input;
 mod password;
