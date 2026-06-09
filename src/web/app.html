@@ -271,7 +271,7 @@
         <h3>Connection</h3>
         <div class="kv" id="conn">…</div>
       </div>
-      <div class="card">
+      <div class="card" id="card-live-input" style="display:none;">
         <h3>Live input <span style="color:var(--dim);text-transform:none;letter-spacing:0;">— press buttons / move sticks</span></h3>
         <div id="buttons"></div>
         <div class="axes" id="axes"></div>
@@ -773,6 +773,9 @@ async function loadConn() {
       'WebDAV mount: <a href="' + i.dav + '">' + i.dav + '</a><br>' +
       'Serving: ' + escapeHtml(i.root) + '<br>' +
       'Screen: ' + escapeHtml(i.screen);
+    // Gamepad input only streams on device (fb/sdl) builds; elsewhere the card
+    // would sit empty, so only reveal it and open the stream when supported.
+    if (i.live_input) { $('card-live-input').style.display = ''; startInput(); }
   } catch (e) { $('conn').textContent = e.message; }
 }
 
@@ -858,7 +861,7 @@ function showView(v) {
   $('view-files').style.display = v === 'files' ? 'flex' : 'none';
   $('view-status').style.display = v === 'status' ? 'block' : 'none';
   $('view-settings').style.display = v === 'settings' ? 'block' : 'none';
-  if (v === 'status') { loadConn(); startInput(); }
+  if (v === 'status') { loadConn(); }
   if (v === 'settings') loadSettings();
 }
 

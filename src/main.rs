@@ -31,6 +31,7 @@ use axum::{
     Router,
 };
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use input::InputUpdate;
 use webdav::DavState;
@@ -64,6 +65,9 @@ pub struct AppState {
     pub info: Arc<ServerInfo>,
     pub events: broadcast::Sender<InputUpdate>,
     pub screen_status: screen::Status,
+    /// Fires on shutdown so long-lived SSE streams (the Status page's live
+    /// input) end and don't stall graceful shutdown.
+    pub shutdown: CancellationToken,
 }
 
 impl AppState {
@@ -185,6 +189,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let screen_status: screen::Status = Arc::new(std::sync::Mutex::new("starting…".to_string()));
 
+    // Cancelled on Ctrl+C so in-flight SSE streams end and graceful shutdown
+    // can drain instead of hanging on a held-open Status page (issue #15).
+    let shutdown = CancellationToken::new();
+
     let state = AppState {
         root: Arc::new(root_path),
         session: Arc::from(session.as_str()),
@@ -200,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         events,
         screen_status: screen_status.clone(),
+        shutdown: shutdown.clone(),
     };
 
     let app = Router::new()
@@ -255,7 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await?;
     Ok(())
 }
@@ -281,6 +290,9 @@ fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown: CancellationToken) {
     let _ = tokio::signal::ctrl_c().await;
+    // End in-flight SSE streams so graceful shutdown can drain the connections
+    // instead of waiting forever on a held-open Status page (issue #15).
+    shutdown.cancel();
 }
