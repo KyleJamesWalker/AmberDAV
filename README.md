@@ -85,6 +85,7 @@ on-device UI compiled in.
 | `amber-dav-aarch64-linux-handheld` | the Anbernic device (static musl) | handheld |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
 | `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
+| `amber-dav-x86_64-linux-handheld` | Steam Deck (Game Mode) / x86 Linux handhelds | handheld |
 | `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
 | `amber-dav-x86_64-macos` | macOS, Intel | headless |
 | `amber-dav-x86_64-windows` | Windows | headless |
@@ -124,6 +125,27 @@ rotation — it's commented.
 > The binary takes optional `[ROOT] [PORT]` positional arguments (defaults:
 > current dir, `8080`). CLI flags and `AMBERDAV_*` env vars take precedence over
 > `config.json`, so a launcher can override the file without editing it.
+
+## Install on Steam Deck (Game Mode)
+
+Use the `amber-dav-x86_64-linux-handheld` asset. In **Game Mode** the screen is
+owned by Gamescope, so amber-dav paints its connection info (IP, password, QR)
+as a fullscreen **Wayland** client. The sink is auto-selected (`$WAYLAND_DISPLAY`
+present → Wayland; `/dev/fb0` is not accessible under Gamescope, and with no
+compositor it falls back to headless). Force a sink with
+`AMBERDAV_DISPLAY=wayland|fb|headless` if needed.
+
+1. In Desktop Mode, copy the binary somewhere persistent (e.g. `~/Applications`).
+2. Add it to Steam as a **Non-Steam Game**, then switch to Game Mode and launch it.
+3. The connection screen appears; scan the QR or read the IP/password.
+4. Quit with the configured exit button (`AMBERDAV_EXIT_KEY`) or by closing the
+   window from the Steam overlay.
+
+Optionally point `--connection-file` at a path a launcher script or a Decky
+plugin can read (e.g. `--connection-file ~/.local/share/amber-dav/connection.json`).
+
+> A Decky Loader plugin would live in its own repo and bundle this same binary;
+> amber-dav needs no Decky-specific code.
 
 ## First launch
 
@@ -169,6 +191,8 @@ one place, the highest layer wins:
 | Permission | `--permission <level>` | `AMBERDAV_PERMISSION` | `permission` |
 | Screensaver on | `--bounce-screen` / `--no-bounce-screen` | `AMBERDAV_BOUNCE_SCREEN` | `bounce_screen.enabled` |
 | Screensaver folders | `--bounce-folders <a,b,…>` | `AMBERDAV_BOUNCE_FOLDERS` | `bounce_screen.folders` |
+| Connection file | `--connection-file <path>` | `AMBERDAV_CONNECTION_FILE` | `connection_file` |
+| Display sink | — | `AMBERDAV_DISPLAY` | — |
 
 ### Config file location
 
