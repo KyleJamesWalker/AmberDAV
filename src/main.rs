@@ -13,7 +13,7 @@ mod password;
 mod screen;
 mod ui;
 mod update;
-#[cfg(all(target_os = "linux", feature = "handheld"))]
+#[cfg(all(target_os = "linux", feature = "handheld", not(feature = "sdl")))]
 mod wayland;
 #[cfg(all(target_os = "linux", feature = "sdl"))]
 mod sdl;

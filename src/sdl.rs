@@ -36,9 +36,7 @@ pub fn driver_candidates(forced: Option<&str>) -> Vec<String> {
 /// Open a fullscreen SDL window and paint the connection-info canvas, trying
 /// each candidate video driver until one initializes. Returns only on error or
 /// when the window is closed; blocks the calling thread.
-// called by main.rs once the SDL sink is wired up (next task)
 #[cfg(feature = "sdl")]
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn run(
     port: u16,
     password: Option<String>,

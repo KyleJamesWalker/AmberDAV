@@ -10,10 +10,7 @@
 //! If the image comes out rotated on a given panel, set the env var
 //! `AMBERDAV_FB_ROTATE` to 90, 180, or 270.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 /// Shared, human-readable framebuffer status (surfaced on the web status page
 /// so the screen can be diagnosed remotely without looking at the panel).
@@ -62,10 +59,28 @@ fn set(status: &Status, msg: String) {
     }
 }
 
+/// SDL build: always use the SDL sink (it auto-selects the video driver).
+#[cfg(all(feature = "handheld", feature = "sdl"))]
+pub fn show(
+    port: u16,
+    password: Option<String>,
+    status: Status,
+    mode: ModeHandle,
+    _bounce_paths: Vec<std::path::PathBuf>,
+) {
+    set(&status, "sdl: starting…".to_string());
+    std::thread::spawn(move || {
+        if let Err(e) = crate::sdl::run(port, password, status.clone(), mode) {
+            set(&status, format!("sdl failed: {e}"));
+            eprintln!("screen: sdl sink failed ({e}); connection info is in the log only");
+        }
+    });
+}
+
 /// Pick the active display sink (Wayland in Game Mode, framebuffer on the
 /// Anbernic/TTY/Desktop Mode, else headless) and start painting connection
 /// info. Returns immediately; the chosen sink runs in a background thread.
-#[cfg(feature = "handheld")]
+#[cfg(all(feature = "handheld", not(feature = "sdl")))]
 pub fn show(
     port: u16,
     password: Option<String>,
@@ -99,13 +114,13 @@ pub fn show(
 
 /// Paint connection info to `/dev/fb0` on a background thread. Returns
 /// immediately after spawning it.
-#[cfg(feature = "handheld")]
+#[cfg(all(feature = "handheld", not(feature = "sdl")))]
 fn show_framebuffer(
     port: u16,
     password: Option<String>,
     status: Status,
     mode: ModeHandle,
-    bounce_paths: Vec<PathBuf>,
+    bounce_paths: Vec<std::path::PathBuf>,
 ) {
     use std::{thread, time::Duration};
 
@@ -185,7 +200,7 @@ pub fn show(
     _password: Option<String>,
     status: Status,
     _mode: ModeHandle,
-    _bounce_paths: Vec<PathBuf>,
+    _bounce_paths: Vec<std::path::PathBuf>,
 ) {
     set(&status, "disabled (headless build)".to_string());
 }
@@ -260,7 +275,7 @@ mod tests {
     }
 }
 
-#[cfg(feature = "handheld")]
+#[cfg(all(feature = "handheld", not(feature = "sdl")))]
 mod imp {
     use std::path::PathBuf;
 
