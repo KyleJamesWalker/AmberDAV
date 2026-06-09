@@ -46,6 +46,9 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         "root": state.root.to_string_lossy(),
         "screen": screen,
         "version": env!("CARGO_PKG_VERSION"),
+        // Gamepad input is only read on device builds; elsewhere the live-input
+        // stream never emits, so the UI hides that card (issue #15).
+        "live_input": cfg!(any(feature = "fb", feature = "sdl")),
     }))
     .into_response()
 }
