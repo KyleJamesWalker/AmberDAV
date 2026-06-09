@@ -7,6 +7,7 @@ name: Release
 #   amber-dav-aarch64-linux-handheld  static musl build for the Anbernic device
 #   amber-dav-aarch64-linux           static musl build for ARM servers/Pi/NAS (headless)
 #   amber-dav-x86_64-linux            static musl build for x86 servers/NAS (headless)
+#   amber-dav-x86_64-linux-handheld   static musl build for Steam Deck / x86 handhelds
 #   amber-dav-aarch64-macos    Apple Silicon CLI build
 #   amber-dav-x86_64-macos     Intel macOS CLI build
 #   amber-dav-x86_64-windows   Windows CLI build
@@ -52,6 +53,13 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux
+            zig: true
+          # Steam Deck Game Mode build: x86_64 static musl with --features
+          # handheld (Wayland connection-info screen + gamepad viewer).
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: amber-dav-x86_64-linux-handheld
+            features: handheld
             zig: true
           # Desktop CLI builds. Both macOS targets run on macos-latest (Apple
           # Silicon); x86_64-apple-darwin is cross-compiled — the Apple SDK on

@@ -75,6 +75,13 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux
             zig: true
+          # Steam Deck (Game Mode): x86_64 static musl WITH the handheld feature
+          # — the on-device Wayland screen + gamepad viewer compiled for x86.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: amber-dav-x86_64-linux-handheld
+            features: handheld
+            zig: true
           # macOS: both arches on the arm64 runner (Apple SDK is universal).
           - os: macos-latest
             target: aarch64-apple-darwin
