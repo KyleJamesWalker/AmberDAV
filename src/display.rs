@@ -79,14 +79,26 @@ mod tests {
     #[test]
     fn override_forces_a_specific_sink() {
         assert_eq!(select(None, false, Some("wayland")), DisplayKind::Wayland);
-        assert_eq!(select(Some("gamescope-0"), true, Some("fb")), DisplayKind::Framebuffer);
-        assert_eq!(select(Some("gamescope-0"), true, Some("headless")), DisplayKind::Headless);
-        assert_eq!(select(Some("gamescope-0"), true, Some("nonsense")), DisplayKind::Wayland);
+        assert_eq!(
+            select(Some("gamescope-0"), true, Some("fb")),
+            DisplayKind::Framebuffer
+        );
+        assert_eq!(
+            select(Some("gamescope-0"), true, Some("headless")),
+            DisplayKind::Headless
+        );
+        assert_eq!(
+            select(Some("gamescope-0"), true, Some("nonsense")),
+            DisplayKind::Wayland
+        );
     }
 
     #[test]
     fn override_is_case_insensitive_and_trimmed() {
-        assert_eq!(select(None, false, Some("  WAYLAND ")), DisplayKind::Wayland);
+        assert_eq!(
+            select(None, false, Some("  WAYLAND ")),
+            DisplayKind::Wayland
+        );
         assert_eq!(select(None, true, Some("FB")), DisplayKind::Framebuffer);
     }
 }

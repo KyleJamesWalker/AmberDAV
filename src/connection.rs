@@ -37,7 +37,10 @@ impl ConnectionInfo {
     pub fn write(&self, path: &Path) {
         // Append a `.tmp` suffix (don't replace the extension) so the temp file is
         // <basename>.tmp for any configured path, then atomically rename into place.
-        let tmp_name = format!("{}.tmp", path.file_name().unwrap_or_default().to_string_lossy());
+        let tmp_name = format!(
+            "{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
         let tmp = path.with_file_name(tmp_name);
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {

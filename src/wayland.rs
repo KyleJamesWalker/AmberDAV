@@ -6,6 +6,11 @@
 //! Software buffers only (no GPU/EGL), so `smithay-client-toolkit` stays on its
 //! default pure-Rust backend and the static musl binary keeps working.
 
+use smithay_client_toolkit::reexports::client::{
+    globals::registry_queue_init,
+    protocol::{wl_output, wl_shm, wl_surface},
+    Connection, QueueHandle,
+};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
@@ -24,11 +29,6 @@ use smithay_client_toolkit::{
         slot::{Buffer, SlotPool},
         Shm, ShmHandler,
     },
-};
-use smithay_client_toolkit::reexports::client::{
-    globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
-    Connection, QueueHandle,
 };
 
 use crate::canvas::{black_canvas, info_canvas, Canvas};
@@ -125,9 +125,13 @@ impl App {
         let mode = self.mode.lock().map(|m| *m).unwrap_or(Mode::Info);
         match mode {
             // Bounce is framebuffer-only for now; under Wayland it shows Info.
-            Mode::Info | Mode::Bounce => {
-                info_canvas(w, h, crate::current_ip(), self.port, self.password.as_deref())
-            }
+            Mode::Info | Mode::Bounce => info_canvas(
+                w,
+                h,
+                crate::current_ip(),
+                self.port,
+                self.password.as_deref(),
+            ),
             Mode::Black => black_canvas(w, h),
         }
     }
@@ -157,7 +161,10 @@ impl App {
 
         // (Re)create the retained buffer only on first paint or a resize.
         if self.buffer.is_none() || self.buf_dims != (self.width, self.height) {
-            match self.pool.create_buffer(w, h, stride, wl_shm::Format::Argb8888) {
+            match self
+                .pool
+                .create_buffer(w, h, stride, wl_shm::Format::Argb8888)
+            {
                 Ok((buffer, _)) => {
                     self.buffer = Some(buffer);
                     self.buf_dims = (self.width, self.height);
@@ -212,20 +219,61 @@ impl App {
 }
 
 impl CompositorHandler for App {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _time: u32) {
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: i32,
+    ) {
+    }
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: wl_output::Transform,
+    ) {
+    }
+    fn frame(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _time: u32,
+    ) {
         self.draw(qh);
     }
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
 }
 
 impl WindowHandler for App {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
         self.closed = true;
     }
-    fn configure(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &Window, configure: WindowConfigure, _serial: u32) {
+    fn configure(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        _: &Window,
+        configure: WindowConfigure,
+        _serial: u32,
+    ) {
         // Compositors (esp. Gamescope) may send (None, None) meaning "you
         // choose"; keep current dims. Defaults (1280x800) match the Deck panel.
         if let (Some(w), Some(h)) = (configure.new_size.0, configure.new_size.1) {

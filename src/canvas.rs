@@ -27,7 +27,11 @@ pub struct Canvas {
 
 impl Canvas {
     fn filled(w: usize, h: usize, color: [u8; 3]) -> Canvas {
-        Canvas { w, h, px: vec![color; w * h] }
+        Canvas {
+            w,
+            h,
+            px: vec![color; w * h],
+        }
     }
 }
 
@@ -84,7 +88,14 @@ pub fn info_canvas(w: usize, h: usize, ip: IpAddr, port: u16, password: Option<&
         for my in 0..qw {
             for mx in 0..qw {
                 if modules[my * qw + mx] == Color::Dark {
-                    fill_rect(&mut c, qx + (mx + quiet) * qs, qy + (my + quiet) * qs, qs, qs, BLACK);
+                    fill_rect(
+                        &mut c,
+                        qx + (mx + quiet) * qs,
+                        qy + (my + quiet) * qs,
+                        qs,
+                        qs,
+                        BLACK,
+                    );
                 }
             }
         }
@@ -142,7 +153,10 @@ mod tests {
         assert_eq!(c.w, 480);
         assert_eq!(c.h, 320);
         assert_eq!(c.px.len(), 480 * 320);
-        assert!(c.px.iter().any(|p| *p != [255, 255, 255]), "canvas drew nothing");
+        assert!(
+            c.px.iter().any(|p| *p != [255, 255, 255]),
+            "canvas drew nothing"
+        );
     }
 
     #[test]
@@ -152,7 +166,11 @@ mod tests {
         assert!(c.px.contains(&[0, 0, 0]));
         // Center stays background white: the QR block was skipped on unspecified IP.
         let (cx, cy) = (c.w / 2, c.h / 2);
-        assert_eq!(c.px[cy * c.w + cx], [255, 255, 255], "QR should not appear on unspecified IP");
+        assert_eq!(
+            c.px[cy * c.w + cx],
+            [255, 255, 255],
+            "QR should not appear on unspecified IP"
+        );
     }
 
     #[test]

@@ -220,7 +220,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shown_password = display_password.then(|| password.clone());
 
     // Optional sidecar for external launchers / Decky. Honors the hidden-pw rule.
-    if let Some(cf) = settings.connection_file.as_deref().filter(|p| !p.is_empty()) {
+    if let Some(cf) = settings
+        .connection_file
+        .as_deref()
+        .filter(|p| !p.is_empty())
+    {
         connection::ConnectionInfo::new(ip, port, shown_password.clone())
             .write(std::path::Path::new(cf));
     }
@@ -228,7 +232,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_banner(ip, port, &root, &password);
     // Paint the connection info + QR onto the device screen (password hidden
     // when configured, but only ever allowed when it's a fixed password).
-    screen::show(port, shown_password, screen_status, screen_mode, bounce_paths);
+    screen::show(
+        port,
+        shown_password,
+        screen_status,
+        screen_mode,
+        bounce_paths,
+    );
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     axum::serve(listener, app)

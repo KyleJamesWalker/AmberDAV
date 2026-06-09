@@ -80,14 +80,18 @@ pub fn show(
             std::thread::spawn(move || {
                 if let Err(e) = crate::wayland::run(port, password, status.clone(), mode) {
                     set(&status, format!("wayland failed: {e}"));
-                    eprintln!("screen: wayland sink failed ({e}); connection info is in the log only");
+                    eprintln!(
+                        "screen: wayland sink failed ({e}); connection info is in the log only"
+                    );
                 }
             });
         }
         DisplayKind::Framebuffer => show_framebuffer(port, password, status, mode, bounce_paths),
         DisplayKind::Headless => {
             set(&status, "disabled (no display detected)".to_string());
-            eprintln!("screen: no /dev/fb0 and no Wayland display; connection info is in the log only");
+            eprintln!(
+                "screen: no /dev/fb0 and no Wayland display; connection info is in the log only"
+            );
         }
     }
 }
@@ -568,5 +572,4 @@ mod imp {
         };
         chan(r, &var.red) | chan(g, &var.green) | chan(b, &var.blue)
     }
-
 }
