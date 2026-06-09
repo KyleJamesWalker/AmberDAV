@@ -172,7 +172,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Broadcast channel carrying input events to all connected SSE clients.
     let (events, _) = broadcast::channel::<InputUpdate>(256);
-    input::spawn(events.clone(), screen_mode.clone(), bounce_enabled);
+    input::spawn(
+        events.clone(),
+        screen_mode.clone(),
+        input::InputKeys {
+            exit: settings.exit_keys.clone(),
+            blank: settings.blank_keys.clone(),
+            bounce: settings.bounce_keys.clone(),
+            bounce_enabled,
+        },
+    );
 
     let screen_status: screen::Status = Arc::new(std::sync::Mutex::new("starting…".to_string()));
 

@@ -33,12 +33,6 @@ pub enum Mode {
 /// Live screen mode, shared between the render thread and the input thread.
 pub type ModeHandle = Arc<Mutex<Mode>>;
 
-/// evdev key codes for the face buttons that drive the screen.
-#[allow(dead_code)] // read by the handheld input thread only
-pub const BTN_SOUTH: u16 = 304; // "A" → blank
-#[allow(dead_code)] // read by the handheld input thread only
-pub const BTN_NORTH: u16 = 307; // "X" → bounce screensaver
-
 /// Create the shared mode handle (starts on [`Mode::Info`]).
 pub fn mode_handle() -> ModeHandle {
     Arc::new(Mutex::new(Mode::Info))
