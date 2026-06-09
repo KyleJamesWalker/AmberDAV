@@ -31,3 +31,26 @@ Build/transfer the `amber-dav-x86_64-linux-handheld` asset to the Deck.
 ## Record findings
 - [ ] File issues/follow-ups for anything that didn't work (exit-key default,
       Wayland blank/bounce, sidecar refresh on IP change).
+
+## SDL build (on-screen QR in Game Mode)
+
+Use `amber-dav-x86_64-linux-sdl` (Deck) / `amber-dav-aarch64-linux-sdl` (Anbernic).
+These are dynamic builds that link the device's `libSDL2`; the SDL video driver
+is auto-selected (`x11` → `mali` → `wayland` → `kmsdrm` → `fbcon`).
+
+### Steam Deck — Game Mode
+- [ ] Added as a Non-Steam Game and launched: the IP/password/QR fills the screen
+      (no black screen / Steam spinner). The log shows `sdl: using driver x11`.
+- [ ] The QR scans; the web UI is reachable from a phone.
+- [ ] Late Wi-Fi recovers within ~1s (the canvas re-renders the IP).
+- [ ] Closing/stopping the game from the Steam overlay exits cleanly.
+
+### Anbernic — APPS launcher (docs/anbernic-sdl/SDL.sh)
+- [ ] Launches; the QR shows via `sdl: using driver mali` (per log.txt).
+- [ ] Driver fallback behaves if one is unavailable (the log lists candidates tried).
+
+### Both
+- [ ] The gamepad viewer still streams events (evdev is unaffected by the SDL sink).
+- [ ] The static framebuffer build still works on the Anbernic (no regression).
+- [ ] No CPU pinned at idle on the static info screen (the loop is rate-limited
+      even when a driver ignores vsync).
