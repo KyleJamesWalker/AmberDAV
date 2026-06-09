@@ -1,6 +1,6 @@
 //! On-device screen output. Draws the connection info (IP, password) and a QR
 //! code straight to the Linux framebuffer (`/dev/fb0`) so the handheld is
-//! usable without already knowing its IP. Compiled in only with the `handheld`
+//! usable without already knowing its IP. Compiled in with the `fb` or `sdl`
 //! feature; a no-op stub otherwise (desktop/server builds).
 //!
 //! The displayed mode is shared with the input thread so the gamepad can drive
@@ -10,10 +10,7 @@
 //! If the image comes out rotated on a given panel, set the env var
 //! `AMBERDAV_FB_ROTATE` to 90, 180, or 270.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 /// Shared, human-readable framebuffer status (surfaced on the web status page
 /// so the screen can be diagnosed remotely without looking at the panel).
@@ -36,12 +33,6 @@ pub enum Mode {
 /// Live screen mode, shared between the render thread and the input thread.
 pub type ModeHandle = Arc<Mutex<Mode>>;
 
-/// evdev key codes for the face buttons that drive the screen.
-#[allow(dead_code)] // read by the handheld input thread only
-pub const BTN_SOUTH: u16 = 304; // "A" → blank
-#[allow(dead_code)] // read by the handheld input thread only
-pub const BTN_NORTH: u16 = 307; // "X" → bounce screensaver
-
 /// Create the shared mode handle (starts on [`Mode::Info`]).
 pub fn mode_handle() -> ModeHandle {
     Arc::new(Mutex::new(Mode::Info))
@@ -62,13 +53,68 @@ fn set(status: &Status, msg: String) {
     }
 }
 
-#[cfg(feature = "handheld")]
+/// SDL build: always use the SDL sink (it auto-selects the video driver).
+#[cfg(feature = "sdl")]
 pub fn show(
     port: u16,
     password: Option<String>,
     status: Status,
     mode: ModeHandle,
-    bounce_paths: Vec<PathBuf>,
+    bounce_paths: Vec<std::path::PathBuf>,
+) {
+    set(&status, "sdl: starting…".to_string());
+    std::thread::spawn(move || {
+        if let Err(e) = crate::sdl::run(port, password, status.clone(), mode, bounce_paths) {
+            set(&status, format!("sdl failed: {e}"));
+            eprintln!("screen: sdl sink failed ({e}); connection info is in the log only");
+        }
+    });
+}
+
+/// Pick the active display sink (Wayland in Game Mode, framebuffer on the
+/// Anbernic/TTY/Desktop Mode, else headless) and start painting connection
+/// info. Returns immediately; the chosen sink runs in a background thread.
+#[cfg(all(feature = "fb", not(feature = "sdl")))]
+pub fn show(
+    port: u16,
+    password: Option<String>,
+    status: Status,
+    mode: ModeHandle,
+    bounce_paths: Vec<std::path::PathBuf>,
+) {
+    use crate::display::{detect, DisplayKind};
+    match detect() {
+        DisplayKind::Wayland => {
+            let socket = crate::display::wayland_socket();
+            set(&status, "wayland: starting…".to_string());
+            std::thread::spawn(move || {
+                if let Err(e) = crate::wayland::run(port, password, status.clone(), mode, socket) {
+                    set(&status, format!("wayland failed: {e}"));
+                    eprintln!(
+                        "screen: wayland sink failed ({e}); connection info is in the log only"
+                    );
+                }
+            });
+        }
+        DisplayKind::Framebuffer => show_framebuffer(port, password, status, mode, bounce_paths),
+        DisplayKind::Headless => {
+            set(&status, "disabled (no display detected)".to_string());
+            eprintln!(
+                "screen: no /dev/fb0 and no Wayland display; connection info is in the log only"
+            );
+        }
+    }
+}
+
+/// Paint connection info to `/dev/fb0` on a background thread. Returns
+/// immediately after spawning it.
+#[cfg(all(feature = "fb", not(feature = "sdl")))]
+fn show_framebuffer(
+    port: u16,
+    password: Option<String>,
+    status: Status,
+    mode: ModeHandle,
+    bounce_paths: Vec<std::path::PathBuf>,
 ) {
     use std::{thread, time::Duration};
 
@@ -89,7 +135,7 @@ pub fn show(
             let mut page = 0usize;
             let mut frame = 0u64;
             let mut last_mode: Option<Mode> = None;
-            let mut bounce = imp::Bounce::new(bounce_paths);
+            let mut bounce = crate::bounce::Bounce::new(bounce_paths);
 
             loop {
                 let mode = mode.lock().map(|m| *m).unwrap_or(Mode::Info);
@@ -108,12 +154,12 @@ pub fn show(
                             // Re-query the IP each paint so the screen recovers
                             // once Wi-Fi connects after launch.
                             let ip = crate::current_ip();
-                            imp::info_canvas(&geom, ip, port, pw.as_deref())
+                            crate::canvas::info_canvas(geom.lw, geom.lh, ip, port, pw.as_deref()).px
                         }
-                        Mode::Black => vec![[0u8; 3]; geom.lw * geom.lh],
+                        Mode::Black => crate::canvas::black_canvas(geom.lw, geom.lh).px,
                         Mode::Bounce => {
-                            bounce.step(&geom);
-                            bounce.canvas(&geom)
+                            bounce.step(geom.lw, geom.lh);
+                            bounce.canvas(geom.lw, geom.lh)
                         }
                     };
                     match imp::commit(&mut fb, &geom, &canvas, page) {
@@ -142,13 +188,13 @@ pub fn show(
     });
 }
 
-#[cfg(not(feature = "handheld"))]
+#[cfg(not(any(feature = "fb", feature = "sdl")))]
 pub fn show(
     _port: u16,
     _password: Option<String>,
     status: Status,
     _mode: ModeHandle,
-    _bounce_paths: Vec<PathBuf>,
+    _bounce_paths: Vec<std::path::PathBuf>,
 ) {
     set(&status, "disabled (headless build)".to_string());
 }
@@ -223,18 +269,9 @@ mod tests {
     }
 }
 
-#[cfg(feature = "handheld")]
+#[cfg(all(feature = "fb", not(feature = "sdl")))]
 mod imp {
-    use std::net::IpAddr;
-    use std::path::PathBuf;
-
-    use font8x8::legacy::BASIC_LEGACY;
     use framebuffer::{Bitfield, Framebuffer, VarScreeninfo};
-    use qrcode::{Color, QrCode};
-    use rand::Rng;
-
-    const BLACK: [u8; 3] = [0, 0, 0];
-    const WHITE: [u8; 3] = [255, 255, 255];
 
     fn rotation() -> u32 {
         std::env::var("AMBERDAV_FB_ROTATE")
@@ -289,96 +326,6 @@ mod imp {
         }
     }
 
-    /// Build the connection-info canvas: IP, credentials, and a QR code.
-    pub fn info_canvas(g: &Geom, ip: IpAddr, port: u16, password: Option<&str>) -> Vec<[u8; 3]> {
-        let (lw, lh) = (g.lw, g.lh);
-        let mut canvas = vec![WHITE; lw * lh];
-
-        let scale = (lw / 240).max(2);
-        let line_h = 8 * scale + scale * 2;
-        let margin = scale * 3;
-
-        // App version, pinned to the bottom-right corner. Drawn first so it is
-        // present on both the "waiting for Wi-Fi" and full info screens (the
-        // QR/info view), and the centered QR never lands on top of it.
-        draw_version(&mut canvas, lw, lh, margin, scale);
-
-        let mut y = margin;
-
-        draw_text(
-            &mut canvas,
-            lw,
-            lh,
-            margin,
-            y,
-            "amber-dav  file access",
-            scale,
-        );
-        y += line_h;
-
-        // No network yet (0.0.0.0): a QR to http://0.0.0.0/ is useless, so just
-        // ask the user to wait. The render loop repaints every ~2s, so once
-        // Wi-Fi connects this recovers into the full info screen on its own.
-        if ip.is_unspecified() {
-            draw_text(&mut canvas, lw, lh, margin, y, "Waiting for Wi-Fi…", scale);
-            return canvas;
-        }
-
-        draw_text(
-            &mut canvas,
-            lw,
-            lh,
-            margin,
-            y,
-            &format!("IP:   {ip}:{port}"),
-            scale,
-        );
-        y += line_h;
-        draw_text(&mut canvas, lw, lh, margin, y, "User: anything", scale);
-        y += line_h;
-        let pass_line = match password {
-            Some(p) => format!("Pass: {p}"),
-            None => "Pass: (hidden)".to_string(),
-        };
-        draw_text(&mut canvas, lw, lh, margin, y, &pass_line, scale);
-        y += line_h + scale * 2;
-
-        // QR of the status page URL, centered below the text.
-        let url = format!("http://{ip}:{port}/");
-        if let Ok(code) = QrCode::new(url.as_bytes()) {
-            let w = code.width();
-            let modules = code.to_colors();
-            let quiet = 4usize;
-            let total = w + quiet * 2;
-            let avail_w = lw.saturating_sub(margin * 2);
-            let avail_h = lh.saturating_sub(y + line_h + margin);
-            let qs = (avail_w.min(avail_h) / total).max(1);
-            let qpix = total * qs;
-            let qx = lw.saturating_sub(qpix) / 2;
-            let qy = y;
-
-            for my in 0..w {
-                for mx in 0..w {
-                    if modules[my * w + mx] == Color::Dark {
-                        fill_rect(
-                            &mut canvas,
-                            lw,
-                            lh,
-                            qx + (mx + quiet) * qs,
-                            qy + (my + quiet) * qs,
-                            qs,
-                            qs,
-                            BLACK,
-                        );
-                    }
-                }
-            }
-            draw_text(&mut canvas, lw, lh, qx, qy + qpix, "Scan to connect", scale);
-        }
-
-        canvas
-    }
-
     /// Blit a logical RGB canvas to the framebuffer (applying rotation + the
     /// device pixel format) and commit it via FBIOPAN_DISPLAY. Returns a short
     /// geometry description on success.
@@ -420,200 +367,6 @@ mod imp {
         ))
     }
 
-    /// A decoded image scaled to a sprite, plus the live bounce position.
-    struct Sprite {
-        w: usize,
-        h: usize,
-        px: Vec<[u8; 3]>,
-    }
-
-    /// State for the DVD-bounce screensaver.
-    pub struct Bounce {
-        /// Files/dirs from config; expanded into `images` on first activation.
-        roots: Vec<PathBuf>,
-        images: Vec<PathBuf>,
-        scanned: bool,
-        started: bool,
-        sprite: Option<Sprite>,
-        x: i32,
-        y: i32,
-        vx: i32,
-        vy: i32,
-    }
-
-    impl Bounce {
-        pub fn new(roots: Vec<PathBuf>) -> Bounce {
-            Bounce {
-                roots,
-                images: Vec::new(),
-                scanned: false,
-                started: false,
-                sprite: None,
-                x: 0,
-                y: 0,
-                vx: 3,
-                vy: 2,
-            }
-        }
-
-        /// Advance the animation one frame: move the sprite, and on hitting an
-        /// edge reflect its heading and swap to a new image — keeping position.
-        pub fn step(&mut self, g: &Geom) {
-            if !self.scanned {
-                self.images = scan_images(&self.roots);
-                self.scanned = true;
-            }
-            if self.images.is_empty() {
-                return; // No images → black screen, which still prevents burn-in.
-            }
-            // First activation: place a centered sprite with a random heading.
-            if !self.started {
-                self.start(g);
-                self.started = true;
-                return;
-            }
-            let Some(sprite) = &self.sprite else {
-                // Decode kept failing earlier; try again before moving.
-                self.start(g);
-                return;
-            };
-
-            let maxx = g.lw.saturating_sub(sprite.w) as i32;
-            let maxy = g.lh.saturating_sub(sprite.h) as i32;
-            self.x += self.vx;
-            self.y += self.vy;
-            let mut bounced = false;
-            if self.x <= 0 {
-                self.x = 0;
-                self.vx = self.vx.abs();
-                bounced = true;
-            } else if self.x >= maxx {
-                self.x = maxx;
-                self.vx = -self.vx.abs();
-                bounced = true;
-            }
-            if self.y <= 0 {
-                self.y = 0;
-                self.vy = self.vy.abs();
-                bounced = true;
-            } else if self.y >= maxy {
-                self.y = maxy;
-                self.vy = -self.vy.abs();
-                bounced = true;
-            }
-            // Classic DVD behaviour: swap the image on each edge bounce. Keep
-            // the current position and the just-reflected heading.
-            if bounced && self.images.len() > 1 {
-                self.swap_image(g);
-            }
-        }
-
-        /// First placement: a centered sprite with a random diagonal heading.
-        fn start(&mut self, g: &Geom) {
-            let mut rng = rand::rng();
-            if let Some(sprite) = self.pick_sprite(g, &mut rng) {
-                self.x = (g.lw.saturating_sub(sprite.w) / 2) as i32;
-                self.y = (g.lh.saturating_sub(sprite.h) / 2) as i32;
-                self.vx = if rng.random_bool(0.5) { 3 } else { -3 };
-                self.vy = if rng.random_bool(0.5) { 2 } else { -2 };
-                self.sprite = Some(sprite);
-            }
-        }
-
-        /// Replace the sprite with a new random image, preserving position and
-        /// heading. Position is clamped so a larger image stays on screen.
-        fn swap_image(&mut self, g: &Geom) {
-            let mut rng = rand::rng();
-            if let Some(sprite) = self.pick_sprite(g, &mut rng) {
-                let maxx = g.lw.saturating_sub(sprite.w) as i32;
-                let maxy = g.lh.saturating_sub(sprite.h) as i32;
-                self.x = self.x.clamp(0, maxx.max(0));
-                self.y = self.y.clamp(0, maxy.max(0));
-                self.sprite = Some(sprite);
-            }
-        }
-
-        /// Pick and decode a random image, sized to ~1/3 of the canvas. Tries a
-        /// handful in case some fail to decode (e.g. a corrupt file).
-        fn pick_sprite(&self, g: &Geom, rng: &mut impl Rng) -> Option<Sprite> {
-            let cap = (g.lw.min(g.lh) / 3).max(32) as u32;
-            for _ in 0..self.images.len().min(8) {
-                let idx = rng.random_range(0..self.images.len());
-                if let Some(sprite) = decode_sprite(&self.images[idx], cap) {
-                    return Some(sprite);
-                }
-            }
-            None
-        }
-
-        /// Render the current sprite onto a black canvas.
-        pub fn canvas(&self, g: &Geom) -> Vec<[u8; 3]> {
-            let mut canvas = vec![BLACK; g.lw * g.lh];
-            if let Some(s) = &self.sprite {
-                for sy in 0..s.h {
-                    let ty = self.y + sy as i32;
-                    if ty < 0 || ty >= g.lh as i32 {
-                        continue;
-                    }
-                    for sx in 0..s.w {
-                        let tx = self.x + sx as i32;
-                        if tx < 0 || tx >= g.lw as i32 {
-                            continue;
-                        }
-                        canvas[ty as usize * g.lw + tx as usize] = s.px[sy * s.w + sx];
-                    }
-                }
-            }
-            canvas
-        }
-    }
-
-    /// Extensions we can decode for the screensaver.
-    const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
-
-    fn is_image(path: &std::path::Path) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-            .unwrap_or(false)
-    }
-
-    /// Expand the configured files/folders into a flat list of image files.
-    /// Folders are walked recursively (bounded, to stay responsive).
-    fn scan_images(roots: &[PathBuf]) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let mut stack: Vec<PathBuf> = roots.to_vec();
-        let cap = 5000;
-        while let Some(p) = stack.pop() {
-            if out.len() >= cap {
-                break;
-            }
-            if p.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&p) {
-                    for entry in entries.flatten() {
-                        stack.push(entry.path());
-                    }
-                }
-            } else if p.is_file() && is_image(&p) {
-                out.push(p);
-            }
-        }
-        eprintln!("screen: bounce screensaver found {} image(s)", out.len());
-        out
-    }
-
-    /// Decode `path` and downscale so its largest side is at most `cap` pixels.
-    fn decode_sprite(path: &std::path::Path, cap: u32) -> Option<Sprite> {
-        let img = image::open(path).ok()?;
-        let img = img.thumbnail(cap, cap).to_rgb8();
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let px = img.pixels().map(|p| [p[0], p[1], p[2]]).collect();
-        Some(Sprite { w, h, px })
-    }
-
     /// Pack an 8-bit RGB triple into the framebuffer's native pixel value.
     fn pack(r: u8, g: u8, b: u8, var: &VarScreeninfo) -> u32 {
         let chan = |v: u8, bf: &Bitfield| -> u32 {
@@ -629,74 +382,5 @@ mod imp {
             (scaled & ((1u32 << len) - 1)) << bf.offset
         };
         chan(r, &var.red) | chan(g, &var.green) | chan(b, &var.blue)
-    }
-
-    // Low-level blit helpers: explicit canvas dims + position read clearly at
-    // the call sites, so the positional argument count is intentional.
-    #[allow(clippy::too_many_arguments)]
-    fn fill_rect(
-        buf: &mut [[u8; 3]],
-        w: usize,
-        h: usize,
-        x: usize,
-        y: usize,
-        rw: usize,
-        rh: usize,
-        val: [u8; 3],
-    ) {
-        for yy in y..(y + rh).min(h) {
-            for xx in x..(x + rw).min(w) {
-                buf[yy * w + xx] = val;
-            }
-        }
-    }
-
-    /// Draw the crate version (e.g. `v0.1.0`) flush against the bottom-right
-    /// corner, inset by `margin`. The string is short enough to never reach the
-    /// centered QR, so it shares the info screen without overlapping anything.
-    fn draw_version(buf: &mut [[u8; 3]], w: usize, h: usize, margin: usize, scale: usize) {
-        let text = concat!("v", env!("CARGO_PKG_VERSION"));
-        let text_w = text.chars().count() * 8 * scale;
-        let text_h = 8 * scale;
-        let x = w.saturating_sub(text_w + margin);
-        let y = h.saturating_sub(text_h + margin);
-        draw_text(buf, w, h, x, y, text, scale);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_text(
-        buf: &mut [[u8; 3]],
-        w: usize,
-        h: usize,
-        x: usize,
-        y: usize,
-        text: &str,
-        scale: usize,
-    ) {
-        let mut cx = x;
-        for ch in text.chars() {
-            let glyph = BASIC_LEGACY
-                .get(ch as usize)
-                .copied()
-                .unwrap_or(BASIC_LEGACY[' ' as usize]);
-            for (row, bits) in glyph.iter().enumerate() {
-                for col in 0..8 {
-                    // font8x8 is LSB-first: bit 0 is the leftmost column.
-                    if bits & (1 << col) != 0 {
-                        fill_rect(
-                            buf,
-                            w,
-                            h,
-                            cx + col * scale,
-                            y + row * scale,
-                            scale,
-                            scale,
-                            BLACK,
-                        );
-                    }
-                }
-            }
-            cx += 8 * scale;
-        }
     }
 }

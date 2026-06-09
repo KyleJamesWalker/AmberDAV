@@ -2,14 +2,23 @@
 //! Anbernic handhelds (Allwinner H700, aarch64 Linux).
 
 mod auth;
+#[cfg(any(feature = "fb", feature = "sdl"))]
+mod bounce;
+mod canvas;
 mod cli;
 mod config;
+mod connection;
+mod display;
 mod files;
 mod input;
 mod password;
 mod screen;
+#[cfg(all(target_os = "linux", feature = "sdl"))]
+mod sdl;
 mod ui;
 mod update;
+#[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
+mod wayland;
 mod webdav;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};
@@ -79,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handheld: keep auto-creating a default config on first run — the device
     // is configured through the web UI, so the file must exist to be edited.
     // Desktop/server builds never write implicitly; use `--save` to opt in.
-    #[cfg(feature = "handheld")]
+    #[cfg(any(feature = "fb", feature = "sdl"))]
     if !config_path.exists() {
         match config::save(&config_path, &config::Settings::default()) {
             Ok(()) => eprintln!("config: wrote default {}", config_path.display()),
@@ -163,7 +172,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Broadcast channel carrying input events to all connected SSE clients.
     let (events, _) = broadcast::channel::<InputUpdate>(256);
-    input::spawn(events.clone(), screen_mode.clone(), bounce_enabled);
+    input::spawn(
+        events.clone(),
+        screen_mode.clone(),
+        input::InputKeys {
+            exit: settings.exit_keys.clone(),
+            blank: settings.blank_keys.clone(),
+            bounce: settings.bounce_keys.clone(),
+            bounce_enabled,
+        },
+    );
 
     let screen_status: screen::Status = Arc::new(std::sync::Mutex::new("starting…".to_string()));
 
@@ -211,11 +229,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(&format!("{}/{{*rest}}", webdav::MOUNT), any(webdav::route))
         .with_state(state);
 
+    // Password to surface (screen + sidecar), honoring the hidden-password rule.
+    let shown_password = display_password.then(|| password.clone());
+
+    // Optional sidecar for external launchers / Decky. Honors the hidden-pw rule.
+    if let Some(cf) = settings
+        .connection_file
+        .as_deref()
+        .filter(|p| !p.is_empty())
+    {
+        connection::ConnectionInfo::new(ip, port, shown_password.clone())
+            .write(std::path::Path::new(cf));
+    }
+
     print_banner(ip, port, &root, &password);
     // Paint the connection info + QR onto the device screen (password hidden
     // when configured, but only ever allowed when it's a fixed password).
-    let screen_pw = display_password.then(|| password.clone());
-    screen::show(port, screen_pw, screen_status, screen_mode, bounce_paths);
+    screen::show(
+        port,
+        shown_password,
+        screen_status,
+        screen_mode,
+        bounce_paths,
+    );
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     axum::serve(listener, app)

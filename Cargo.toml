@@ -11,6 +11,7 @@ axum = "0.8"
 dav-server = "0.11"
 rand = "0.9"
 qrcode = "0.14"
+font8x8 = "0.3"
 local-ip-address = "0.6"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
@@ -23,25 +24,42 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # manually so CLI > env > file > default precedence stays predictable, including
 # for the positional root/port args.)
 clap = { version = "4", features = ["derive"] }
-# Platform-standard config directory for desktop/server (non-handheld) builds.
-# Only referenced under cfg(not(feature = "handheld")); idle weight otherwise.
+# Platform-standard config directory for desktop/server (headless) builds. Only
+# referenced under cfg(not(any(feature = "fb", feature = "sdl"))); idle weight
+# otherwise.
 directories = "6"
 
-# The handheld feature gates the on-device UI (framebuffer screen + gamepad
-# input + the DVD-bounce screensaver). Opt-in, not default: headless desktop
-# and server builds leave it off and ship without the device-only deps.
+# On-device builds come in two shapes, each selected by its own feature. Both
+# pull in the same substrate — gamepad input, the screen Mode state machine, the
+# DVD-bounce screensaver, and config-beside-the-binary — and differ only in the
+# display sink. Opt-in, not default: headless desktop/server builds leave both
+# off and ship without any of the device-only deps.
 [features]
-handheld = ["dep:evdev", "dep:framebuffer", "dep:font8x8", "dep:image"]
+# Static framebuffer/Wayland sink (Anbernic; Steam Deck without SDL).
+fb = ["dep:evdev", "dep:framebuffer", "dep:image", "dep:smithay-client-toolkit"]
+# Dynamic SDL2 on-screen sink: links the system libSDL2 (not static musl) and
+# brings its own sink, so it does not pull the framebuffer/Wayland crates. Steam
+# Deck + Anbernic. If both `fb` and `sdl` are enabled, `sdl` wins.
+sdl = ["dep:evdev", "dep:image", "dep:sdl2"]
 
-# Device-only deps. Linux-only crates (framebuffer/evdev), pulled in solely by
-# the `handheld` feature, which is only ever built for the aarch64 device.
+# Device-only deps. Linux-only crates (framebuffer/evdev/sdl2), pulled in solely
+# by the `fb`/`sdl` features, which are only ever built for the handheld devices.
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { version = "0.13", features = ["tokio"], optional = true }
 framebuffer = { version = "0.3", optional = true }
-font8x8 = { version = "0.3", optional = true }
 # Decodes images for the burn-in "DVD bounce" screensaver. Pure-Rust decoders
 # only, so the static musl build keeps working.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"], optional = true }
+# Pure-Rust Wayland client (no libwayland; static-musl friendly). Drives the
+# Steam Deck screen, where Gamescope owns DRM and /dev/fb0 is hidden.
+# default-features disabled on purpose: the defaults pull in `xkbcommon` (a C
+# library, breaks the static-musl build) and `calloop` for keyboard/seat
+# handling we do not use — we dispatch the queue directly and only need the
+# compositor/xdg-shell/wl_shm/output globals.
+smithay-client-toolkit = { version = "0.20", default-features = false, optional = true }
+# Dynamically links the system libSDL2 so the device's own driver is used at
+# runtime (Xwayland on the Steam Deck, the `mali` vendor driver on Anbernic).
+sdl2 = { version = "0.38", optional = true }
 
 # Small, static-friendly release binary for the handhelds.
 [profile.release]

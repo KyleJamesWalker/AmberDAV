@@ -4,18 +4,22 @@ name: Release
 # `gh release create`). The release tag drives the version; this workflow builds
 # a binary per platform and attaches each to the release.
 #
-#   amber-dav-aarch64-linux-handheld  static musl build for the Anbernic device
+#   amber-dav-aarch64-linux-fb        static musl build for the Anbernic device
 #   amber-dav-aarch64-linux           static musl build for ARM servers/Pi/NAS (headless)
 #   amber-dav-x86_64-linux            static musl build for x86 servers/NAS (headless)
+#   amber-dav-x86_64-linux-fb         static musl build for x86 handhelds
+#   amber-dav-x86_64-linux-sdl        SDL2 on-screen build for Steam Deck
+#   amber-dav-aarch64-linux-sdl       SDL2 on-screen build for Anbernic handhelds
 #   amber-dav-aarch64-macos    Apple Silicon CLI build
 #   amber-dav-x86_64-macos     Intel macOS CLI build
 #   amber-dav-x86_64-windows   Windows CLI build
 #   amber-dav-aarch64-windows  ARM Windows CLI build (Snapdragon/Copilot+ PCs)
 #
-# Assets follow `amber-dav-<arch>-<os>[-handheld]`. Only the `-handheld` asset is
-# built with `--features handheld` (the on-device framebuffer screen + gamepad
-# input); every other asset is a plain headless WebDAV/file-server CLI with the
-# device-only deps left out entirely.
+# Assets follow `amber-dav-<arch>-<os>[-fb|-sdl]`. The `-fb` assets use
+# `--features fb` (static framebuffer/Wayland screen + gamepad input); the `-sdl`
+# assets use `--features sdl` (SDL2 on-screen display, dynamically linked); every
+# other asset is a plain headless WebDAV/file-server CLI with device-only deps
+# left out entirely.
 on:
   release:
     types: [published]
@@ -35,13 +39,13 @@ jobs:
       matrix:
         include:
           # Device build: fully static aarch64 musl, cross-linked with Zig.
-          # The only build with --features handheld (framebuffer + gamepad UI).
+          # Built with --features fb (framebuffer + gamepad UI).
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            asset: amber-dav-aarch64-linux-handheld
-            features: handheld
+            asset: amber-dav-aarch64-linux-fb
+            features: fb
             zig: true
-          # Headless ARM server build: same aarch64 musl target, no handheld
+          # Headless ARM server build: same aarch64 musl target, no device
           # feature. For Raspberry Pi, ARM NAS, and ARM cloud (Graviton/Ampere).
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
@@ -53,6 +57,27 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux
             zig: true
+          # x86_64 static musl with --features fb
+          # (Wayland connection-info screen + gamepad viewer).
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: amber-dav-x86_64-linux-fb
+            features: fb
+            zig: true
+          # SDL2 on-screen build for the Steam Deck: native x86_64
+          # gnu, dynamically links the system libSDL2. Uses --features sdl.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: amber-dav-x86_64-linux-sdl
+            features: sdl
+            sdl: true
+          # SDL2 on-screen build for Anbernic handhelds: native aarch64 gnu on an
+          # arm64 runner (the device's libSDL2 provides the `mali` driver at runtime).
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: amber-dav-aarch64-linux-sdl
+            features: sdl
+            sdl: true
           # Desktop CLI builds. Both macOS targets run on macos-latest (Apple
           # Silicon); x86_64-apple-darwin is cross-compiled — the Apple SDK on
           # arm64 runners supports both architectures, so no special linker needed.
@@ -83,7 +108,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          # Keyed per asset, not per target: the handheld and headless aarch64
+          # Keyed per asset, not per target: the fb and headless aarch64
           # builds share a target triple but compile different feature sets.
           key: ${{ matrix.asset }}
 
@@ -106,6 +131,10 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.zig
         run: cargo install cargo-zigbuild --locked
+
+      - name: Install libSDL2 (sdl builds)
+        if: matrix.sdl
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
 
       - name: Build (zigbuild)
         if: matrix.zig

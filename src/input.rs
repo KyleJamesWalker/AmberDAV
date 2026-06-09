@@ -1,7 +1,7 @@
-//! Gamepad/button input. On handheld builds we read `/dev/input/event*` via
+//! Gamepad/button input. On device builds we read `/dev/input/event*` via
 //! evdev and publish every event to a broadcast channel for the live web view.
-//! Without the `handheld` feature (desktop/server builds, dev machines) this
-//! compiles to a no-op stub.
+//! Without either the `fb` or `sdl` feature (desktop/server builds, dev
+//! machines) this compiles to a no-op stub.
 //!
 //! Buttons/keys arrive as `EV_KEY`; the d-pad and analog sticks arrive as
 //! `EV_ABS` absolute axes (e.g. ABS_HAT0X for the d-pad, ABS_X/Y for sticks),
@@ -26,25 +26,26 @@ pub struct InputUpdate {
     pub state: &'static str,
 }
 
-/// evdev key code that quits the app. Default 354 = KEY_GOTO, the Anbernic
-/// menu/function button. Override with AMBERDAV_EXIT_KEY.
-#[cfg(feature = "handheld")]
-fn exit_key() -> u16 {
-    std::env::var("AMBERDAV_EXIT_KEY")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(354)
+/// The evdev key codes that drive the on-device screen, resolved from
+/// config/env/CLI. Each control is a *set* of codes so a button can differ per
+/// device (e.g. the Anbernic menu key vs. the Steam Deck ☰ button both quit).
+// Fields are read only by the device (`fb`/`sdl`) `spawn`; on headless builds
+// the struct is still constructed at the call site, so allow the dead fields.
+#[allow(dead_code)]
+pub struct InputKeys {
+    /// Any of these quits the app.
+    pub exit: Vec<u16>,
+    /// Any of these blanks the screen (toggles `Mode::Black`).
+    pub blank: Vec<u16>,
+    /// Any of these toggles the bounce screensaver (`Mode::Bounce`).
+    pub bounce: Vec<u16>,
+    /// Whether the bounce screensaver may be toggled at all.
+    pub bounce_enabled: bool,
 }
 
-#[cfg(feature = "handheld")]
-pub fn spawn(
-    tx: broadcast::Sender<InputUpdate>,
-    mode: crate::screen::ModeHandle,
-    bounce_enabled: bool,
-) {
+#[cfg(any(feature = "fb", feature = "sdl"))]
+pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle, keys: InputKeys) {
     use evdev::EventSummary;
-
-    let exit_code = exit_key();
 
     for (path, dev) in evdev::enumerate() {
         // Keep devices that report buttons and/or absolute axes (gamepads).
@@ -56,6 +57,11 @@ pub fn spawn(
         let path = path.to_string_lossy().into_owned();
         let tx = tx.clone();
         let mode = mode.clone();
+        // One reader task per device; each needs its own copy of the key sets.
+        let exit = keys.exit.clone();
+        let blank = keys.blank.clone();
+        let bounce = keys.bounce.clone();
+        let bounce_enabled = keys.bounce_enabled;
 
         let mut stream = match dev.into_event_stream() {
             Ok(s) => s,
@@ -79,21 +85,19 @@ pub fn spawn(
                 let code = ev.code();
                 let update = match ev.destructure() {
                     EventSummary::Key(_, key, value) => {
-                        // Menu button → quit, returning to the OS app menu.
-                        if code == exit_code && value == 1 {
-                            eprintln!("input: exit key ({code}) pressed; shutting down");
-                            std::process::exit(0);
-                        }
-                        // Face buttons drive the screen on press (value == 1):
-                        // A blanks it, X toggles the bounce screensaver.
+                        // Act on press (value == 1). A configured exit key quits
+                        // (returning to the OS app menu); the blank/bounce keys
+                        // toggle their screen modes. A code may appear in only one
+                        // set; exit is checked first, then blank, then bounce.
                         if value == 1 {
                             use crate::screen::{self, Mode};
-                            match code {
-                                screen::BTN_SOUTH => screen::toggle(&mode, Mode::Black),
-                                screen::BTN_NORTH if bounce_enabled => {
-                                    screen::toggle(&mode, Mode::Bounce)
-                                }
-                                _ => {}
+                            if exit.contains(&code) {
+                                eprintln!("input: exit key ({code}) pressed; shutting down");
+                                std::process::exit(0);
+                            } else if blank.contains(&code) {
+                                screen::toggle(&mode, Mode::Black);
+                            } else if bounce_enabled && bounce.contains(&code) {
+                                screen::toggle(&mode, Mode::Bounce);
                             }
                         }
                         let state = match value {
@@ -129,11 +133,11 @@ pub fn spawn(
     }
 }
 
-#[cfg(not(feature = "handheld"))]
+#[cfg(not(any(feature = "fb", feature = "sdl")))]
 pub fn spawn(
     _tx: broadcast::Sender<InputUpdate>,
     _mode: crate::screen::ModeHandle,
-    _bounce_enabled: bool,
+    _keys: InputKeys,
 ) {
-    eprintln!("input: gamepad support is a handheld-only feature; live input view disabled");
+    eprintln!("input: gamepad support is a device-only feature; live input view disabled");
 }

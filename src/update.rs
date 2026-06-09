@@ -18,44 +18,58 @@ const REPO: &str = "KyleJamesWalker/AmberDAV";
 static UPDATE_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Returns the release asset name for the current platform, or `None` if the
-/// platform/build is not a published release target.
+/// Resolve the release asset name from the build's target + features. Pure (no
+/// cfg!) so the precedence can be unit-tested on every platform at once.
 ///
-/// Assets follow `amber-dav-<arch>-<os>[-handheld]`: plain `<arch>-<os>` is the
-/// standard headless build, and the `-handheld` suffix marks the build that
-/// compiles in the device UI (framebuffer + gamepad). Splitting the Linux
-/// branches on the `handheld` feature means a device never self-updates to a
-/// headless binary (no screen/input) and a server never pulls the heavier
-/// device build. Handheld x86_64 isn't a real target, so it returns `None`
-/// rather than naming a nonexistent asset.
-pub fn asset_name() -> Option<&'static str> {
-    if cfg!(all(
-        target_arch = "aarch64",
-        target_os = "linux",
-        feature = "handheld"
-    )) {
-        Some("amber-dav-aarch64-linux-handheld") // device build
-    } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
-        Some("amber-dav-aarch64-linux") // headless ARM (Pi/NAS/Graviton)
-    } else if cfg!(all(
-        target_arch = "x86_64",
-        target_os = "linux",
-        not(feature = "handheld")
-    )) {
-        Some("amber-dav-x86_64-linux") // headless x86 server build
-    } else if cfg!(target_os = "linux") {
-        None // handheld x86_64 isn't a real target
-    } else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
-        Some("amber-dav-aarch64-macos")
-    } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
-        Some("amber-dav-x86_64-macos")
-    } else if cfg!(all(target_arch = "x86_64", target_os = "windows")) {
-        Some("amber-dav-x86_64-windows.exe")
-    } else if cfg!(all(target_arch = "aarch64", target_os = "windows")) {
-        Some("amber-dav-aarch64-windows.exe")
-    } else {
-        None
+/// Assets follow `amber-dav-<arch>-<os>[-fb|-sdl]`: plain `<arch>-<os>` is the
+/// headless build, `-fb` is the static framebuffer/Wayland device UI, and
+/// `-sdl` is the dynamic on-screen build (links libSDL2). On Linux the three
+/// variants are distinguished by feature so a device never self-updates across
+/// build shapes — a headless server stays headless, an `-fb` device stays
+/// `-fb`, and an SDL device stays SDL.
+///
+/// Precedence is **sdl > fb > headless**. The `fb` and `sdl` features are
+/// independent; if a build somehow enables both, `sdl` is matched first so it
+/// wins — mirroring the sink selection, where `sdl` overrides the framebuffer.
+fn asset_for(arch: &str, os: &str, sdl: bool, fb: bool) -> Option<&'static str> {
+    match (arch, os) {
+        ("aarch64", "linux") if sdl => Some("amber-dav-aarch64-linux-sdl"),
+        ("aarch64", "linux") if fb => Some("amber-dav-aarch64-linux-fb"),
+        ("aarch64", "linux") => Some("amber-dav-aarch64-linux"),
+        ("x86_64", "linux") if sdl => Some("amber-dav-x86_64-linux-sdl"),
+        ("x86_64", "linux") if fb => Some("amber-dav-x86_64-linux-fb"),
+        ("x86_64", "linux") => Some("amber-dav-x86_64-linux"),
+        // Other Linux arches aren't published release targets.
+        (_, "linux") => None,
+        ("aarch64", "macos") => Some("amber-dav-aarch64-macos"),
+        ("x86_64", "macos") => Some("amber-dav-x86_64-macos"),
+        ("x86_64", "windows") => Some("amber-dav-x86_64-windows.exe"),
+        ("aarch64", "windows") => Some("amber-dav-aarch64-windows.exe"),
+        _ => None,
     }
+}
+
+/// Returns the release asset name for the current platform, or `None` if the
+/// platform/build is not a published release target. Thin cfg! wrapper around
+/// [`asset_for`].
+pub fn asset_name() -> Option<&'static str> {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        ""
+    };
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        ""
+    };
+    asset_for(arch, os, cfg!(feature = "sdl"), cfg!(feature = "fb"))
 }
 
 #[derive(Serialize)]
@@ -233,6 +247,64 @@ mod tests {
     #[test]
     fn asset_name_is_known_or_none() {
         let _ = asset_name();
+    }
+
+    // An SDL build is (sdl=true, fb=false) and must resolve to the dynamic
+    // `-sdl` asset. `sdl` is also matched before `fb`, so even a build that
+    // enabled both still maps to `-sdl` rather than the static `-fb` one.
+    #[test]
+    fn sdl_builds_resolve_to_the_sdl_asset() {
+        assert_eq!(
+            asset_for("aarch64", "linux", true, false),
+            Some("amber-dav-aarch64-linux-sdl")
+        );
+        assert_eq!(
+            asset_for("x86_64", "linux", true, false),
+            Some("amber-dav-x86_64-linux-sdl")
+        );
+        // sdl wins when both are enabled.
+        assert_eq!(
+            asset_for("aarch64", "linux", true, true),
+            Some("amber-dav-aarch64-linux-sdl")
+        );
+    }
+
+    #[test]
+    fn fb_without_sdl_resolves_to_the_fb_asset() {
+        assert_eq!(
+            asset_for("aarch64", "linux", false, true),
+            Some("amber-dav-aarch64-linux-fb")
+        );
+        assert_eq!(
+            asset_for("x86_64", "linux", false, true),
+            Some("amber-dav-x86_64-linux-fb")
+        );
+    }
+
+    #[test]
+    fn headless_linux_resolves_to_the_plain_asset() {
+        assert_eq!(
+            asset_for("aarch64", "linux", false, false),
+            Some("amber-dav-aarch64-linux")
+        );
+        assert_eq!(
+            asset_for("x86_64", "linux", false, false),
+            Some("amber-dav-x86_64-linux")
+        );
+    }
+
+    #[test]
+    fn desktop_targets_ignore_feature_flags_and_unknown_is_none() {
+        assert_eq!(
+            asset_for("aarch64", "macos", false, false),
+            Some("amber-dav-aarch64-macos")
+        );
+        assert_eq!(
+            asset_for("x86_64", "windows", false, false),
+            Some("amber-dav-x86_64-windows.exe")
+        );
+        assert_eq!(asset_for("riscv64", "linux", false, false), None);
+        assert_eq!(asset_for("", "", false, false), None);
     }
 
     #[test]

@@ -42,6 +42,22 @@ fn default_permission() -> Permission {
     Permission::ReadWrite
 }
 
+// evdev key-code defaults for the on-device controls. These are the raw codes
+// evdev reports, so they can be retargeted per device from the config/env/CLI.
+/// 354 = KEY_GOTO (the Anbernic menu/function button); 315 = BTN_START (the
+/// Steam Deck's ☰ Menu button). Either quits the app.
+fn default_exit_keys() -> Vec<u16> {
+    vec![354, 315]
+}
+/// 304 = BTN_SOUTH (the "A" face button) — blanks the screen.
+fn default_blank_keys() -> Vec<u16> {
+    vec![304]
+}
+/// 307 = BTN_NORTH (the "X" face button) — toggles the bounce screensaver.
+fn default_bounce_keys() -> Vec<u16> {
+    vec![307]
+}
+
 /// Burn-in screensaver: bounce random images (DVD-logo style) across the
 /// screen. Toggled on-device with the X button.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -82,6 +98,21 @@ pub struct Settings {
     /// Burn-in "DVD bounce" screensaver configuration.
     #[serde(default)]
     pub bounce_screen: BounceScreen,
+    /// Path to write a `connection.json` sidecar (IP/port/password/URL) for
+    /// external launchers and Decky. Empty/unset → not written.
+    #[serde(default)]
+    pub connection_file: Option<String>,
+    /// evdev key codes that quit the app (any one of them). Lets each device
+    /// use its own button; defaults cover the Anbernic and the Steam Deck.
+    #[serde(default = "default_exit_keys")]
+    pub exit_keys: Vec<u16>,
+    /// evdev key codes that blank the screen (toggle the black screen).
+    #[serde(default = "default_blank_keys")]
+    pub blank_keys: Vec<u16>,
+    /// evdev key codes that toggle the bounce screensaver. Only act when
+    /// `bounce_screen.enabled` is set.
+    #[serde(default = "default_bounce_keys")]
+    pub bounce_keys: Vec<u16>,
 }
 
 impl Default for Settings {
@@ -95,6 +126,10 @@ impl Default for Settings {
             default_folder: String::new(),
             permission: Permission::ReadWrite,
             bounce_screen: BounceScreen::default(),
+            connection_file: None,
+            exit_keys: default_exit_keys(),
+            blank_keys: default_blank_keys(),
+            bounce_keys: default_bounce_keys(),
         }
     }
 }
@@ -103,8 +138,8 @@ impl Default for Settings {
 ///
 /// `$AMBERDAV_CONFIG` always wins when set and non-empty. Otherwise:
 ///
-/// - **handheld builds**: next to the binary. The Anbernic launcher requires
-///   the app and its config to live in the same dedicated folder.
+/// - **device builds (`fb`/`sdl`)**: next to the binary. The Anbernic launcher
+///   requires the app and its config to live in the same dedicated folder.
 /// - **desktop/server builds**: the platform config directory, so a generically
 ///   named `config.json` never collides with other tools sharing a `bin/`:
 ///   - macOS: `~/Library/Application Support/amber-dav/config.json`
@@ -117,7 +152,7 @@ pub fn config_path() -> PathBuf {
         }
     }
 
-    #[cfg(feature = "handheld")]
+    #[cfg(any(feature = "fb", feature = "sdl"))]
     {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
@@ -127,7 +162,7 @@ pub fn config_path() -> PathBuf {
         PathBuf::from("config.json")
     }
 
-    #[cfg(not(feature = "handheld"))]
+    #[cfg(not(any(feature = "fb", feature = "sdl")))]
     {
         if let Some(proj) = directories::ProjectDirs::from("", "", "amber-dav") {
             return proj.config_dir().join("config.json");

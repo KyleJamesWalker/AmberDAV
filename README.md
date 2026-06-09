@@ -7,8 +7,10 @@ and read the device's IP, password, and a scannable QR code straight off
 the device's screen, or terminal.
 
 Built and tested on the **RG35XX Pro** and **RG34XXSP** (Allwinner H700 /
-aarch64, stock Anbernic OS). The whole thing is one statically-linked binary
-with no runtime dependencies.
+aarch64, stock Anbernic OS) and the **Steam Deck** (Game Mode, via the SDL
+build). The framebuffer and headless builds are a single statically-linked
+binary with no runtime dependencies; the SDL on-screen build dynamically links
+the system `libSDL2` (present on SteamOS and the Anbernic stock OS).
 
 ## Features
 
@@ -52,15 +54,17 @@ cargo install cargo-zigbuild
 # Zig must be installed and on PATH — e.g. `brew install zig`,
 # `pip install ziglang`, or from https://ziglang.org/download/
 
-# Device build — `--features handheld` pulls in the on-device screen + gamepad UI.
-cargo zigbuild --release --target aarch64-unknown-linux-musl --features handheld
+# Device build — `--features fb` pulls in the on-device screen + gamepad UI.
+cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 ```
 
-The **`handheld`** feature gates the device-only code (framebuffer screen,
-gamepad input, DVD-bounce screensaver) and its dependencies. It is **opt-in**:
-without it you get a smaller, headless WebDAV/file-server binary suited to
+The **`fb`** and **`sdl`** features each gate the device-only code (gamepad
+input, DVD-bounce screensaver, the on-screen connection canvas) and its
+dependencies; they differ only in the display sink — `fb` is the static
+framebuffer/Wayland sink, `sdl` links the system libSDL2. Both are **opt-in**:
+with neither you get a smaller, headless WebDAV/file-server binary suited to
 desktops and servers. Build a headless binary for any target by simply omitting
-the feature, e.g. `cargo build --release` or
+the features, e.g. `cargo build --release` or
 `cargo zigbuild --release --target x86_64-unknown-linux-musl`.
 
 Output: `target/aarch64-unknown-linux-musl/release/amber-dav` (~2 MB, static):
@@ -76,22 +80,27 @@ The same aarch64 binary runs on both the RG35XX Pro and the RG34XXSP.
 
 Each [GitHub Release](../../releases) ships a prebuilt binary per platform:
 
-Assets follow `amber-dav-<arch>-<os>[-handheld]`: plain `<arch>-<os>` is the
-standard headless build, and the `-handheld` suffix marks the one build with the
-on-device UI compiled in.
+Assets follow `amber-dav-<arch>-<os>[-fb|-sdl]`: plain `<arch>-<os>` is the
+standard headless build, the `-fb` suffix marks the static build with the
+on-device framebuffer/Wayland UI compiled in, and `-sdl` is the dynamic
+on-screen build (links the system libSDL2).
 
 | Asset | Platform | Build |
 | --- | --- | --- |
-| `amber-dav-aarch64-linux-handheld` | the Anbernic device (static musl) | handheld |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
+| `amber-dav-aarch64-linux-fb` | the Anbernic device (static musl) | fb |
+| `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali`) | sdl (dynamic, needs libSDL2) |
 | `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
+| `amber-dav-x86_64-linux-fb` | x86 Linux handhelds without libSDL2 | fb |
+| `amber-dav-x86_64-linux-sdl` | Steam Deck | sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
 | `amber-dav-x86_64-macos` | macOS, Intel | headless |
-| `amber-dav-x86_64-windows` | Windows | headless |
 | `amber-dav-aarch64-windows` | Windows on ARM (Snapdragon/Copilot+ PCs) | headless |
+| `amber-dav-x86_64-windows` | Windows | headless |
 
-Only the `-handheld` asset is built with `--features handheld`: it includes the
-on-device framebuffer screen and gamepad viewer. Every other asset is a
+The `-fb` and `-sdl` assets are built with `--features fb` and `--features sdl`
+respectively: both include the on-device screen and gamepad viewer (differing
+only in the display sink). Every other asset is a
 **headless** WebDAV/file-server CLI that writes to stdout — a quick way to host
 a folder from a desktop or server:
 
@@ -124,6 +133,37 @@ rotation — it's commented.
 > The binary takes optional `[ROOT] [PORT]` positional arguments (defaults:
 > current dir, `8080`). CLI flags and `AMBERDAV_*` env vars take precedence over
 > `config.json`, so a launcher can override the file without editing it.
+
+## Install on Steam Deck
+
+### Steam Deck — on-screen QR via SDL
+
+Use the **`amber-dav-x86_64-linux-sdl`** asset — add it as a Non-Steam Game and
+launch it.
+
+The SDL build links the system `libSDL2` (present on SteamOS) and auto-selects
+the video driver (`x11` on the Deck). Force one with `SDL_VIDEODRIVER` if needed.
+
+1. In Desktop Mode, copy the binary somewhere persistent (e.g. `~/Applications`).
+2. Add it to Steam as a **Non-Steam Game**, then switch to Game Mode and launch it.
+3. The connection screen appears; scan the QR or read the IP/password.
+4. Quit with the configured exit button (the **☰ Menu** button by default; see
+   `exit_keys`) or by closing the window from the Steam overlay.
+
+Optionally point `--connection-file` at a path a launcher script or a Decky
+plugin can read (e.g. `--connection-file ~/.local/share/amber-dav/connection.json`).
+
+> A Decky Loader plugin would live in its own repo and bundle this same binary;
+> amber-dav needs no Decky-specific code.
+
+### Anbernic — SDL on-screen QR (optional)
+
+The **`amber-dav-aarch64-linux-sdl`** asset renders the same screen via SDL's
+`mali` vendor driver (what the stock emulators use), as an alternative to the
+static framebuffer build. Just launch it from an APPS-menu `*.sh` script like
+any other binary — the SDL driver is auto-selected (`mali` on the Anbernic, once
+`x11` is found unavailable), so no `SDL_VIDEODRIVER` is needed. Set
+`SDL_VIDEODRIVER=mali` only to force it and skip the auto-detection.
 
 ## First launch
 
@@ -169,20 +209,25 @@ one place, the highest layer wins:
 | Permission | `--permission <level>` | `AMBERDAV_PERMISSION` | `permission` |
 | Screensaver on | `--bounce-screen` / `--no-bounce-screen` | `AMBERDAV_BOUNCE_SCREEN` | `bounce_screen.enabled` |
 | Screensaver folders | `--bounce-folders <a,b,…>` | `AMBERDAV_BOUNCE_FOLDERS` | `bounce_screen.folders` |
+| Connection file | `--connection-file <path>` | `AMBERDAV_CONNECTION_FILE` | `connection_file` |
+| Exit key codes | `--exit-keys <a,b,…>` | `AMBERDAV_EXIT_KEYS` | `exit_keys` |
+| Blank-screen key codes | `--blank-keys <a,b,…>` | `AMBERDAV_BLANK_KEYS` | `blank_keys` |
+| Bounce-toggle key codes | `--bounce-keys <a,b,…>` | `AMBERDAV_BOUNCE_KEYS` | `bounce_keys` |
+| Display sink | — | `AMBERDAV_DISPLAY` | — |
 
 ### Config file location
 
 | Build | Location |
 |---|---|
-| handheld (device) | next to the binary — `config.json` |
+| device (`fb`/`sdl`) | next to the binary — `config.json` |
 | macOS | `~/Library/Application Support/amber-dav/config.json` |
 | Windows | `%APPDATA%\amber-dav\config\config.json` |
 | Linux (headless) | `$XDG_CONFIG_HOME/amber-dav/config.json` → `~/.config/amber-dav/config.json` |
 
 `$AMBERDAV_CONFIG` overrides the location on any build.
 
-On **handheld** builds a default `config.json` is written next to the binary on
-first launch (the device is configured through the web UI). **Headless** builds
+On **device** (`fb`/`sdl`) builds a default `config.json` is written next to the
+binary on first launch (the device is configured through the web UI). **Headless** builds
 never write a config implicitly — run with `--save` to write the fully-resolved
 settings (CLI + env merged onto any existing file) to the config path and exit:
 
@@ -242,16 +287,16 @@ Edit the file directly or over WebDAV, then relaunch the app to apply changes.
 | `read_write_delete` | ✅ | ✅ | ✅ |
 
 `permission` and `default_folder` take effect per request. `password`,
-`display_password`, `root`, and `bounce_screen` are bound at boot — relaunch to
-apply.
+`display_password`, `root`, `bounce_screen`, and the `*_keys` lists are bound at
+boot — relaunch to apply.
 
 ## Device controls
 
 | Button | evdev code | Action |
 |--------|:---:|--------|
-| **Menu** (`KEY_GOTO`) | 354 | Quit the app and return to the OS menu |
-| **A** (`BTN_SOUTH`) | 304 | Blank the screen (all black); press again to restore |
-| **X** (`BTN_NORTH`) | 307 | Toggle the bounce screensaver (if `bounce_screen.enabled`) |
+| **Menu** (`KEY_GOTO`, Anbernic) / **☰** (`BTN_START`, Steam Deck) | 354, 315 | Quit the app and return to the OS menu (`exit_keys`) |
+| **A** (`BTN_SOUTH`) | 304 | Blank the screen (all black); press again to restore (`blank_keys`) |
+| **X** (`BTN_NORTH`) | 307 | Toggle the bounce screensaver, if `bounce_screen.enabled` (`bounce_keys`) |
 
 The **bounce screensaver** drifts a random image around a black screen,
 DVD-logo style, swapping images as it ricochets off the edges — preventing
@@ -259,7 +304,12 @@ burn-in on OLED/AMOLED panels during long idle periods. It draws from the
 images in `bounce_screen.folders` (PNG, JPEG, GIF, BMP, WebP). With no images
 configured it simply blanks to black, which still protects the panel.
 
-Override the quit key with `AMBERDAV_EXIT_KEY=<code>` if your device differs.
+Each control is a **list** of evdev codes, so a button can differ per device
+(the defaults above already cover the Anbernic and the Steam Deck). Retarget
+them from the config file (`exit_keys`/`blank_keys`/`bounce_keys`), the
+`AMBERDAV_EXIT_KEYS`/`AMBERDAV_BLANK_KEYS`/`AMBERDAV_BOUNCE_KEYS` env vars
+(comma-separated), or `--exit-keys`/`--blank-keys`/`--bounce-keys`. Find a
+button's code in the web UI Status tab's live input view.
 
 ## Updating via the web UI
 
@@ -278,10 +328,10 @@ download and install it in place:
 If anything goes wrong during the rename step, the original binary is restored.
 
 > The update check and apply target the matching prebuilt release asset (see the
-> table above). A handheld binary only ever pulls the handheld asset and a
-> headless binary only the headless one, so a device never self-updates to a
-> screen-less build. Custom builds with no matching asset see a "no asset for
-> this platform" response.
+> table above). A device binary only ever pulls its own asset — an `-fb` build
+> stays `-fb`, an `-sdl` build stays `-sdl`, and a headless binary only the
+> headless one — so a device never self-updates across build shapes. Custom
+> builds with no matching asset see a "no asset for this platform" response.
 
 ## Updating via WebDAV (local builds)
 
@@ -338,8 +388,8 @@ level is enforced on every mutating request.
 | `src/auth.rs` | session-cookie login for the web UI |
 | `src/webdav.rs` | `dav-server` handler bridged into axum + Basic auth + permission gate |
 | `src/files.rs` | JSON file API (list/upload/download/zip/rename/move/copy/delete) + HTTP Range |
-| `src/input.rs` | evdev reader → broadcast channel; drives screen controls (handheld only) |
-| `src/screen.rs` | draws IP/password/QR to `/dev/fb0`; blank + bounce screensaver (handheld only) |
+| `src/input.rs` | evdev reader → broadcast channel; drives screen controls (device builds only) |
+| `src/screen.rs` | draws IP/password/QR to `/dev/fb0`; blank + bounce screensaver (device builds only) |
 | `src/ui.rs` | landing/login pages, status/info endpoint, settings (read-only), SSE stream |
 | `src/update.rs` | in-app update: GitHub Releases check + binary download/rename dance |
 | `src/password.rs` | per-boot password generator |

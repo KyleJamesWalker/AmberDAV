@@ -21,8 +21,8 @@ use crate::config::{Permission, Settings};
 /// A tiny WebDAV file server + live gamepad button viewer.
 ///
 /// Serves a directory over WebDAV and a web UI. On Anbernic handhelds (built
-/// with `--features handheld`) it also paints connection info to the screen and
-/// shows live gamepad input.
+/// with `--features fb` or `--features sdl`) it also paints connection info to
+/// the screen and shows live gamepad input.
 #[derive(Parser, Debug)]
 #[command(name = "amber-dav", version)]
 pub struct Cli {
@@ -67,6 +67,18 @@ pub struct Cli {
     /// [env: AMBERDAV_BOUNCE_FOLDERS]
     #[arg(long = "bounce-folders", value_name = "PATHS", value_delimiter = ',')]
     bounce_folders: Option<Vec<String>>,
+    /// Write a connection.json sidecar here (IP/port/password/URL). [env: AMBERDAV_CONNECTION_FILE]
+    #[arg(long, value_name = "PATH")]
+    connection_file: Option<String>,
+    /// evdev key codes that quit the app, comma-separated. [env: AMBERDAV_EXIT_KEYS]
+    #[arg(long = "exit-keys", value_name = "CODES", value_delimiter = ',')]
+    exit_keys: Option<Vec<u16>>,
+    /// evdev key codes that blank the screen, comma-separated. [env: AMBERDAV_BLANK_KEYS]
+    #[arg(long = "blank-keys", value_name = "CODES", value_delimiter = ',')]
+    blank_keys: Option<Vec<u16>>,
+    /// evdev key codes that toggle the bounce screensaver, comma-separated. [env: AMBERDAV_BOUNCE_KEYS]
+    #[arg(long = "bounce-keys", value_name = "CODES", value_delimiter = ',')]
+    bounce_keys: Option<Vec<u16>>,
 
     /// Write the fully-resolved configuration to the config file, then exit.
     #[arg(long)]
@@ -135,6 +147,36 @@ impl Cli {
         {
             s.bounce_screen.folders = v;
         }
+        if let Some(v) = self
+            .connection_file
+            .clone()
+            .or_else(|| env_str("AMBERDAV_CONNECTION_FILE"))
+        {
+            s.connection_file = Some(v);
+        }
+        if let Some(v) = self
+            .exit_keys
+            .clone()
+            .or_else(|| env_u16_list("AMBERDAV_EXIT_KEYS"))
+            // Back-compat: honour the old singular AMBERDAV_EXIT_KEY too.
+            .or_else(|| env_parse::<u16>("AMBERDAV_EXIT_KEY").map(|k| vec![k]))
+        {
+            s.exit_keys = v;
+        }
+        if let Some(v) = self
+            .blank_keys
+            .clone()
+            .or_else(|| env_u16_list("AMBERDAV_BLANK_KEYS"))
+        {
+            s.blank_keys = v;
+        }
+        if let Some(v) = self
+            .bounce_keys
+            .clone()
+            .or_else(|| env_u16_list("AMBERDAV_BOUNCE_KEYS"))
+        {
+            s.bounce_keys = v;
+        }
         s
     }
 }
@@ -179,6 +221,33 @@ fn env_list(key: &str) -> Option<Vec<String>> {
     })
 }
 
+/// Parse a comma-separated list of `u16` (e.g. evdev key codes). Surrounding
+/// whitespace is trimmed and unparseable entries are skipped.
+fn parse_u16_list(s: &str) -> Vec<u16> {
+    s.split(',').filter_map(|c| c.trim().parse().ok()).collect()
+}
+
+/// A comma-separated `u16` env var (e.g. evdev key codes). A value with no
+/// usable codes is treated as unset, so it can't blank a config list.
+fn env_u16_list(key: &str) -> Option<Vec<u16>> {
+    let codes = parse_u16_list(&env_str(key)?);
+    (!codes.is_empty()).then_some(codes)
+}
+
 fn env_permission(key: &str) -> Option<Permission> {
     Permission::from_str(&env_str(key)?, true).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_u16_list_trims_and_skips_garbage() {
+        assert_eq!(parse_u16_list("354,315"), vec![354, 315]);
+        assert_eq!(parse_u16_list(" 354 , 315 "), vec![354, 315]);
+        assert_eq!(parse_u16_list("354,nope,307"), vec![354, 307]);
+        assert!(parse_u16_list("").is_empty());
+        assert!(parse_u16_list("abc").is_empty());
+    }
 }
