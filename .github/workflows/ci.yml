@@ -82,6 +82,20 @@ jobs:
             asset: amber-dav-x86_64-linux-handheld
             features: handheld
             zig: true
+          # SDL2 on-screen build for the Steam Deck (Game Mode): native x86_64
+          # gnu, dynamically links the system libSDL2. Uses --features handheld,sdl.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: amber-dav-x86_64-linux-sdl
+            features: handheld,sdl
+            sdl: true
+          # SDL2 on-screen build for Anbernic handhelds: native aarch64 gnu on an
+          # arm64 runner (the device's libSDL2 provides the `mali` driver at runtime).
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: amber-dav-aarch64-linux-sdl
+            features: handheld,sdl
+            sdl: true
           # macOS: both arches on the arm64 runner (Apple SDK is universal).
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -120,6 +134,10 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.zig
         run: cargo install cargo-zigbuild --locked
+
+      - name: Install libSDL2 (sdl builds)
+        if: matrix.sdl
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
 
       - name: Build (zigbuild)
         if: matrix.zig
