@@ -15,6 +15,8 @@ mod ui;
 mod update;
 #[cfg(all(target_os = "linux", feature = "handheld"))]
 mod wayland;
+#[cfg(all(target_os = "linux", feature = "sdl"))]
+mod sdl;
 mod webdav;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};

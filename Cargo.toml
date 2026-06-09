@@ -33,6 +33,10 @@ directories = "6"
 # and server builds leave it off and ship without the device-only deps.
 [features]
 handheld = ["dep:evdev", "dep:framebuffer", "dep:image", "dep:smithay-client-toolkit"]
+# Opt-in SDL2 display sink for the Steam Deck (Game Mode) + Anbernic. Builds a
+# dynamic binary linking the system libSDL2 (not static musl), built alongside
+# `handheld`: `--features handheld,sdl`.
+sdl = ["dep:sdl2"]
 
 # Device-only deps. Linux-only crates (framebuffer/evdev), pulled in solely by
 # the `handheld` feature, which is only ever built for the aarch64 device.
@@ -49,6 +53,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # handling we do not use — we dispatch the queue directly and only need the
 # compositor/xdg-shell/wl_shm/output globals.
 smithay-client-toolkit = { version = "0.20", default-features = false, optional = true }
+# Dynamically links the system libSDL2 so the device's own driver is used at
+# runtime (Xwayland on the Steam Deck, the `mali` vendor driver on Anbernic).
+sdl2 = { version = "0.38", optional = true }
 
 # Small, static-friendly release binary for the handhelds.
 [profile.release]
