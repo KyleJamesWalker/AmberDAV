@@ -62,8 +62,40 @@ fn set(status: &Status, msg: String) {
     }
 }
 
+/// Pick the active display sink (Wayland in Game Mode, framebuffer on the
+/// Anbernic/TTY/Desktop Mode, else headless) and start painting connection
+/// info. Returns immediately; the chosen sink runs in a background thread.
 #[cfg(feature = "handheld")]
 pub fn show(
+    port: u16,
+    password: Option<String>,
+    status: Status,
+    mode: ModeHandle,
+    bounce_paths: Vec<std::path::PathBuf>,
+) {
+    use crate::display::{detect, DisplayKind};
+    match detect() {
+        DisplayKind::Wayland => {
+            set(&status, "wayland: starting…".to_string());
+            std::thread::spawn(move || {
+                if let Err(e) = crate::wayland::run(port, password, status.clone(), mode) {
+                    set(&status, format!("wayland failed: {e}"));
+                    eprintln!("screen: wayland sink failed ({e}); connection info is in the log only");
+                }
+            });
+        }
+        DisplayKind::Framebuffer => show_framebuffer(port, password, status, mode, bounce_paths),
+        DisplayKind::Headless => {
+            set(&status, "disabled (no display detected)".to_string());
+            eprintln!("screen: no /dev/fb0 and no Wayland display; connection info is in the log only");
+        }
+    }
+}
+
+/// Paint connection info to `/dev/fb0` on a background thread. Returns
+/// immediately after spawning it.
+#[cfg(feature = "handheld")]
+fn show_framebuffer(
     port: u16,
     password: Option<String>,
     status: Status,

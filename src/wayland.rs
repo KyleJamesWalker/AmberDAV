@@ -6,13 +6,6 @@
 //! Software buffers only (no GPU/EGL), so `smithay-client-toolkit` stays on its
 //! default pure-Rust backend and the static musl binary keeps working.
 
-// `run` (and the `App` state it drives) is the Wayland sink's entry point but
-// is not yet wired into the screen-dispatch task — same staging as
-// `display::detect`. Everything here is reachable only through `run`, so allow
-// dead code module-wide until the dispatcher calls it.
-// TODO(Task 4 / screen-dispatch): narrow or remove once run() is dispatched.
-#![allow(dead_code)]
-
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,

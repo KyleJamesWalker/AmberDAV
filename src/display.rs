@@ -41,9 +41,7 @@ pub fn select(
 }
 
 /// Resolve the live sink from the process environment + filesystem.
-// `detect` is not yet called; it gets wired up in the screen-dispatch task.
 #[cfg(feature = "handheld")]
-#[allow(dead_code)]
 pub fn detect() -> DisplayKind {
     let wayland = std::env::var("WAYLAND_DISPLAY").ok();
     let override_ = std::env::var("AMBERDAV_DISPLAY").ok();
