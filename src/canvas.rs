@@ -4,11 +4,11 @@
 //! and the Wayland sink (Steam Deck Game Mode) both present the same `Canvas`.
 //! Pure and platform-independent, so it is unit-tested on every host.
 
-// On headless builds the canvas API is not yet called (the framebuffer sink
-// is handheld-only; the Wayland sink is added in a later task). Suppress
-// dead-code lints so that `cargo clippy -- -D warnings` stays clean on every
-// host without hiding real dead code on handheld builds.
-#![cfg_attr(not(feature = "handheld"), allow(dead_code))]
+// On headless builds the canvas API is not called (the framebuffer/Wayland and
+// SDL sinks that consume it are only compiled with the `fb`/`sdl` features).
+// Suppress dead-code lints so that `cargo clippy -- -D warnings` stays clean on
+// every host without hiding real dead code on device builds.
+#![cfg_attr(not(any(feature = "fb", feature = "sdl")), allow(dead_code))]
 
 use std::net::IpAddr;
 

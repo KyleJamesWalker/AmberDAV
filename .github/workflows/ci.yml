@@ -39,20 +39,32 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
-      # The device-only screen/input code (evdev, framebuffer, font8x8, image)
-      # is gated behind --features handheld, so exercise it explicitly here —
-      # this mirrors the aarch64-linux release asset's feature set.
-      - name: Clippy (handheld)
-        run: cargo clippy --all-targets --features handheld -- -D warnings
+      # The device-only screen/input code (evdev, framebuffer, image, smithay)
+      # is gated behind --features fb, so exercise it explicitly here — this
+      # mirrors the -fb release assets' feature set.
+      - name: Clippy (fb)
+        run: cargo clippy --all-targets --features fb -- -D warnings
 
-      - name: Test (handheld)
-        run: cargo test --all-targets --features handheld
+      - name: Test (fb)
+        run: cargo test --all-targets --features fb
+
+      # The SDL on-screen sink (--features sdl) links the system libSDL2 and
+      # swaps out the framebuffer/Wayland sink; exercise it too. Mirrors the
+      # -sdl release assets.
+      - name: Install libSDL2 (sdl)
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      - name: Clippy (sdl)
+        run: cargo clippy --all-targets --features sdl -- -D warnings
+
+      - name: Test (sdl)
+        run: cargo test --all-targets --features sdl
 
   # Compile every shipped release target (and feature set) so target-specific
   # breakage — a cross-compile, a feature-gated dep, the ring/musl/ARM-Windows
   # toolchains — surfaces on the PR instead of at release time. This mirrors the
   # release matrix exactly; it is build-only (debug, no upload) since the test
-  # job above already runs fmt/clippy/tests for both feature sets.
+  # job above already runs fmt/clippy/tests for all feature sets.
   build:
     name: build · ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
@@ -61,11 +73,11 @@ jobs:
       matrix:
         include:
           # Linux: fully static musl, cross-linked with Zig. Only the device
-          # asset is built with --features handheld.
+          # asset is built with --features fb.
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             asset: amber-dav-aarch64-linux-fb
-            features: handheld
+            features: fb
             zig: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
@@ -75,26 +87,26 @@ jobs:
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux
             zig: true
-          # Steam Deck (Game Mode): x86_64 static musl WITH the handheld feature
-          # — the on-device Wayland screen + gamepad viewer compiled for x86.
+          # Steam Deck (Game Mode): x86_64 static musl WITH the fb feature — the
+          # on-device Wayland screen + gamepad viewer compiled for x86.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: amber-dav-x86_64-linux-fb
-            features: handheld
+            features: fb
             zig: true
           # SDL2 on-screen build for the Steam Deck (Game Mode): native x86_64
-          # gnu, dynamically links the system libSDL2. Uses --features handheld,sdl.
+          # gnu, dynamically links the system libSDL2. Uses --features sdl.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: amber-dav-x86_64-linux-sdl
-            features: handheld,sdl
+            features: sdl
             sdl: true
           # SDL2 on-screen build for Anbernic handhelds: native aarch64 gnu on an
           # arm64 runner (the device's libSDL2 provides the `mali` driver at runtime).
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset: amber-dav-aarch64-linux-sdl
-            features: handheld,sdl
+            features: sdl
             sdl: true
           # macOS: both arches on the arm64 runner (Apple SDK is universal).
           - os: macos-latest
@@ -121,7 +133,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          # Keyed per asset: the handheld and headless aarch64 builds share a
+          # Keyed per asset: the fb and headless aarch64 builds share a
           # target triple but compile different feature sets.
           key: ${{ matrix.asset }}
 

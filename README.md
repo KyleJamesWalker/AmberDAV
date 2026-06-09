@@ -52,15 +52,17 @@ cargo install cargo-zigbuild
 # Zig must be installed and on PATH — e.g. `brew install zig`,
 # `pip install ziglang`, or from https://ziglang.org/download/
 
-# Device build — `--features handheld` pulls in the on-device screen + gamepad UI.
-cargo zigbuild --release --target aarch64-unknown-linux-musl --features handheld
+# Device build — `--features fb` pulls in the on-device screen + gamepad UI.
+cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 ```
 
-The **`handheld`** feature gates the device-only code (framebuffer screen,
-gamepad input, DVD-bounce screensaver) and its dependencies. It is **opt-in**:
-without it you get a smaller, headless WebDAV/file-server binary suited to
+The **`fb`** and **`sdl`** features each gate the device-only code (gamepad
+input, DVD-bounce screensaver, the on-screen connection canvas) and its
+dependencies; they differ only in the display sink — `fb` is the static
+framebuffer/Wayland sink, `sdl` links the system libSDL2. Both are **opt-in**:
+with neither you get a smaller, headless WebDAV/file-server binary suited to
 desktops and servers. Build a headless binary for any target by simply omitting
-the feature, e.g. `cargo build --release` or
+the features, e.g. `cargo build --release` or
 `cargo zigbuild --release --target x86_64-unknown-linux-musl`.
 
 Output: `target/aarch64-unknown-linux-musl/release/amber-dav` (~2 MB, static):
@@ -83,19 +85,20 @@ on-screen build (links the system libSDL2).
 
 | Asset | Platform | Build |
 | --- | --- | --- |
-| `amber-dav-aarch64-linux-fb` | the Anbernic device (static musl) | handheld |
-| `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali` on-screen QR) | handheld+sdl (dynamic, needs libSDL2) |
+| `amber-dav-aarch64-linux-fb` | the Anbernic device (static musl) | fb |
+| `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali` on-screen QR) | sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
 | `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
-| `amber-dav-x86_64-linux-fb` | Steam Deck (Game Mode, static framebuffer) / x86 Linux handhelds | handheld |
-| `amber-dav-x86_64-linux-sdl` | Steam Deck (Game Mode, on-screen QR) | handheld+sdl (dynamic, needs libSDL2) |
+| `amber-dav-x86_64-linux-fb` | Steam Deck (Game Mode, static framebuffer) / x86 Linux handhelds | fb |
+| `amber-dav-x86_64-linux-sdl` | Steam Deck (Game Mode, on-screen QR) | sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
 | `amber-dav-x86_64-macos` | macOS, Intel | headless |
 | `amber-dav-x86_64-windows` | Windows | headless |
 | `amber-dav-aarch64-windows` | Windows on ARM (Snapdragon/Copilot+ PCs) | headless |
 
-The `-fb` and `-sdl` assets are built with `--features handheld`: they include
-the on-device screen and gamepad viewer. Every other asset is a
+The `-fb` and `-sdl` assets are built with `--features fb` and `--features sdl`
+respectively: both include the on-device screen and gamepad viewer (differing
+only in the display sink). Every other asset is a
 **headless** WebDAV/file-server CLI that writes to stdout — a quick way to host
 a folder from a desktop or server:
 
@@ -212,15 +215,15 @@ one place, the highest layer wins:
 
 | Build | Location |
 |---|---|
-| handheld (device) | next to the binary — `config.json` |
+| device (`fb`/`sdl`) | next to the binary — `config.json` |
 | macOS | `~/Library/Application Support/amber-dav/config.json` |
 | Windows | `%APPDATA%\amber-dav\config\config.json` |
 | Linux (headless) | `$XDG_CONFIG_HOME/amber-dav/config.json` → `~/.config/amber-dav/config.json` |
 
 `$AMBERDAV_CONFIG` overrides the location on any build.
 
-On **handheld** builds a default `config.json` is written next to the binary on
-first launch (the device is configured through the web UI). **Headless** builds
+On **device** (`fb`/`sdl`) builds a default `config.json` is written next to the
+binary on first launch (the device is configured through the web UI). **Headless** builds
 never write a config implicitly — run with `--save` to write the fully-resolved
 settings (CLI + env merged onto any existing file) to the config path and exit:
 
@@ -316,10 +319,10 @@ download and install it in place:
 If anything goes wrong during the rename step, the original binary is restored.
 
 > The update check and apply target the matching prebuilt release asset (see the
-> table above). A handheld binary only ever pulls the handheld asset and a
-> headless binary only the headless one, so a device never self-updates to a
-> screen-less build. Custom builds with no matching asset see a "no asset for
-> this platform" response.
+> table above). A device binary only ever pulls its own asset — an `-fb` build
+> stays `-fb`, an `-sdl` build stays `-sdl`, and a headless binary only the
+> headless one — so a device never self-updates across build shapes. Custom
+> builds with no matching asset see a "no asset for this platform" response.
 
 ## Updating via WebDAV (local builds)
 
@@ -376,8 +379,8 @@ level is enforced on every mutating request.
 | `src/auth.rs` | session-cookie login for the web UI |
 | `src/webdav.rs` | `dav-server` handler bridged into axum + Basic auth + permission gate |
 | `src/files.rs` | JSON file API (list/upload/download/zip/rename/move/copy/delete) + HTTP Range |
-| `src/input.rs` | evdev reader → broadcast channel; drives screen controls (handheld only) |
-| `src/screen.rs` | draws IP/password/QR to `/dev/fb0`; blank + bounce screensaver (handheld only) |
+| `src/input.rs` | evdev reader → broadcast channel; drives screen controls (device builds only) |
+| `src/screen.rs` | draws IP/password/QR to `/dev/fb0`; blank + bounce screensaver (device builds only) |
 | `src/ui.rs` | landing/login pages, status/info endpoint, settings (read-only), SSE stream |
 | `src/update.rs` | in-app update: GitHub Releases check + binary download/rename dance |
 | `src/password.rs` | per-boot password generator |

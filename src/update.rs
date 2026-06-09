@@ -28,16 +28,16 @@ static UPDATE_IN_PROGRESS: std::sync::atomic::AtomicBool =
 /// build shapes — a headless server stays headless, an `-fb` device stays
 /// `-fb`, and an SDL device stays SDL.
 ///
-/// Precedence is **sdl > handheld > headless**: the `sdl` feature implies
-/// `handheld`, so an SDL build also satisfies `handheld` and must be matched as
-/// SDL first, or it would wrongly resolve to the static `-fb` asset.
-fn asset_for(arch: &str, os: &str, sdl: bool, handheld: bool) -> Option<&'static str> {
+/// Precedence is **sdl > fb > headless**. The `fb` and `sdl` features are
+/// independent; if a build somehow enables both, `sdl` is matched first so it
+/// wins — mirroring the sink selection, where `sdl` overrides the framebuffer.
+fn asset_for(arch: &str, os: &str, sdl: bool, fb: bool) -> Option<&'static str> {
     match (arch, os) {
         ("aarch64", "linux") if sdl => Some("amber-dav-aarch64-linux-sdl"),
-        ("aarch64", "linux") if handheld => Some("amber-dav-aarch64-linux-fb"),
+        ("aarch64", "linux") if fb => Some("amber-dav-aarch64-linux-fb"),
         ("aarch64", "linux") => Some("amber-dav-aarch64-linux"),
         ("x86_64", "linux") if sdl => Some("amber-dav-x86_64-linux-sdl"),
-        ("x86_64", "linux") if handheld => Some("amber-dav-x86_64-linux-fb"),
+        ("x86_64", "linux") if fb => Some("amber-dav-x86_64-linux-fb"),
         ("x86_64", "linux") => Some("amber-dav-x86_64-linux"),
         // Other Linux arches aren't published release targets.
         (_, "linux") => None,
@@ -69,7 +69,7 @@ pub fn asset_name() -> Option<&'static str> {
     } else {
         ""
     };
-    asset_for(arch, os, cfg!(feature = "sdl"), cfg!(feature = "handheld"))
+    asset_for(arch, os, cfg!(feature = "sdl"), cfg!(feature = "fb"))
 }
 
 #[derive(Serialize)]
@@ -249,23 +249,28 @@ mod tests {
         let _ = asset_name();
     }
 
-    // `sdl` implies `handheld`, so an SDL build sets both flags. It must resolve
-    // to the dynamic `-sdl` asset, not the static `-fb` one — otherwise an SDL
-    // device self-updates into a framebuffer binary.
+    // An SDL build is (sdl=true, fb=false) and must resolve to the dynamic
+    // `-sdl` asset. `sdl` is also matched before `fb`, so even a build that
+    // enabled both still maps to `-sdl` rather than the static `-fb` one.
     #[test]
     fn sdl_builds_resolve_to_the_sdl_asset() {
+        assert_eq!(
+            asset_for("aarch64", "linux", true, false),
+            Some("amber-dav-aarch64-linux-sdl")
+        );
+        assert_eq!(
+            asset_for("x86_64", "linux", true, false),
+            Some("amber-dav-x86_64-linux-sdl")
+        );
+        // sdl wins when both are enabled.
         assert_eq!(
             asset_for("aarch64", "linux", true, true),
             Some("amber-dav-aarch64-linux-sdl")
         );
-        assert_eq!(
-            asset_for("x86_64", "linux", true, true),
-            Some("amber-dav-x86_64-linux-sdl")
-        );
     }
 
     #[test]
-    fn handheld_without_sdl_resolves_to_the_fb_asset() {
+    fn fb_without_sdl_resolves_to_the_fb_asset() {
         assert_eq!(
             asset_for("aarch64", "linux", false, true),
             Some("amber-dav-aarch64-linux-fb")

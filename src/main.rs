@@ -2,7 +2,7 @@
 //! Anbernic handhelds (Allwinner H700, aarch64 Linux).
 
 mod auth;
-#[cfg(feature = "handheld")]
+#[cfg(any(feature = "fb", feature = "sdl"))]
 mod bounce;
 mod canvas;
 mod cli;
@@ -17,7 +17,7 @@ mod screen;
 mod sdl;
 mod ui;
 mod update;
-#[cfg(all(target_os = "linux", feature = "handheld", not(feature = "sdl")))]
+#[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
 mod wayland;
 mod webdav;
 
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handheld: keep auto-creating a default config on first run — the device
     // is configured through the web UI, so the file must exist to be edited.
     // Desktop/server builds never write implicitly; use `--save` to opt in.
-    #[cfg(feature = "handheld")]
+    #[cfg(any(feature = "fb", feature = "sdl"))]
     if !config_path.exists() {
         match config::save(&config_path, &config::Settings::default()) {
             Ok(()) => eprintln!("config: wrote default {}", config_path.display()),

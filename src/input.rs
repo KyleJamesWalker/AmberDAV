@@ -1,7 +1,7 @@
-//! Gamepad/button input. On handheld builds we read `/dev/input/event*` via
+//! Gamepad/button input. On device builds we read `/dev/input/event*` via
 //! evdev and publish every event to a broadcast channel for the live web view.
-//! Without the `handheld` feature (desktop/server builds, dev machines) this
-//! compiles to a no-op stub.
+//! Without either the `fb` or `sdl` feature (desktop/server builds, dev
+//! machines) this compiles to a no-op stub.
 //!
 //! Buttons/keys arrive as `EV_KEY`; the d-pad and analog sticks arrive as
 //! `EV_ABS` absolute axes (e.g. ABS_HAT0X for the d-pad, ABS_X/Y for sticks),
@@ -28,7 +28,7 @@ pub struct InputUpdate {
 
 /// evdev key code that quits the app. Default 354 = KEY_GOTO, the Anbernic
 /// menu/function button. Override with AMBERDAV_EXIT_KEY.
-#[cfg(feature = "handheld")]
+#[cfg(any(feature = "fb", feature = "sdl"))]
 fn exit_key() -> u16 {
     std::env::var("AMBERDAV_EXIT_KEY")
         .ok()
@@ -36,7 +36,7 @@ fn exit_key() -> u16 {
         .unwrap_or(354)
 }
 
-#[cfg(feature = "handheld")]
+#[cfg(any(feature = "fb", feature = "sdl"))]
 pub fn spawn(
     tx: broadcast::Sender<InputUpdate>,
     mode: crate::screen::ModeHandle,
@@ -129,7 +129,7 @@ pub fn spawn(
     }
 }
 
-#[cfg(not(feature = "handheld"))]
+#[cfg(not(any(feature = "fb", feature = "sdl")))]
 pub fn spawn(
     _tx: broadcast::Sender<InputUpdate>,
     _mode: crate::screen::ModeHandle,

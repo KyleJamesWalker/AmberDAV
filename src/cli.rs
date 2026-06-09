@@ -21,8 +21,8 @@ use crate::config::{Permission, Settings};
 /// A tiny WebDAV file server + live gamepad button viewer.
 ///
 /// Serves a directory over WebDAV and a web UI. On Anbernic handhelds (built
-/// with `--features handheld`) it also paints connection info to the screen and
-/// shows live gamepad input.
+/// with `--features fb` or `--features sdl`) it also paints connection info to
+/// the screen and shows live gamepad input.
 #[derive(Parser, Debug)]
 #[command(name = "amber-dav", version)]
 pub struct Cli {

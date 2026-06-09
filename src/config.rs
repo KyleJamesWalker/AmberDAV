@@ -108,8 +108,8 @@ impl Default for Settings {
 ///
 /// `$AMBERDAV_CONFIG` always wins when set and non-empty. Otherwise:
 ///
-/// - **handheld builds**: next to the binary. The Anbernic launcher requires
-///   the app and its config to live in the same dedicated folder.
+/// - **device builds (`fb`/`sdl`)**: next to the binary. The Anbernic launcher
+///   requires the app and its config to live in the same dedicated folder.
 /// - **desktop/server builds**: the platform config directory, so a generically
 ///   named `config.json` never collides with other tools sharing a `bin/`:
 ///   - macOS: `~/Library/Application Support/amber-dav/config.json`
@@ -122,7 +122,7 @@ pub fn config_path() -> PathBuf {
         }
     }
 
-    #[cfg(feature = "handheld")]
+    #[cfg(any(feature = "fb", feature = "sdl"))]
     {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
@@ -132,7 +132,7 @@ pub fn config_path() -> PathBuf {
         PathBuf::from("config.json")
     }
 
-    #[cfg(not(feature = "handheld"))]
+    #[cfg(not(any(feature = "fb", feature = "sdl")))]
     {
         if let Some(proj) = directories::ProjectDirs::from("", "", "amber-dav") {
             return proj.config_dir().join("config.json");

@@ -2,8 +2,8 @@
 //! burn-in on the always-on connection screen. Shared by every on-device sink
 //! (framebuffer + SDL) — it operates on plain logical `(w, h)` pixel dimensions
 //! and returns an RGB canvas, so it's independent of how those pixels are
-//! presented. Compiled in with the `handheld` feature (which pulls the `image`
-//! decoder); the `rand` crate is a base dependency.
+//! presented. Compiled in with the `fb` or `sdl` feature (which pull the
+//! `image` decoder); the `rand` crate is a base dependency.
 
 use std::path::PathBuf;
 
