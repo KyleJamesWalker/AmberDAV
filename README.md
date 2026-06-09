@@ -28,9 +28,10 @@ with no runtime dependencies.
 - **Live gamepad button viewer** — the Status tab streams every button/axis
   event (name + raw evdev code + up/down) live over SSE; handy for discovering
   button mappings.
-- **File-owned settings** — behavior is configured by a `config.json` next to
-  the binary (fixed password, served root, permission level, default folder,
-  screensaver). The UI displays settings read-only; it never edits the file.
+- **Unified settings** — every setting (root, port, bind address, password,
+  permission level, default folder, screensaver) is reachable three ways with a
+  clear precedence: **CLI flags → `AMBERDAV_*` env vars → config file →
+  defaults**. The web UI displays settings read-only; it never edits the file.
 
 ## Screenshots
 
@@ -51,9 +52,16 @@ cargo install cargo-zigbuild
 # Zig must be installed and on PATH — e.g. `brew install zig`,
 # `pip install ziglang`, or from https://ziglang.org/download/
 
-# Build
-cargo zigbuild --release --target aarch64-unknown-linux-musl
+# Device build — `--features handheld` pulls in the on-device screen + gamepad UI.
+cargo zigbuild --release --target aarch64-unknown-linux-musl --features handheld
 ```
+
+The **`handheld`** feature gates the device-only code (framebuffer screen,
+gamepad input, DVD-bounce screensaver) and its dependencies. It is **opt-in**:
+without it you get a smaller, headless WebDAV/file-server binary suited to
+desktops and servers. Build a headless binary for any target by simply omitting
+the feature, e.g. `cargo build --release` or
+`cargo zigbuild --release --target x86_64-unknown-linux-musl`.
 
 Output: `target/aarch64-unknown-linux-musl/release/amber-dav` (~2 MB, static):
 
@@ -68,18 +76,29 @@ The same aarch64 binary runs on both the RG35XX Pro and the RG34XXSP.
 
 Each [GitHub Release](../../releases) ships a prebuilt binary per platform:
 
-| Asset | Platform |
-| --- | --- |
-| `amber-dav-aarch64-linux` | the Anbernic device (static musl) |
-| `amber-dav-aarch64-macos` | macOS, Apple Silicon |
-| `amber-dav-x86_64-macos` | macOS, Intel |
-| `amber-dav-x86_64-windows` | Windows |
+Assets follow `amber-dav-<arch>-<os>[-handheld]`: plain `<arch>-<os>` is the
+standard headless build, and the `-handheld` suffix marks the one build with the
+on-device UI compiled in.
 
-Note: macOS/Windows binaries are simple CLI tools that write to stdout — a
-quick way to host a folder as a file server + WebDAV mount from a desktop:
+| Asset | Platform | Build |
+| --- | --- | --- |
+| `amber-dav-aarch64-linux-handheld` | the Anbernic device (static musl) | handheld |
+| `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
+| `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
+| `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
+| `amber-dav-x86_64-macos` | macOS, Intel | headless |
+| `amber-dav-x86_64-windows` | Windows | headless |
+| `amber-dav-aarch64-windows` | Windows on ARM (Snapdragon/Copilot+ PCs) | headless |
+
+Only the `-handheld` asset is built with `--features handheld`: it includes the
+on-device framebuffer screen and gamepad viewer. Every other asset is a
+**headless** WebDAV/file-server CLI that writes to stdout — a quick way to host
+a folder from a desktop or server:
 
 ```sh
-amber-dav /path/to/folder 8080   # serve <folder> on http://localhost:8080/
+amber-dav /path/to/folder 8080          # positional root + port
+amber-dav --root /path/to/folder --port 8080 --bind 127.0.0.1
+amber-dav --help                        # full flag/env list
 ```
 
 ## Install on Anbernic device
@@ -102,8 +121,9 @@ SD card root (two levels up from `Roms/APPS`) on port `8080` and writes startup
 output to `log.txt`. Edit the script to change the port, served root, or screen
 rotation — it's commented.
 
-> The binary itself takes optional `[ROOT_DIR] [PORT]` arguments (defaults:
-> current dir, `8080` / `$PORT`), but `config.json` overrides these once set.
+> The binary takes optional `[ROOT] [PORT]` positional arguments (defaults:
+> current dir, `8080`). CLI flags and `AMBERDAV_*` env vars take precedence over
+> `config.json`, so a launcher can override the file without editing it.
 
 ## First launch
 
@@ -130,9 +150,51 @@ time.
 
 ## Configuration
 
-Settings live in `config.json` in the same folder as the binary (override the
-location with `$AMBERDAV_CONFIG`). A default file is written on first launch.
-Edit it on the SD card or over WebDAV, then relaunch the app to apply changes.
+Every setting can be supplied three ways. When a setting is given in more than
+one place, the highest layer wins:
+
+1. **CLI flags** — `--root`, `--port`, … (run `amber-dav --help` for the list)
+2. **`AMBERDAV_*` env vars** — for containers/deployment
+3. **`config.json`** — persisted preferences
+4. **compiled-in defaults**
+
+| Setting | CLI flag | Env var | Config key |
+|---|---|---|---|
+| Served root | `--root <path>` (or positional 1) | `AMBERDAV_ROOT` | `root` |
+| Port | `--port <n>` (or positional 2) | `AMBERDAV_PORT` (or `PORT`) | `port` |
+| Bind address | `--bind <addr>` | `AMBERDAV_BIND` | `bind` |
+| Password | `--password <pw>` | `AMBERDAV_PASSWORD` | `password` |
+| Show password | `--display-password` / `--no-display-password` | `AMBERDAV_DISPLAY_PASSWORD` | `display_password` |
+| Default folder | `--default-folder <path>` | `AMBERDAV_DEFAULT_FOLDER` | `default_folder` |
+| Permission | `--permission <level>` | `AMBERDAV_PERMISSION` | `permission` |
+| Screensaver on | `--bounce-screen` / `--no-bounce-screen` | `AMBERDAV_BOUNCE_SCREEN` | `bounce_screen.enabled` |
+| Screensaver folders | `--bounce-folders <a,b,…>` | `AMBERDAV_BOUNCE_FOLDERS` | `bounce_screen.folders` |
+
+### Config file location
+
+| Build | Location |
+|---|---|
+| handheld (device) | next to the binary — `config.json` |
+| macOS | `~/Library/Application Support/amber-dav/config.json` |
+| Windows | `%APPDATA%\amber-dav\config\config.json` |
+| Linux (headless) | `$XDG_CONFIG_HOME/amber-dav/config.json` → `~/.config/amber-dav/config.json` |
+
+`$AMBERDAV_CONFIG` overrides the location on any build.
+
+On **handheld** builds a default `config.json` is written next to the binary on
+first launch (the device is configured through the web UI). **Headless** builds
+never write a config implicitly — run with `--save` to write the fully-resolved
+settings (CLI + env merged onto any existing file) to the config path and exit:
+
+```sh
+amber-dav --root /mnt/media --password secret --permission read_only --save
+# → writes the config file with those values, then exits
+```
+
+> **Migrating from an older desktop build:** the config no longer lives next to
+> the binary on desktop/server installs — it moved to the platform location
+> above. Move your existing `config.json` there (or point `$AMBERDAV_CONFIG` at
+> it, or re-create it with `--save`); otherwise it is ignored and defaults apply.
 
 ```jsonc
 {
@@ -143,8 +205,15 @@ Edit it on the SD card or over WebDAV, then relaunch the app to apply changes.
   // (otherwise it could never be discovered). Set false to hide a fixed one.
   "display_password": true,
 
-  // Absolute path to serve. Omit/empty to use the launcher's argument/default.
+  // Absolute path to serve. Omit/empty to use the CLI argument / default (".").
   "root": null,
+
+  // Port to listen on. Omit/null to use the CLI argument / default (8080).
+  "port": null,
+
+  // Address to bind. Omit/null for 0.0.0.0 (all interfaces); "127.0.0.1" for
+  // tunneled/proxied deployments.
+  "bind": null,
 
   // Folder (relative to root) to open right after login. "" = root.
   "default_folder": "Roms",
@@ -161,6 +230,8 @@ Edit it on the SD card or over WebDAV, then relaunch the app to apply changes.
   }
 }
 ```
+
+Edit the file directly or over WebDAV, then relaunch the app to apply changes.
 
 **Permission levels** are enforced on both the JSON API and the WebDAV mount:
 
@@ -206,9 +277,11 @@ download and install it in place:
 
 If anything goes wrong during the rename step, the original binary is restored.
 
-> The update check and apply are only available on the four prebuilt platforms
-> (aarch64-linux, aarch64-macos, x86_64-macos, x86_64-windows). Custom builds
-> will see a "no asset for this platform" response.
+> The update check and apply target the matching prebuilt release asset (see the
+> table above). A handheld binary only ever pulls the handheld asset and a
+> headless binary only the headless one, so a device never self-updates to a
+> screen-less build. Custom builds with no matching asset see a "no asset for
+> this platform" response.
 
 ## Updating via WebDAV (local builds)
 
@@ -259,13 +332,14 @@ level is enforced on every mutating request.
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | startup, config load, routing, shared state, banner + QR |
-| `src/config.rs` | `config.json` schema, load/save, permission levels |
+| `src/main.rs` | startup, settings resolution, routing, shared state, banner + QR |
+| `src/cli.rs` | CLI flags (clap) + CLI/env/file/default precedence resolution |
+| `src/config.rs` | `config.json` schema + location, load/save, permission levels |
 | `src/auth.rs` | session-cookie login for the web UI |
 | `src/webdav.rs` | `dav-server` handler bridged into axum + Basic auth + permission gate |
 | `src/files.rs` | JSON file API (list/upload/download/zip/rename/move/copy/delete) + HTTP Range |
-| `src/input.rs` | evdev reader → broadcast channel; drives screen controls (Linux only) |
-| `src/screen.rs` | draws IP/password/QR to `/dev/fb0`; blank + bounce screensaver (Linux only) |
+| `src/input.rs` | evdev reader → broadcast channel; drives screen controls (handheld only) |
+| `src/screen.rs` | draws IP/password/QR to `/dev/fb0`; blank + bounce screensaver (handheld only) |
 | `src/ui.rs` | landing/login pages, status/info endpoint, settings (read-only), SSE stream |
 | `src/update.rs` | in-app update: GitHub Releases check + binary download/rename dance |
 | `src/password.rs` | per-boot password generator |

@@ -2,6 +2,7 @@
 //! Anbernic handhelds (Allwinner H700, aarch64 Linux).
 
 mod auth;
+mod cli;
 mod config;
 mod files;
 mod input;
@@ -13,7 +14,7 @@ mod webdav;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};
 
-use config::Settings;
+use clap::Parser;
 
 use axum::{
     extract::FromRef,
@@ -39,7 +40,7 @@ pub fn current_ip() -> IpAddr {
 
 /// Settings, loaded once at boot from the config file (file-owned, read-only
 /// at runtime — the UI only displays them).
-pub type SharedSettings = Arc<Settings>;
+pub type SharedSettings = Arc<config::Settings>;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -72,31 +73,44 @@ impl FromRef<AppState> for DavState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Args: [root_dir] [port]. Defaults serve the current dir on :8080.
-    let mut args = std::env::args().skip(1);
-    let root = args.next().unwrap_or_else(|| ".".to_string());
-    let port: u16 = args
-        .next()
-        .and_then(|p| p.parse().ok())
-        .or_else(|| std::env::var("PORT").ok().and_then(|p| p.parse().ok()))
-        .unwrap_or(8080);
-
-    // Load settings; on first run, write a default file the user can edit.
+    let cli = cli::Cli::parse();
     let config_path = config::config_path();
+
+    // Handheld: keep auto-creating a default config on first run — the device
+    // is configured through the web UI, so the file must exist to be edited.
+    // Desktop/server builds never write implicitly; use `--save` to opt in.
+    #[cfg(feature = "handheld")]
     if !config_path.exists() {
-        match config::save(&config_path, &Settings::default()) {
+        match config::save(&config_path, &config::Settings::default()) {
             Ok(()) => eprintln!("config: wrote default {}", config_path.display()),
             Err(e) => eprintln!("config: could not write {}: {e}", config_path.display()),
         }
     }
-    let settings = config::load(&config_path);
 
-    // Effective root: config overrides the CLI arg when set.
+    // Resolve settings: CLI args and AMBERDAV_* env vars merged on top of the
+    // config file (CLI > env > file > default). This also fixes the old bug
+    // where the config `root` silently overrode the CLI argument.
+    let settings = cli.resolve(config::load(&config_path));
+
+    // --save: persist the fully-resolved config and exit. No server is started.
+    if cli.save {
+        config::save(&config_path, &settings)?;
+        println!("config: wrote {}", config_path.display());
+        return Ok(());
+    }
+
+    // Effective root/port/bind, falling back to the compiled defaults.
     let root = settings
         .root
         .clone()
         .filter(|r| !r.is_empty())
-        .unwrap_or(root);
+        .unwrap_or_else(|| ".".to_string());
+    let port = settings.port.unwrap_or(8080);
+    let bind = settings
+        .bind
+        .clone()
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
 
     // Effective password: fixed from config, else a fresh random one.
     let random_password = settings
@@ -203,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let screen_pw = display_password.then(|| password.clone());
     screen::show(port, screen_pw, screen_status, screen_mode, bounce_paths);
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

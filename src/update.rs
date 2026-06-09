@@ -19,16 +19,40 @@ static UPDATE_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Returns the release asset name for the current platform, or `None` if the
-/// platform is not a known release target.
+/// platform/build is not a published release target.
+///
+/// Assets follow `amber-dav-<arch>-<os>[-handheld]`: plain `<arch>-<os>` is the
+/// standard headless build, and the `-handheld` suffix marks the build that
+/// compiles in the device UI (framebuffer + gamepad). Splitting the Linux
+/// branches on the `handheld` feature means a device never self-updates to a
+/// headless binary (no screen/input) and a server never pulls the heavier
+/// device build. Handheld x86_64 isn't a real target, so it returns `None`
+/// rather than naming a nonexistent asset.
 pub fn asset_name() -> Option<&'static str> {
-    if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
-        Some("amber-dav-aarch64-linux")
+    if cfg!(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        feature = "handheld"
+    )) {
+        Some("amber-dav-aarch64-linux-handheld") // device build
+    } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
+        Some("amber-dav-aarch64-linux") // headless ARM (Pi/NAS/Graviton)
+    } else if cfg!(all(
+        target_arch = "x86_64",
+        target_os = "linux",
+        not(feature = "handheld")
+    )) {
+        Some("amber-dav-x86_64-linux") // headless x86 server build
+    } else if cfg!(target_os = "linux") {
+        None // handheld x86_64 isn't a real target
     } else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
         Some("amber-dav-aarch64-macos")
     } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
         Some("amber-dav-x86_64-macos")
     } else if cfg!(all(target_arch = "x86_64", target_os = "windows")) {
         Some("amber-dav-x86_64-windows.exe")
+    } else if cfg!(all(target_arch = "aarch64", target_os = "windows")) {
+        Some("amber-dav-aarch64-windows.exe")
     } else {
         None
     }
