@@ -44,6 +44,19 @@
   }
   nav a:hover { color: var(--text); background: rgba(255,255,255,.02); }
   nav a.active { color: var(--amber); border-left-color: var(--amber); background: var(--amber-soft); }
+  /* favorites: named folder shortcuts, styled to match nav links */
+  .favs { margin-top: .2rem; display: none; flex-direction: column; }
+  .favs.show { display: flex; }
+  .favs .fav-head {
+    font-family: var(--mono); color: var(--dim); letter-spacing: .2em; text-transform: uppercase;
+    font-size: .62rem; padding: 1.1rem 1.2rem .3rem;
+  }
+  .favs a {
+    font-family: var(--mono); font-size: .8rem; letter-spacing: .08em;
+    color: var(--muted); text-decoration: none; padding: .5rem 1.2rem; border-left: 2px solid transparent;
+    cursor: pointer; transition: color .12s, background .12s; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .favs a:hover { color: var(--text); background: rgba(255,255,255,.02); }
   .side-foot { margin-top: auto; padding: 0 1.2rem; }
   .side-foot a { font-family: var(--mono); font-size: .74rem; color: var(--dim); text-decoration: none; }
   .side-foot a:hover { color: var(--amber); }
@@ -235,6 +248,7 @@
       <a id="nav-status" data-view="status">Status</a>
       <a id="nav-settings" data-view="settings">Settings</a>
     </nav>
+    <nav class="favs" id="favs"></nav>
     <div class="side-foot"><a href="/logout">› log out</a></div>
   </aside>
 
@@ -789,6 +803,8 @@ async function loadSettings() {
       row('Show code on screen', s.display_password ? 'yes' : 'no'),
       row('Permission', s.permission),
       row('Default folder', s.default_folder || '(Home)'),
+      row('Favorites', (s.favorites && s.favorites.length)
+        ? s.favorites.map(f => f.name).join(', ') : '(none)'),
       row('Root', s.root || '(default)'),
     ].join('<br>');
   } catch (e) { $('set-view').textContent = e.message; }
@@ -927,9 +943,30 @@ main.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; $('dro
   if (!canWrite()) { toast('Read-only — uploads are disabled', true); return; }
   uploadFiles(e.dataTransfer.files); });
 
-// Read settings (permission + default folder) before the first listing.
+// Render the sidebar favorites (named folder shortcuts). Empty → hidden.
+function renderFavorites(favs) {
+  const c = $('favs'); c.innerHTML = '';
+  const list = Array.isArray(favs) ? favs.filter(f => f && typeof f.name === 'string') : [];
+  c.classList.toggle('show', list.length > 0);
+  if (!list.length) return;
+  const head = document.createElement('div'); head.className = 'fav-head'; head.textContent = 'Favorites';
+  c.appendChild(head);
+  list.forEach(f => {
+    const path = typeof f.path === 'string' ? f.path : '';
+    const a = document.createElement('a');
+    a.textContent = f.name; a.title = path || '(Home)';
+    a.onclick = () => { showView('files'); go(path); closeSidebar(); };
+    c.appendChild(a);
+  });
+}
+
+// Read settings (permission + default folder + favorites) before the first listing.
 (async () => {
-  try { const s = await api('GET', '/api/settings'); perm = s.permission || 'read_write'; defaultFolder = s.default_folder || ''; }
+  try {
+    const s = await api('GET', '/api/settings');
+    perm = s.permission || 'read_write'; defaultFolder = s.default_folder || '';
+    renderFavorites(s.favorites);
+  }
   catch (e) { /* fall back to defaults */ }
   go(defaultFolder);
 })();

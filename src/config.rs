@@ -3,7 +3,7 @@
 //! builds (see [`config_path`]); `$AMBERDAV_CONFIG` overrides either. Loaded at
 //! startup; the Settings UI rewrites the file.
 //!
-//! `permission` and `default_folder` are read live per request. `password`,
+//! `permission`, `default_folder`, and `favorites` are read live per request. `password`,
 //! `display_password`, and `root` are bound at boot and need a relaunch.
 
 use std::path::{Path, PathBuf};
@@ -58,6 +58,18 @@ fn default_bounce_keys() -> Vec<u16> {
     vec![307]
 }
 
+/// A named folder shortcut shown in the web UI sidebar for one-click
+/// navigation. Most useful on device (`fb`/`sdl`) builds browsing a larger
+/// tree; CLI folder shares typically leave the list empty.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Favorite {
+    /// Label shown in the sidebar.
+    pub name: String,
+    /// Folder to open, relative to the served root (same convention as
+    /// [`Settings::default_folder`]).
+    pub path: String,
+}
+
 /// Burn-in screensaver: bounce random images (DVD-logo style) across the
 /// screen. Toggled on-device with the X button.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -92,6 +104,10 @@ pub struct Settings {
     /// Folder (relative to root) to open after login.
     #[serde(default)]
     pub default_folder: String,
+    /// Named folder shortcuts shown in the web UI sidebar, in order. Empty or
+    /// absent → no Favorites section is rendered.
+    #[serde(default)]
+    pub favorites: Vec<Favorite>,
     /// Allowed file operations.
     #[serde(default = "default_permission")]
     pub permission: Permission,
@@ -124,6 +140,7 @@ impl Default for Settings {
             port: None,
             bind: None,
             default_folder: String::new(),
+            favorites: Vec::new(),
             permission: Permission::ReadWrite,
             bounce_screen: BounceScreen::default(),
             connection_file: None,
