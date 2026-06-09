@@ -2,6 +2,8 @@
 //! Anbernic handhelds (Allwinner H700, aarch64 Linux).
 
 mod auth;
+#[cfg(feature = "handheld")]
+mod bounce;
 mod canvas;
 mod cli;
 mod config;
@@ -11,12 +13,12 @@ mod files;
 mod input;
 mod password;
 mod screen;
+#[cfg(all(target_os = "linux", feature = "sdl"))]
+mod sdl;
 mod ui;
 mod update;
 #[cfg(all(target_os = "linux", feature = "handheld", not(feature = "sdl")))]
 mod wayland;
-#[cfg(all(target_os = "linux", feature = "sdl"))]
-mod sdl;
 mod webdav;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};

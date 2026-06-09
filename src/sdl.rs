@@ -42,6 +42,7 @@ pub fn run(
     password: Option<String>,
     status: Status,
     mode: ModeHandle,
+    bounce_paths: Vec<std::path::PathBuf>,
 ) -> Result<(), String> {
     let forced = std::env::var("SDL_VIDEODRIVER").ok();
     let candidates = driver_candidates(forced.as_deref());
@@ -51,7 +52,7 @@ pub fn run(
         // this sink thread at startup; the brief window before the input thread
         // reads env is acceptable.)
         std::env::set_var("SDL_VIDEODRIVER", driver);
-        match run_with_driver(port, password.clone(), &status, &mode) {
+        match run_with_driver(port, password.clone(), &status, &mode, bounce_paths.clone()) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = format!("{driver}: {e}");
@@ -77,6 +78,7 @@ fn run_with_driver(
     password: Option<String>,
     status: &Status,
     mode: &ModeHandle,
+    bounce_paths: Vec<std::path::PathBuf>,
 ) -> Result<(), String> {
     let sdl = sdl2::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
@@ -102,6 +104,8 @@ fn run_with_driver(
     let mut pump = sdl.event_pump().map_err(|e| e.to_string())?;
     eprintln!("sdl: using driver {driver} at {w}x{h}");
 
+    let (wu, hu) = (w as usize, h as usize);
+    let mut bounce = crate::bounce::Bounce::new(bounce_paths);
     let mut last_mode: Option<Mode> = None;
     let mut frame: u64 = 0;
     loop {
@@ -115,28 +119,35 @@ fn run_with_driver(
 
         let cur = mode.lock().map(|m| *m).unwrap_or(Mode::Info);
         // Static screens (Info/Black) only re-render on a mode change or
-        // periodically (to re-query the IP after late Wi-Fi). Bounce is
-        // framebuffer-only; under SDL it shows the info screen.
-        let refresh = last_mode != Some(cur) || frame.is_multiple_of(30);
+        // periodically (to re-query the IP after late Wi-Fi). Bounce animates,
+        // so it re-renders on a fixed cadence — every 5th 16ms loop (~80ms,
+        // matching the framebuffer sink) — enough motion without re-decoding
+        // images or pinning the CPU on every frame.
+        let refresh = match cur {
+            Mode::Bounce => last_mode != Some(cur) || frame.is_multiple_of(5),
+            _ => last_mode != Some(cur) || frame.is_multiple_of(30),
+        };
         if refresh {
-            let cv = match cur {
-                Mode::Black => black_canvas(w as usize, h as usize),
-                Mode::Info | Mode::Bounce => info_canvas(
-                    w as usize,
-                    h as usize,
-                    crate::current_ip(),
-                    port,
-                    password.as_deref(),
-                ),
+            let px: Vec<[u8; 3]> = match cur {
+                Mode::Black => black_canvas(wu, hu).px,
+                Mode::Info => {
+                    info_canvas(wu, hu, crate::current_ip(), port, password.as_deref()).px
+                }
+                Mode::Bounce => {
+                    bounce.step(wu, hu);
+                    bounce.canvas(wu, hu)
+                }
             };
-            // canvas.px is a contiguous Vec<[u8;3]> == w*h*3 bytes of RGB24.
-            let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(cv.px.as_ptr() as *const u8, cv.px.len() * 3)
-            };
+            // px is a contiguous Vec<[u8;3]> == w*h*3 bytes of RGB24.
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 3) };
             texture
-                .update(None, bytes, (w as usize) * 3)
+                .update(None, bytes, wu * 3)
                 .map_err(|e| e.to_string())?;
-            set_status(status, format!("ok (sdl {driver} {w}x{h}) frame={frame}"));
+            set_status(
+                status,
+                format!("ok (sdl {driver} {w}x{h}) frame={frame} mode={cur:?}"),
+            );
             last_mode = Some(cur);
         }
 

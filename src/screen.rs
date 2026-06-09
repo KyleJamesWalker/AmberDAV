@@ -66,11 +66,11 @@ pub fn show(
     password: Option<String>,
     status: Status,
     mode: ModeHandle,
-    _bounce_paths: Vec<std::path::PathBuf>,
+    bounce_paths: Vec<std::path::PathBuf>,
 ) {
     set(&status, "sdl: starting…".to_string());
     std::thread::spawn(move || {
-        if let Err(e) = crate::sdl::run(port, password, status.clone(), mode) {
+        if let Err(e) = crate::sdl::run(port, password, status.clone(), mode, bounce_paths) {
             set(&status, format!("sdl failed: {e}"));
             eprintln!("screen: sdl sink failed ({e}); connection info is in the log only");
         }
@@ -141,7 +141,7 @@ fn show_framebuffer(
             let mut page = 0usize;
             let mut frame = 0u64;
             let mut last_mode: Option<Mode> = None;
-            let mut bounce = imp::Bounce::new(bounce_paths);
+            let mut bounce = crate::bounce::Bounce::new(bounce_paths);
 
             loop {
                 let mode = mode.lock().map(|m| *m).unwrap_or(Mode::Info);
@@ -164,8 +164,8 @@ fn show_framebuffer(
                         }
                         Mode::Black => crate::canvas::black_canvas(geom.lw, geom.lh).px,
                         Mode::Bounce => {
-                            bounce.step(&geom);
-                            bounce.canvas(&geom)
+                            bounce.step(geom.lw, geom.lh);
+                            bounce.canvas(geom.lw, geom.lh)
                         }
                     };
                     match imp::commit(&mut fb, &geom, &canvas, page) {
@@ -277,12 +277,7 @@ mod tests {
 
 #[cfg(all(feature = "handheld", not(feature = "sdl")))]
 mod imp {
-    use std::path::PathBuf;
-
     use framebuffer::{Bitfield, Framebuffer, VarScreeninfo};
-    use rand::Rng;
-
-    const BLACK: [u8; 3] = [0, 0, 0];
 
     fn rotation() -> u32 {
         std::env::var("AMBERDAV_FB_ROTATE")
@@ -376,200 +371,6 @@ mod imp {
             "{}x{} {}bpp rot={} pages={} virt={} pan={}",
             g.xres, g.yres, g.var.bits_per_pixel, g.rot, g.pages, g.var.yres_virtual, panned
         ))
-    }
-
-    /// A decoded image scaled to a sprite, plus the live bounce position.
-    struct Sprite {
-        w: usize,
-        h: usize,
-        px: Vec<[u8; 3]>,
-    }
-
-    /// State for the DVD-bounce screensaver.
-    pub struct Bounce {
-        /// Files/dirs from config; expanded into `images` on first activation.
-        roots: Vec<PathBuf>,
-        images: Vec<PathBuf>,
-        scanned: bool,
-        started: bool,
-        sprite: Option<Sprite>,
-        x: i32,
-        y: i32,
-        vx: i32,
-        vy: i32,
-    }
-
-    impl Bounce {
-        pub fn new(roots: Vec<PathBuf>) -> Bounce {
-            Bounce {
-                roots,
-                images: Vec::new(),
-                scanned: false,
-                started: false,
-                sprite: None,
-                x: 0,
-                y: 0,
-                vx: 3,
-                vy: 2,
-            }
-        }
-
-        /// Advance the animation one frame: move the sprite, and on hitting an
-        /// edge reflect its heading and swap to a new image — keeping position.
-        pub fn step(&mut self, g: &Geom) {
-            if !self.scanned {
-                self.images = scan_images(&self.roots);
-                self.scanned = true;
-            }
-            if self.images.is_empty() {
-                return; // No images → black screen, which still prevents burn-in.
-            }
-            // First activation: place a centered sprite with a random heading.
-            if !self.started {
-                self.start(g);
-                self.started = true;
-                return;
-            }
-            let Some(sprite) = &self.sprite else {
-                // Decode kept failing earlier; try again before moving.
-                self.start(g);
-                return;
-            };
-
-            let maxx = g.lw.saturating_sub(sprite.w) as i32;
-            let maxy = g.lh.saturating_sub(sprite.h) as i32;
-            self.x += self.vx;
-            self.y += self.vy;
-            let mut bounced = false;
-            if self.x <= 0 {
-                self.x = 0;
-                self.vx = self.vx.abs();
-                bounced = true;
-            } else if self.x >= maxx {
-                self.x = maxx;
-                self.vx = -self.vx.abs();
-                bounced = true;
-            }
-            if self.y <= 0 {
-                self.y = 0;
-                self.vy = self.vy.abs();
-                bounced = true;
-            } else if self.y >= maxy {
-                self.y = maxy;
-                self.vy = -self.vy.abs();
-                bounced = true;
-            }
-            // Classic DVD behaviour: swap the image on each edge bounce. Keep
-            // the current position and the just-reflected heading.
-            if bounced && self.images.len() > 1 {
-                self.swap_image(g);
-            }
-        }
-
-        /// First placement: a centered sprite with a random diagonal heading.
-        fn start(&mut self, g: &Geom) {
-            let mut rng = rand::rng();
-            if let Some(sprite) = self.pick_sprite(g, &mut rng) {
-                self.x = (g.lw.saturating_sub(sprite.w) / 2) as i32;
-                self.y = (g.lh.saturating_sub(sprite.h) / 2) as i32;
-                self.vx = if rng.random_bool(0.5) { 3 } else { -3 };
-                self.vy = if rng.random_bool(0.5) { 2 } else { -2 };
-                self.sprite = Some(sprite);
-            }
-        }
-
-        /// Replace the sprite with a new random image, preserving position and
-        /// heading. Position is clamped so a larger image stays on screen.
-        fn swap_image(&mut self, g: &Geom) {
-            let mut rng = rand::rng();
-            if let Some(sprite) = self.pick_sprite(g, &mut rng) {
-                let maxx = g.lw.saturating_sub(sprite.w) as i32;
-                let maxy = g.lh.saturating_sub(sprite.h) as i32;
-                self.x = self.x.clamp(0, maxx.max(0));
-                self.y = self.y.clamp(0, maxy.max(0));
-                self.sprite = Some(sprite);
-            }
-        }
-
-        /// Pick and decode a random image, sized to ~1/3 of the canvas. Tries a
-        /// handful in case some fail to decode (e.g. a corrupt file).
-        fn pick_sprite(&self, g: &Geom, rng: &mut impl Rng) -> Option<Sprite> {
-            let cap = (g.lw.min(g.lh) / 3).max(32) as u32;
-            for _ in 0..self.images.len().min(8) {
-                let idx = rng.random_range(0..self.images.len());
-                if let Some(sprite) = decode_sprite(&self.images[idx], cap) {
-                    return Some(sprite);
-                }
-            }
-            None
-        }
-
-        /// Render the current sprite onto a black canvas.
-        pub fn canvas(&self, g: &Geom) -> Vec<[u8; 3]> {
-            let mut canvas = vec![BLACK; g.lw * g.lh];
-            if let Some(s) = &self.sprite {
-                for sy in 0..s.h {
-                    let ty = self.y + sy as i32;
-                    if ty < 0 || ty >= g.lh as i32 {
-                        continue;
-                    }
-                    for sx in 0..s.w {
-                        let tx = self.x + sx as i32;
-                        if tx < 0 || tx >= g.lw as i32 {
-                            continue;
-                        }
-                        canvas[ty as usize * g.lw + tx as usize] = s.px[sy * s.w + sx];
-                    }
-                }
-            }
-            canvas
-        }
-    }
-
-    /// Extensions we can decode for the screensaver.
-    const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
-
-    fn is_image(path: &std::path::Path) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-            .unwrap_or(false)
-    }
-
-    /// Expand the configured files/folders into a flat list of image files.
-    /// Folders are walked recursively (bounded, to stay responsive).
-    fn scan_images(roots: &[PathBuf]) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let mut stack: Vec<PathBuf> = roots.to_vec();
-        let cap = 5000;
-        while let Some(p) = stack.pop() {
-            if out.len() >= cap {
-                break;
-            }
-            if p.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&p) {
-                    for entry in entries.flatten() {
-                        stack.push(entry.path());
-                    }
-                }
-            } else if p.is_file() && is_image(&p) {
-                out.push(p);
-            }
-        }
-        eprintln!("screen: bounce screensaver found {} image(s)", out.len());
-        out
-    }
-
-    /// Decode `path` and downscale so its largest side is at most `cap` pixels.
-    fn decode_sprite(path: &std::path::Path, cap: u32) -> Option<Sprite> {
-        let img = image::open(path).ok()?;
-        let img = img.thumbnail(cap, cap).to_rgb8();
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let px = img.pixels().map(|p| [p[0], p[1], p[2]]).collect();
-        Some(Sprite { w, h, px })
     }
 
     /// Pack an 8-bit RGB triple into the framebuffer's native pixel value.
