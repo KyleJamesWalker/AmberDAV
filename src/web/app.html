@@ -211,6 +211,14 @@
   }
   .menu-toggle:hover { color: var(--text); background: rgba(255,255,255,.04); }
 
+  /* mobile-only top bar: keeps the sidebar toggle reachable from every view
+     (Files, Status, Settings) — not just the file browser. */
+  .mobile-bar { display: none; align-items: center; gap: .5rem; padding: .5rem .7rem;
+    border-bottom: 1px solid var(--line-soft); flex: none; }
+  .mobile-bar .mb-brand { font-family: var(--mono); font-size: 1rem; font-weight: 700;
+    letter-spacing: .04em; color: var(--text); }
+  .mobile-bar .mb-brand b { color: var(--amber); }
+
   /* dim overlay behind open sidebar on mobile */
   .side-overlay { display: none; position: fixed; inset: 0; z-index: 79; background: rgba(0,0,0,.5); }
   .side-overlay.show { display: block; }
@@ -223,6 +231,7 @@
     }
     aside.open { left: 0; }
     .menu-toggle { display: inline-flex; align-items: center; }
+    .mobile-bar { display: flex; }
   }
 
   /* text editor */
@@ -253,9 +262,12 @@
   </aside>
 
   <main>
+    <div class="mobile-bar">
+      <button class="menu-toggle" id="menu-toggle" title="Menu">☰</button>
+      <span class="mb-brand">Amber<b>DAV</b></span>
+    </div>
     <section id="view-files" style="display:flex;flex-direction:column;flex:1;min-height:0;">
       <div class="crumbs-row">
-        <button class="menu-toggle" id="menu-toggle" title="Menu">☰</button>
         <div class="crumbs" id="crumbs"></div>
       </div>
       <div class="toolbar">
