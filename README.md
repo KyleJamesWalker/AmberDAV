@@ -7,8 +7,10 @@ and read the device's IP, password, and a scannable QR code straight off
 the device's screen, or terminal.
 
 Built and tested on the **RG35XX Pro** and **RG34XXSP** (Allwinner H700 /
-aarch64, stock Anbernic OS). The whole thing is one statically-linked binary
-with no runtime dependencies.
+aarch64, stock Anbernic OS) and the **Steam Deck** (Game Mode, via the SDL
+build). The framebuffer and headless builds are a single statically-linked
+binary with no runtime dependencies; the SDL on-screen build dynamically links
+the system `libSDL2` (present on SteamOS and the Anbernic stock OS).
 
 ## Features
 
@@ -85,16 +87,16 @@ on-screen build (links the system libSDL2).
 
 | Asset | Platform | Build |
 | --- | --- | --- |
-| `amber-dav-aarch64-linux-fb` | the Anbernic device (static musl) | fb |
-| `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali` on-screen QR) | sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |
+| `amber-dav-aarch64-linux-fb` | the Anbernic device (static musl) | fb |
+| `amber-dav-aarch64-linux-sdl` | Anbernic (SDL/`mali`) | sdl (dynamic, needs libSDL2) |
 | `amber-dav-x86_64-linux` | x86 Linux servers/NAS/Docker (static musl) | headless |
 | `amber-dav-x86_64-linux-fb` | x86 Linux handhelds without libSDL2 | fb |
-| `amber-dav-x86_64-linux-sdl` | Steam Deck (on-screen QR) | sdl (dynamic, needs libSDL2) |
+| `amber-dav-x86_64-linux-sdl` | Steam Deck | sdl (dynamic, needs libSDL2) |
 | `amber-dav-aarch64-macos` | macOS, Apple Silicon | headless |
 | `amber-dav-x86_64-macos` | macOS, Intel | headless |
-| `amber-dav-x86_64-windows` | Windows | headless |
 | `amber-dav-aarch64-windows` | Windows on ARM (Snapdragon/Copilot+ PCs) | headless |
+| `amber-dav-x86_64-windows` | Windows | headless |
 
 The `-fb` and `-sdl` assets are built with `--features fb` and `--features sdl`
 respectively: both include the on-device screen and gamepad viewer (differing
@@ -136,15 +138,11 @@ rotation — it's commented.
 
 ### Steam Deck — on-screen QR via SDL
 
-Use the **`amber-dav-x86_64-linux-sdl`** asset. Unlike the framebuffer/Wayland
-build (whose native-Wayland surface Steam never foregrounds in Game Mode), the
-SDL build opens an **X11/Xwayland** window — the kind Steam *does* foreground —
-so the IP/password/QR screen shows. Add it as a Non-Steam Game and launch it.
+Use the **`amber-dav-x86_64-linux-sdl`** asset — add it as a Non-Steam Game and
+launch it.
 
 The SDL build links the system `libSDL2` (present on SteamOS) and auto-selects
 the video driver (`x11` on the Deck). Force one with `SDL_VIDEODRIVER` if needed.
-The static framebuffer build still works for the Anbernic and for any OS without
-libSDL2; the SDL build is the one that displays in Steam Game Mode.
 
 1. In Desktop Mode, copy the binary somewhere persistent (e.g. `~/Applications`).
 2. Add it to Steam as a **Non-Steam Game**, then switch to Game Mode and launch it.
