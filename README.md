@@ -228,7 +228,9 @@ one place, the highest layer wins:
 `$AMBERDAV_CONFIG` overrides the location on any build.
 
 On **device** (`fb`/`sdl`) builds a default `config.json` is written next to the
-binary on first launch (the device is configured through the web UI). **Headless** builds
+binary on first launch (the device is configured through the web UI). The
+generated file documents every option and its allowed values in `//` comments,
+so it can be edited in place without consulting this README. **Headless** builds
 never write a config implicitly — run with `--save` to write the fully-resolved
 settings (CLI + env merged onto any existing file) to the config path and exit:
 
