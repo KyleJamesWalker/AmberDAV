@@ -40,6 +40,10 @@ use webdav::DavState;
 pub struct ServerInfo {
     pub port: u16,
     pub password: String,
+    /// Set when the config file existed but could not be used (parse/read
+    /// failure) — surfaced on the Status tab so a broken config is never
+    /// invisible (issue #19).
+    pub config_error: Option<String>,
 }
 
 /// Resolve the device's current LAN IP. Re-queried live (not cached at boot)
@@ -103,7 +107,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Resolve settings: CLI args and AMBERDAV_* env vars merged on top of the
     // config file (CLI > env > file > default). This also fixes the old bug
     // where the config `root` silently overrode the CLI argument.
-    let settings = cli.resolve(config::load(&config_path));
+    //
+    // A broken config falls back to defaults but the error is carried along
+    // and surfaced on the device screen and the web Status tab — on a handheld
+    // stderr is invisible, so a silent fallback would look like the config is
+    // simply ignored (issue #19).
+    let (file_settings, config_error) = config::load(&config_path);
+    let settings = cli.resolve(file_settings);
 
     // --save: persist the fully-resolved config and exit. No server is started.
     if cli.save {
@@ -205,6 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info: Arc::new(ServerInfo {
             port,
             password: password.clone(),
+            config_error: config_error.clone(),
         }),
         events,
         screen_status: screen_status.clone(),
@@ -260,6 +271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         screen_status,
         screen_mode,
         bounce_paths,
+        config_error,
     );
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;

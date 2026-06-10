@@ -228,7 +228,9 @@ one place, the highest layer wins:
 `$AMBERDAV_CONFIG` overrides the location on any build.
 
 On **device** (`fb`/`sdl`) builds a default `config.json` is written next to the
-binary on first launch (the device is configured through the web UI). **Headless** builds
+binary on first launch (the device is configured through the web UI). The
+generated file documents every option and its allowed values in `//` comments,
+so it can be edited in place without consulting this README. **Headless** builds
 never write a config implicitly — run with `--save` to write the fully-resolved
 settings (CLI + env merged onto any existing file) to the config path and exit:
 
@@ -287,6 +289,11 @@ amber-dav --root /mnt/media --password secret --permission read_only --save
 ```
 
 Edit the file directly or over WebDAV, then relaunch the app to apply changes.
+The file is parsed as **JSONC**: `//` and `/* */` comments and trailing commas
+are all accepted, so the example above works as written. If the file still
+fails to parse, the app boots with defaults and shows the parse error on the
+device screen and the web **Status** tab (and stderr), so a broken config is
+never silently ignored.
 
 **Permission levels** are enforced on both the JSON API and the WebDAV mount:
 

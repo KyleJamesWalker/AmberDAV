@@ -23,6 +23,7 @@ const BG: [u8; 3] = [0x0e, 0x0f, 0x13]; // --bg
 const TEXT: [u8; 3] = [0xd8, 0xdd, 0xe5]; // --text
 const MUTED: [u8; 3] = [0x8b, 0x93, 0xa3]; // --muted
 const AMBER: [u8; 3] = [0xff, 0xb4, 0x54]; // --amber (accent)
+const DANGER: [u8; 3] = [0xff, 0x6b, 0x6b]; // --danger
 
 /// An RGB pixel buffer, `w * h` pixels in row-major order.
 pub struct Canvas {
@@ -47,8 +48,17 @@ pub fn black_canvas(w: usize, h: usize) -> Canvas {
 }
 
 /// Build the connection-info canvas: IP, credentials, and a centered QR code.
-/// `w`/`h` are the logical (landscape-as-authored) dimensions.
-pub fn info_canvas(w: usize, h: usize, ip: IpAddr, port: u16, password: Option<&str>) -> Canvas {
+/// `w`/`h` are the logical (landscape-as-authored) dimensions. A broken config
+/// (`config_error`) is surfaced as a warning — on a handheld, stderr is
+/// invisible, so this screen is where a parse failure must show up (issue #19).
+pub fn info_canvas(
+    w: usize,
+    h: usize,
+    ip: IpAddr,
+    port: u16,
+    password: Option<&str>,
+    config_error: Option<&str>,
+) -> Canvas {
     let mut c = Canvas::filled(w, h, BG);
     let scale = (w / 240).max(2);
     let line_h = 8 * scale + scale * 2;
@@ -62,6 +72,25 @@ pub fn info_canvas(w: usize, h: usize, ip: IpAddr, port: u16, password: Option<&
     let mut y = margin;
     draw_text(&mut c, margin, y, "amber-dav  file access", scale, AMBER);
     y += line_h;
+
+    // Drawn before the Wi-Fi early-return so a config problem is diagnosable
+    // even with no network. The detail line carries the parser's line/column.
+    if let Some(err) = config_error {
+        draw_text(
+            &mut c,
+            margin,
+            y,
+            "Config error - using defaults",
+            scale,
+            DANGER,
+        );
+        y += line_h;
+        let cols = (w.saturating_sub(margin * 2) / (8 * scale)).max(8);
+        for line in wrap_chars(err, cols).into_iter().take(2) {
+            draw_text(&mut c, margin, y, &line, scale, MUTED);
+            y += line_h;
+        }
+    }
 
     if ip.is_unspecified() {
         draw_text(&mut c, margin, y, "Waiting for Wi-Fi…", scale, TEXT);
@@ -122,6 +151,16 @@ pub fn info_canvas(w: usize, h: usize, ip: IpAddr, port: u16, password: Option<&
     c
 }
 
+/// Hard-wrap `text` into lines of at most `cols` characters (the 8x8 font is
+/// monospaced, so character count maps directly to pixels).
+fn wrap_chars(text: &str, cols: usize) -> Vec<String> {
+    text.chars()
+        .collect::<Vec<_>>()
+        .chunks(cols)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
 fn fill_rect(c: &mut Canvas, x: usize, y: usize, rw: usize, rh: usize, val: [u8; 3]) {
     for yy in y..(y + rh).min(c.h) {
         for xx in x..(x + rw).min(c.w) {
@@ -167,18 +206,58 @@ mod tests {
     #[test]
     fn info_canvas_has_requested_dims_and_is_not_blank() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50));
-        let c = info_canvas(480, 320, ip, 8080, Some("ab12"));
+        let c = info_canvas(480, 320, ip, 8080, Some("ab12"), None);
         assert_eq!(c.w, 480);
         assert_eq!(c.h, 320);
         assert_eq!(c.px.len(), 480 * 320);
         // Themed: dark background, with amber content (heading + QR) drawn on it.
         assert!(c.px.contains(&BG), "background not the dark theme");
         assert!(c.px.contains(&AMBER), "amber content not drawn");
+        // No config error → no danger-coloured warning anywhere.
+        assert!(!c.px.contains(&DANGER), "warning drawn without an error");
+    }
+
+    // A broken config must be visible on the device screen — stderr is
+    // invisible on a handheld launched from the menu (issue #19).
+    #[test]
+    fn info_canvas_shows_config_error_warning() {
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50));
+        let c = info_canvas(
+            480,
+            320,
+            ip,
+            8080,
+            Some("ab12"),
+            Some("config.json is invalid"),
+        );
+        assert!(c.px.contains(&DANGER), "config error warning not drawn");
+    }
+
+    // The warning must also show while waiting for Wi-Fi — a user diagnosing
+    // their config should not need a network connection first.
+    #[test]
+    fn info_canvas_shows_config_error_even_without_ip() {
+        let c = info_canvas(
+            480,
+            320,
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            8080,
+            None,
+            Some("config.json is invalid"),
+        );
+        assert!(c.px.contains(&DANGER), "config error warning not drawn");
     }
 
     #[test]
     fn info_canvas_waiting_for_wifi_when_unspecified() {
-        let c = info_canvas(480, 320, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080, None);
+        let c = info_canvas(
+            480,
+            320,
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            8080,
+            None,
+            None,
+        );
         assert_eq!((c.w, c.h), (480, 320));
         // The heading is drawn even while waiting for Wi-Fi.
         assert!(c.px.contains(&AMBER));
