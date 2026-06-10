@@ -153,3 +153,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}${{ matrix.ext }}" --clobber
+
+  # Once every binary is attached, hash them all into a single SHA256SUMS
+  # asset (`<hex>  <asset-name>` lines, sha256sum format). The in-app updater
+  # downloads this file and refuses to install a binary whose hash doesn't
+  # match, so it must be generated after — and from — the uploaded assets.
+  checksums:
+    name: SHA256SUMS
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'amber-dav-*' --dir assets
+          (cd assets && sha256sum *) > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber \
+            --repo "$GITHUB_REPOSITORY"
