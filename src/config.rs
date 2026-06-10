@@ -1,7 +1,8 @@
-//! Persistent settings, stored as JSON. The file lives next to the binary on
-//! handheld builds and in the platform config directory on desktop/server
-//! builds (see [`config_path`]); `$AMBERDAV_CONFIG` overrides either. Loaded at
-//! startup; the Settings UI rewrites the file.
+//! Persistent settings, stored as JSONC (JSON plus comments and trailing
+//! commas; written with the options documented in comments). The file lives
+//! next to the binary on handheld builds and in the platform config directory
+//! on desktop/server builds (see [`config_path`]); `$AMBERDAV_CONFIG`
+//! overrides either. Loaded at startup; the Settings UI rewrites the file.
 //!
 //! `permission`, `default_folder`, and `favorites` are read live per request. `password`,
 //! `display_password`, and `root` are bound at boot and need a relaunch.
@@ -228,16 +229,117 @@ fn parse_jsonc(text: &str) -> Result<Settings, String> {
     }
 }
 
-/// Persist settings as pretty JSON, creating the parent directory if needed
-/// (the platform config dir may not exist on first run).
+/// Persist settings as a commented JSONC document, creating the parent
+/// directory if needed (the platform config dir may not exist on first run).
+/// The auto-generated file (first boot on device, `--save`) is the primary way
+/// users discover the options, so every field is written with its purpose and
+/// allowed values inline — [`load`] accepts the comments back.
 pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let json = serde_json::to_string_pretty(s).map_err(|e| std::io::Error::other(e.to_string()))?;
-    std::fs::write(path, json)
+    std::fs::write(path, to_jsonc_pretty(s))
+}
+
+/// Render settings as self-documenting JSONC: actual values, annotated with
+/// what each option does and the values it accepts. Comments aside, the output
+/// is strict JSON (no trailing commas), so any JSON-with-comments tool can
+/// read it back.
+fn to_jsonc_pretty(s: &Settings) -> String {
+    // Per-field JSON rendering (handles quoting and escaping). These are all
+    // plain data types; serializing them cannot fail.
+    fn json<T: Serialize>(v: &T) -> String {
+        serde_json::to_string(v).expect("plain settings field serializes")
+    }
+
+    // One-line key-code list with a space after each comma ("[354, 315]") —
+    // serde_json's compact form has none.
+    fn keys(v: &[u16]) -> String {
+        let items: Vec<String> = v.iter().map(u16::to_string).collect();
+        format!("[{}]", items.join(", "))
+    }
+
+    let favorites = if s.favorites.is_empty() {
+        "[]".to_string()
+    } else {
+        let rows: Vec<String> = s
+            .favorites
+            .iter()
+            .map(|f| format!("    {}", json(f)))
+            .collect();
+        format!("[\n{}\n  ]", rows.join(",\n"))
+    };
+
+    format!(
+        r#"{{
+  // Fixed login password. null = a fresh random code is generated each boot.
+  "password": {password},
+
+  // Show the password on the device screen. Forced on for a random password
+  // (otherwise it could never be discovered); false hides a fixed one.
+  "display_password": {display_password},
+
+  // Absolute path to serve. null = the CLI argument / default (".").
+  "root": {root},
+
+  // Port to listen on. null = CLI/env, else 8080.
+  "port": {port},
+
+  // Address to bind. null = "0.0.0.0" (all interfaces); "127.0.0.1" for
+  // tunneled/proxied deployments.
+  "bind": {bind},
+
+  // Folder (relative to the served root) to open right after login. "" = root.
+  "default_folder": {default_folder},
+
+  // Named folder shortcuts shown in the web UI sidebar, in order. Each path is
+  // relative to the served root (same convention as default_folder). Example:
+  //   "favorites": [
+  //     {{ "name": "Game Boy", "path": "Roms/GB" }},
+  //     {{ "name": "Screenshots", "path": "Roms/Imgs" }}
+  //   ],
+  "favorites": {favorites},
+
+  // Allowed operations: "read_only" | "read_write" | "read_write_delete".
+  "permission": {permission},
+
+  // Burn-in "DVD bounce" screensaver, toggled on-device with the X button.
+  // folders: files or folders (scanned recursively) to draw images from,
+  // relative to the served root; absolute paths work too.
+  "bounce_screen": {{
+    "enabled": {bounce_enabled},
+    "folders": {bounce_folders}
+  }},
+
+  // Where to write a connection.json sidecar (IP/port/password/URL) for
+  // external launchers and Decky. null = not written.
+  "connection_file": {connection_file},
+
+  // evdev key codes for the on-device controls; any listed code triggers.
+  // exit_keys quit the app (354 = Anbernic menu button, 315 = Steam Deck Menu),
+  // blank_keys blank the screen (304 = A), bounce_keys toggle the screensaver
+  // (307 = X; only acts when bounce_screen.enabled is true).
+  "exit_keys": {exit_keys},
+  "blank_keys": {blank_keys},
+  "bounce_keys": {bounce_keys}
+}}
+"#,
+        password = json(&s.password),
+        display_password = json(&s.display_password),
+        root = json(&s.root),
+        port = json(&s.port),
+        bind = json(&s.bind),
+        default_folder = json(&s.default_folder),
+        permission = json(&s.permission),
+        bounce_enabled = json(&s.bounce_screen.enabled),
+        bounce_folders = json(&s.bounce_screen.folders),
+        connection_file = json(&s.connection_file),
+        exit_keys = keys(&s.exit_keys),
+        blank_keys = keys(&s.blank_keys),
+        bounce_keys = keys(&s.bounce_keys),
+    )
 }
 
 #[cfg(test)]
@@ -262,6 +364,106 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    /// Settings has no PartialEq; compare through the serialized value.
+    fn assert_settings_eq(a: &Settings, b: &Settings) {
+        assert_eq!(
+            serde_json::to_value(a).unwrap(),
+            serde_json::to_value(b).unwrap()
+        );
+    }
+
+    // The auto-generated config (first boot on device, `--save`) should be
+    // self-documenting now that the parser accepts comments: every option
+    // present, annotated, with the allowed values spelled out (issue #19
+    // follow-up).
+    #[test]
+    fn save_writes_commented_self_documenting_config() {
+        let tmp = TmpConfig::new("commented", "");
+        save(&tmp.0, &Settings::default()).unwrap();
+        let text = std::fs::read_to_string(&tmp.0).unwrap();
+        assert!(text.contains("//"), "generated config has no comments");
+        // The permission ladder is the least guessable option — its allowed
+        // values must be discoverable from the file itself.
+        for level in ["read_only", "read_write", "read_write_delete"] {
+            assert!(
+                text.contains(level),
+                "permission option {level} not documented"
+            );
+        }
+        // Every config key is present so users edit rather than guess names.
+        for key in [
+            "password",
+            "display_password",
+            "root",
+            "port",
+            "bind",
+            "default_folder",
+            "favorites",
+            "permission",
+            "bounce_screen",
+            "connection_file",
+            "exit_keys",
+            "blank_keys",
+            "bounce_keys",
+        ] {
+            assert!(text.contains(&format!("\"{key}\"")), "key {key} missing");
+        }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_defaults() {
+        let tmp = TmpConfig::new("roundtrip-default", "");
+        save(&tmp.0, &Settings::default()).unwrap();
+        let (loaded, err) = load(&tmp.0);
+        assert!(
+            err.is_none(),
+            "generated config must parse cleanly: {err:?}"
+        );
+        assert_settings_eq(&loaded, &Settings::default());
+    }
+
+    // `--save` persists fully-resolved (non-default) values; the commented
+    // writer must render every field's actual value, including ones needing
+    // JSON string escaping.
+    #[test]
+    fn save_then_load_round_trips_custom_values() {
+        let custom = Settings {
+            password: Some("li\"ttle\\Secr3t".to_string()),
+            display_password: false,
+            root: Some("/mnt/mmc".to_string()),
+            port: Some(9090),
+            bind: Some("127.0.0.1".to_string()),
+            default_folder: "Roms".to_string(),
+            favorites: vec![
+                Favorite {
+                    name: "Game Boy".to_string(),
+                    path: "Roms/GB".to_string(),
+                },
+                Favorite {
+                    name: "Screenshots".to_string(),
+                    path: "Roms/Imgs".to_string(),
+                },
+            ],
+            permission: Permission::ReadWriteDelete,
+            bounce_screen: BounceScreen {
+                enabled: true,
+                folders: vec!["Roms/GBA/Imgs".to_string()],
+            },
+            connection_file: Some("connection.json".to_string()),
+            exit_keys: vec![1, 2],
+            blank_keys: vec![3],
+            bounce_keys: vec![4, 5],
+        };
+        let tmp = TmpConfig::new("roundtrip-custom", "");
+        save(&tmp.0, &custom).unwrap();
+        let (loaded, err) = load(&tmp.0);
+        assert!(
+            err.is_none(),
+            "generated config must parse cleanly: {err:?}"
+        );
+        assert_settings_eq(&loaded, &custom);
     }
 
     #[test]
