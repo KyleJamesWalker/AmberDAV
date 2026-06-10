@@ -78,6 +78,8 @@ pub struct CheckResult {
     pub latest: String,
     pub up_to_date: bool,
     /// Download URL for the matching asset, if one exists for this platform.
+    /// Informational only — `apply` re-resolves the asset itself rather than
+    /// trusting a URL from the client.
     pub asset_url: Option<String>,
 }
 
@@ -85,11 +87,6 @@ pub struct CheckResult {
 pub struct ApplyResult {
     pub ok: bool,
     pub message: String,
-}
-
-#[derive(Deserialize)]
-pub struct ApplyRequest {
-    pub asset_url: String,
 }
 
 /// Minimal GitHub Releases API response — only the fields we need.
@@ -174,10 +171,14 @@ async fn fetch_latest_release() -> Result<GhRelease, reqwest::Error> {
         .await
 }
 
-/// POST /api/update/apply — downloads asset_url and replaces the running binary.
+/// POST /api/update/apply — downloads the latest release's binary for this
+/// platform and replaces the running binary. The asset is re-resolved here
+/// from the GitHub release via [`asset_name`] rather than read from the
+/// request body, so a client can't point the updater at the wrong platform's
+/// binary (or any other URL).
 /// The running process is NOT restarted; caller must relaunch after this returns Ok.
-pub async fn apply(_: Session, _: State<AppState>, Json(body): Json<ApplyRequest>) -> Response {
-    match do_apply(&body.asset_url).await {
+pub async fn apply(_: Session, _: State<AppState>) -> Response {
+    match do_apply().await {
         Ok(msg) => Json(ApplyResult {
             ok: true,
             message: msg,
@@ -194,7 +195,7 @@ pub async fn apply(_: Session, _: State<AppState>, Json(body): Json<ApplyRequest
     }
 }
 
-async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+async fn do_apply() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     use std::sync::atomic::Ordering;
     if UPDATE_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -212,7 +213,18 @@ async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error +
     let _guard = Guard;
 
     let exe = std::env::current_exe()?;
-    // Guard against SSRF: only allow GitHub release asset domains.
+    let asset = asset_name().ok_or("no published release binary for this platform")?;
+    let release = fetch_latest_release()
+        .await
+        .map_err(|e| friendly_reqwest_error(&e))?;
+    let asset_url = &release
+        .assets
+        .iter()
+        .find(|a| a.name == asset)
+        .ok_or_else(|| format!("the latest release has no {asset} asset"))?
+        .browser_download_url;
+    // Defense in depth: even the API-resolved URL must be a GitHub release
+    // asset domain before we'll download and execute it.
     let allowed = asset_url.starts_with("https://github.com/")
         || asset_url.starts_with("https://objects.githubusercontent.com/")
         || asset_url.starts_with("https://github-releases.githubusercontent.com/");
