@@ -20,6 +20,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = { version = "0.3", features = ["io"] }
 async_zip = { version = "0.0.18", features = ["tokio", "deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# Verifies self-update downloads against the release's SHA256SUMS asset.
+# Pure Rust, so the static musl builds keep working.
+sha2 = "0.10"
 # CLI parsing and free --help/--version. (Env-var fallbacks are resolved
 # manually so CLI > env > file > default precedence stays predictable, including
 # for the positional root/port args.)

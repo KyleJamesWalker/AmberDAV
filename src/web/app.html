@@ -877,7 +877,8 @@ async function applyUpdate() {
   status.style.color = '';
   status.textContent = 'Downloading and applying update… (this may take a moment)';
   try {
-    await api('POST', '/api/update/apply', { asset_url: updCheckResult.asset_url });
+    // No body: the server re-resolves the right asset for its own platform.
+    await api('POST', '/api/update/apply');
     $('upd-apply').style.display = 'none';
     status.style.color = 'var(--amber)';
     status.textContent = '✓ Update applied to v' + updCheckResult.latest + '. Restart the app to use the new version.';
