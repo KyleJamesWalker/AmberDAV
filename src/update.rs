@@ -140,6 +140,8 @@ async fn fetch_latest_release() -> Result<GhRelease, reqwest::Error> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     reqwest::Client::builder()
         .user_agent("amber-dav")
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()?
         .get(&url)
         .send()
@@ -197,9 +199,13 @@ async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error +
     let new_path = exe.with_extension("new");
     let old_path = exe.with_extension("old");
 
-    // Stream download to <exe>.new
+    // Stream download to <exe>.new. No total timeout here — a full binary on a
+    // slow device link can legitimately take minutes — but cap connect time and
+    // stall time so a dead connection can't wedge the update flag forever.
     let resp = reqwest::Client::builder()
         .user_agent("amber-dav")
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
         .build()?
         .get(asset_url)
         .send()
