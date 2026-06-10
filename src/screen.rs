@@ -61,10 +61,18 @@ pub fn show(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
+    config_error: Option<String>,
 ) {
     set(&status, "sdl: starting…".to_string());
     std::thread::spawn(move || {
-        if let Err(e) = crate::sdl::run(port, password, status.clone(), mode, bounce_paths) {
+        if let Err(e) = crate::sdl::run(
+            port,
+            password,
+            status.clone(),
+            mode,
+            bounce_paths,
+            config_error,
+        ) {
             set(&status, format!("sdl failed: {e}"));
             eprintln!("screen: sdl sink failed ({e}); connection info is in the log only");
         }
@@ -81,6 +89,7 @@ pub fn show(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
+    config_error: Option<String>,
 ) {
     use crate::display::{detect, DisplayKind};
     match detect() {
@@ -88,7 +97,9 @@ pub fn show(
             let socket = crate::display::wayland_socket();
             set(&status, "wayland: starting…".to_string());
             std::thread::spawn(move || {
-                if let Err(e) = crate::wayland::run(port, password, status.clone(), mode, socket) {
+                if let Err(e) =
+                    crate::wayland::run(port, password, status.clone(), mode, socket, config_error)
+                {
                     set(&status, format!("wayland failed: {e}"));
                     eprintln!(
                         "screen: wayland sink failed ({e}); connection info is in the log only"
@@ -96,7 +107,9 @@ pub fn show(
                 }
             });
         }
-        DisplayKind::Framebuffer => show_framebuffer(port, password, status, mode, bounce_paths),
+        DisplayKind::Framebuffer => {
+            show_framebuffer(port, password, status, mode, bounce_paths, config_error)
+        }
         DisplayKind::Headless => {
             set(&status, "disabled (no display detected)".to_string());
             eprintln!(
@@ -115,6 +128,7 @@ fn show_framebuffer(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
+    config_error: Option<String>,
 ) {
     use std::{thread, time::Duration};
 
@@ -154,7 +168,15 @@ fn show_framebuffer(
                             // Re-query the IP each paint so the screen recovers
                             // once Wi-Fi connects after launch.
                             let ip = crate::current_ip();
-                            crate::canvas::info_canvas(geom.lw, geom.lh, ip, port, pw.as_deref()).px
+                            crate::canvas::info_canvas(
+                                geom.lw,
+                                geom.lh,
+                                ip,
+                                port,
+                                pw.as_deref(),
+                                config_error.as_deref(),
+                            )
+                            .px
                         }
                         Mode::Black => crate::canvas::black_canvas(geom.lw, geom.lh).px,
                         Mode::Bounce => {
@@ -195,6 +217,7 @@ pub fn show(
     status: Status,
     _mode: ModeHandle,
     _bounce_paths: Vec<std::path::PathBuf>,
+    _config_error: Option<String>,
 ) {
     set(&status, "disabled (headless build)".to_string());
 }

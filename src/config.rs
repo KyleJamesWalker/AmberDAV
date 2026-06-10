@@ -188,17 +188,43 @@ pub fn config_path() -> PathBuf {
     }
 }
 
-/// Load settings, falling back to defaults on a missing or invalid file.
-pub fn load(path: &Path) -> Settings {
-    match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-            eprintln!(
-                "config: {} parse error ({e}); using defaults",
-                path.display()
-            );
-            Settings::default()
-        }),
-        Err(_) => Settings::default(),
+/// Load settings. A missing file is normal (first boot) and yields defaults
+/// silently; an unreadable or unparseable file also falls back to defaults but
+/// returns a human-readable error so callers can surface it loudly — on a
+/// handheld, stderr is invisible and a silent fallback looks like the config
+/// is simply ignored (issue #19).
+///
+/// The file is parsed as JSONC: `//` and `/* */` comments and trailing commas
+/// are accepted, matching the commented example documented in the README.
+pub fn load(path: &Path) -> (Settings, Option<String>) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), None),
+        Err(e) => {
+            let msg = format!("cannot read {}: {e}; using defaults", path.display());
+            eprintln!("config: {msg}");
+            return (Settings::default(), Some(msg));
+        }
+    };
+    match parse_jsonc(&text) {
+        Ok(s) => (s, None),
+        Err(e) => {
+            let msg = format!("{} is invalid ({e}); using defaults", path.display());
+            eprintln!("config: {msg}");
+            (Settings::default(), Some(msg))
+        }
+    }
+}
+
+/// Parse a JSONC document into [`Settings`]. A proper parser (not regex
+/// comment-stripping, which would corrupt `//` inside string values) handles
+/// the comments and trailing commas; an empty document yields the defaults.
+fn parse_jsonc(text: &str) -> Result<Settings, String> {
+    let value =
+        jsonc_parser::parse_to_serde_value(text, &Default::default()).map_err(|e| e.to_string())?;
+    match value {
+        Some(v) => serde_json::from_value(v).map_err(|e| e.to_string()),
+        None => Ok(Settings::default()),
     }
 }
 
@@ -212,4 +238,121 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     }
     let json = serde_json::to_string_pretty(s).map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(path, json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch config file that cleans itself up.
+    struct TmpConfig(PathBuf);
+
+    impl TmpConfig {
+        fn new(name: &str, contents: &str) -> TmpConfig {
+            let path = std::env::temp_dir().join(format!(
+                "amberdav-config-test-{}-{name}.json",
+                std::process::id()
+            ));
+            std::fs::write(&path, contents).unwrap();
+            TmpConfig(path)
+        }
+    }
+
+    impl Drop for TmpConfig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn load_missing_file_is_default_without_error() {
+        let path = std::env::temp_dir().join(format!(
+            "amberdav-config-test-{}-does-not-exist.json",
+            std::process::id()
+        ));
+        let (s, err) = load(&path);
+        assert!(err.is_none(), "missing file is not an error: {err:?}");
+        assert!(s.password.is_none());
+        assert_eq!(s.exit_keys, default_exit_keys());
+    }
+
+    #[test]
+    fn load_strict_json_parses_without_error() {
+        let tmp = TmpConfig::new(
+            "strict",
+            r#"{ "password": "pw", "default_folder": "Roms" }"#,
+        );
+        let (s, err) = load(&tmp.0);
+        assert!(
+            err.is_none(),
+            "valid JSON must not report an error: {err:?}"
+        );
+        assert_eq!(s.password.as_deref(), Some("pw"));
+        assert_eq!(s.default_folder, "Roms");
+    }
+
+    // The README documents the config as JSONC: `//` comments and a fully
+    // commented example. A trailing comma is exactly what bit the issue-19
+    // reporter. Both must parse (issue #19).
+    #[test]
+    fn load_jsonc_comments_and_trailing_commas_parse() {
+        let tmp = TmpConfig::new(
+            "jsonc",
+            r#"{
+  // Fixed login password.
+  "password": "littleSecr3t",
+  "default_folder": "Roms",
+  "favorites": [
+    { "name": "Game Boy", "path": "Roms/GB" },
+    { "name": "Screenshots", "path": "Roms/Imgs" },
+  ],
+  "permission": "read_write_delete",
+}"#,
+        );
+        let (s, err) = load(&tmp.0);
+        assert!(err.is_none(), "JSONC must parse cleanly: {err:?}");
+        assert_eq!(s.password.as_deref(), Some("littleSecr3t"));
+        assert_eq!(s.favorites.len(), 2);
+        assert_eq!(s.favorites[1].path, "Roms/Imgs");
+        assert!(s.permission.can_delete());
+    }
+
+    // Comment markers inside string values must survive parsing (the reason a
+    // regex comment-stripper is not acceptable).
+    #[test]
+    fn load_jsonc_preserves_comment_markers_in_strings() {
+        let tmp = TmpConfig::new(
+            "strings",
+            r#"{ "password": "se//cret", "default_folder": "a/*b*/c" }"#,
+        );
+        let (s, err) = load(&tmp.0);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(s.password.as_deref(), Some("se//cret"));
+        assert_eq!(s.default_folder, "a/*b*/c");
+    }
+
+    #[test]
+    fn load_invalid_file_falls_back_and_reports_error() {
+        let tmp = TmpConfig::new("invalid", r#"{ "password": "unterminated }"#);
+        let (s, err) = load(&tmp.0);
+        let err = err.expect("an unparseable config must surface an error");
+        // The message must identify the file so the user knows what to fix.
+        assert!(
+            err.contains("config.json") || err.contains(&tmp.0.display().to_string()),
+            "error should name the config file: {err}"
+        );
+        // Fallback settings are the compiled-in defaults.
+        assert!(s.password.is_none());
+        assert_eq!(s.permission, Permission::ReadWrite);
+    }
+
+    // Valid JSONC with a field of the wrong type is still an invalid config and
+    // must be reported, not silently defaulted.
+    #[test]
+    fn load_wrong_type_reports_error() {
+        let tmp = TmpConfig::new("wrongtype", r#"{ "port": "eight-thousand" }"#);
+        let (s, err) = load(&tmp.0);
+        assert!(err.is_some(), "type mismatch must surface an error");
+        assert!(s.port.is_none());
+    }
 }

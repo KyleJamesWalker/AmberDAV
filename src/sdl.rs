@@ -43,6 +43,7 @@ pub fn run(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
+    config_error: Option<String>,
 ) -> Result<(), String> {
     let forced = std::env::var("SDL_VIDEODRIVER").ok();
     let candidates = driver_candidates(forced.as_deref());
@@ -52,7 +53,14 @@ pub fn run(
         // this sink thread at startup; the brief window before the input thread
         // reads env is acceptable.)
         std::env::set_var("SDL_VIDEODRIVER", driver);
-        match run_with_driver(port, password.clone(), &status, &mode, bounce_paths.clone()) {
+        match run_with_driver(
+            port,
+            password.clone(),
+            &status,
+            &mode,
+            bounce_paths.clone(),
+            config_error.as_deref(),
+        ) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = format!("{driver}: {e}");
@@ -79,6 +87,7 @@ fn run_with_driver(
     status: &Status,
     mode: &ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
+    config_error: Option<&str>,
 ) -> Result<(), String> {
     let sdl = sdl2::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
@@ -131,7 +140,15 @@ fn run_with_driver(
             let px: Vec<[u8; 3]> = match cur {
                 Mode::Black => black_canvas(wu, hu).px,
                 Mode::Info => {
-                    info_canvas(wu, hu, crate::current_ip(), port, password.as_deref()).px
+                    info_canvas(
+                        wu,
+                        hu,
+                        crate::current_ip(),
+                        port,
+                        password.as_deref(),
+                        config_error,
+                    )
+                    .px
                 }
                 Mode::Bounce => {
                     bounce.step(wu, hu);

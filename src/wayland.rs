@@ -42,6 +42,7 @@ pub fn run(
     status: Status,
     mode: ModeHandle,
     socket: Option<String>,
+    config_error: Option<String>,
 ) -> Result<(), String> {
     // Connect to the resolved socket if we have one (so Game Mode works even
     // when Steam launches us with no $WAYLAND_DISPLAY); else the env default.
@@ -89,6 +90,7 @@ pub fn run(
         password,
         status,
         mode,
+        config_error,
         width: 1280,
         height: 800,
         configured: false,
@@ -116,6 +118,8 @@ struct App {
     password: Option<String>,
     status: Status,
     mode: ModeHandle,
+    /// Config parse failure to surface on the info screen (issue #19).
+    config_error: Option<String>,
     width: u32,
     height: u32,
     configured: bool,
@@ -149,6 +153,7 @@ impl App {
                 crate::current_ip(),
                 self.port,
                 self.password.as_deref(),
+                self.config_error.as_deref(),
             ),
             Mode::Black => black_canvas(w, h),
         }

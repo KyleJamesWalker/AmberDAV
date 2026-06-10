@@ -295,6 +295,7 @@
     <section id="view-status" style="display:none;">
       <div class="card">
         <h3>Connection</h3>
+        <div id="conn-warn" style="display:none;color:var(--danger);font-family:var(--mono);font-size:.82rem;line-height:1.6;margin-bottom:.7rem;"></div>
         <div class="kv" id="conn">…</div>
       </div>
       <div class="card" id="card-live-input" style="display:none;">
@@ -794,6 +795,13 @@ function startInput() {
 }
 async function loadConn() {
   try { const i = await api('GET', '/api/info');
+    // A broken config.json boots with defaults; make that loud here since
+    // stderr is invisible on a handheld (issue #19).
+    const warn = $('conn-warn');
+    if (i.config_error) {
+      warn.textContent = '⚠ config.json not applied — ' + i.config_error;
+      warn.style.display = '';
+    } else { warn.style.display = 'none'; }
     $('conn').innerHTML =
       'Device IP: <b>' + i.ip + ':' + i.port + '</b><br>' +
       'WebDAV mount: <a href="' + i.dav + '">' + i.dav + '</a><br>' +

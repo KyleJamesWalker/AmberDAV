@@ -45,6 +45,9 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         "dav": format!("http://{}:{}{}", ip, info.port, crate::webdav::MOUNT),
         "root": state.root.to_string_lossy(),
         "screen": screen,
+        // Non-null when the config file was unusable and defaults are in
+        // effect — the Status tab shows this loudly (issue #19).
+        "config_error": info.config_error,
         "version": env!("CARGO_PKG_VERSION"),
         // Gamepad input is only read on device builds; elsewhere the live-input
         // stream never emits, so the UI hides that card (issue #15).

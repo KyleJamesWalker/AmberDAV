@@ -28,6 +28,7 @@ clap = { version = "4", features = ["derive"] }
 # referenced under cfg(not(any(feature = "fb", feature = "sdl"))); idle weight
 # otherwise.
 directories = "6"
+jsonc-parser = { version = "0.32.4", features = ["serde"] }
 
 # On-device builds come in two shapes, each selected by its own feature. Both
 # pull in the same substrate — gamepad input, the screen Mode state machine, the
