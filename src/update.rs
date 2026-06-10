@@ -105,6 +105,29 @@ struct GhAsset {
     browser_download_url: String,
 }
 
+/// Translate an HTTP failure into a message a person can act on: GitHub's
+/// unauthenticated rate limit (60/hr) otherwise surfaces as a raw
+/// "403 Forbidden" blob, and timeouts as a reqwest debug string. Pure so the
+/// mapping is unit-testable without manufacturing reqwest errors.
+fn friendly_http_failure(status: Option<u16>, unreachable: bool, raw: &str) -> String {
+    match status {
+        Some(403) | Some(429) => "GitHub rate limit reached — try again later".into(),
+        Some(s) => format!("github.com returned HTTP {s}"),
+        None if unreachable => {
+            "could not reach github.com — check the connection and try again".into()
+        }
+        None => raw.to_string(),
+    }
+}
+
+fn friendly_reqwest_error(e: &reqwest::Error) -> String {
+    friendly_http_failure(
+        e.status().map(|s| s.as_u16()),
+        e.is_timeout() || e.is_connect(),
+        &e.to_string(),
+    )
+}
+
 /// GET /api/update/check — compares current version against the latest GitHub release.
 pub async fn check(_: Session, _: State<AppState>) -> Response {
     let current = env!("CARGO_PKG_VERSION").to_string();
@@ -112,7 +135,7 @@ pub async fn check(_: Session, _: State<AppState>) -> Response {
     match fetch_latest_release().await {
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({ "error": friendly_reqwest_error(&e) })),
         )
             .into_response(),
         Ok(release) => {
@@ -209,13 +232,16 @@ async fn do_apply(asset_url: &str) -> Result<String, Box<dyn std::error::Error +
         .build()?
         .get(asset_url)
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(|e| friendly_reqwest_error(&e))?
+        .error_for_status()
+        .map_err(|e| friendly_reqwest_error(&e))?;
 
     let mut file = tokio::fs::File::create(&new_path).await?;
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        file.write_all(&chunk?).await?;
+        let chunk = chunk.map_err(|e| friendly_reqwest_error(&e))?;
+        file.write_all(&chunk).await?;
     }
     file.flush().await?;
     drop(file);
@@ -324,6 +350,30 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("up_to_date"));
         assert!(json.contains("asset_url"));
+    }
+
+    #[test]
+    fn rate_limit_statuses_get_a_friendly_message() {
+        for status in [403, 429] {
+            assert_eq!(
+                friendly_http_failure(Some(status), false, "raw"),
+                "GitHub rate limit reached — try again later"
+            );
+        }
+    }
+
+    #[test]
+    fn other_statuses_name_the_code_and_unreachable_names_github() {
+        assert_eq!(
+            friendly_http_failure(Some(502), false, "raw"),
+            "github.com returned HTTP 502"
+        );
+        assert_eq!(
+            friendly_http_failure(None, true, "raw"),
+            "could not reach github.com — check the connection and try again"
+        );
+        // No status and not a connectivity failure: pass the raw error through.
+        assert_eq!(friendly_http_failure(None, false, "boom"), "boom");
     }
 
     #[test]
