@@ -8,6 +8,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 
 use crate::{auth::Session, AppState};
@@ -49,6 +50,20 @@ fn asset_for(arch: &str, os: &str, sdl: bool, fb: bool) -> Option<&'static str> 
     }
 }
 
+/// Build-target OS string, shared by asset resolution and download
+/// verification (which checks the executable magic expected for this OS).
+fn current_os() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        ""
+    }
+}
+
 /// Returns the release asset name for the current platform, or `None` if the
 /// platform/build is not a published release target. Thin cfg! wrapper around
 /// [`asset_for`].
@@ -60,16 +75,78 @@ pub fn asset_name() -> Option<&'static str> {
     } else {
         ""
     };
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        ""
-    };
-    asset_for(arch, os, cfg!(feature = "sdl"), cfg!(feature = "fb"))
+    asset_for(
+        arch,
+        current_os(),
+        cfg!(feature = "sdl"),
+        cfg!(feature = "fb"),
+    )
+}
+
+/// True if `head` (the first bytes of a download) starts with the executable
+/// magic expected on `os`: ELF on Linux, Mach-O (thin or fat, either
+/// endianness) on macOS, MZ on Windows. Catches the truncated-download and
+/// wrong-content cases — e.g. an HTML error page — before the binary is
+/// installed.
+fn looks_like_executable(head: &[u8], os: &str) -> bool {
+    match os {
+        "linux" => head.starts_with(&[0x7f, b'E', b'L', b'F']),
+        "macos" => {
+            const MAGICS: [[u8; 4]; 6] = [
+                [0xfe, 0xed, 0xfa, 0xce], // MH_MAGIC (32-bit)
+                [0xce, 0xfa, 0xed, 0xfe], // MH_CIGAM
+                [0xfe, 0xed, 0xfa, 0xcf], // MH_MAGIC_64
+                [0xcf, 0xfa, 0xed, 0xfe], // MH_CIGAM_64
+                [0xca, 0xfe, 0xba, 0xbe], // FAT_MAGIC
+                [0xbe, 0xba, 0xfe, 0xca], // FAT_CIGAM
+            ];
+            head.len() >= 4 && MAGICS.iter().any(|m| &head[..4] == m)
+        }
+        "windows" => head.starts_with(b"MZ"),
+        _ => false,
+    }
+}
+
+/// Find the lowercase hex SHA-256 for `name` in sha256sum-format output
+/// (`<hex>  <filename>` per line; binary-mode lines prefix the name with `*`).
+fn sha256_entry(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let file = parts.next()?;
+        let file = file.strip_prefix('*').unwrap_or(file);
+        (file == name && hash.len() == 64).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// Validate a finished download before it replaces the running binary. All
+/// inputs are plain values so every rejection path is unit-testable.
+fn verify_download(
+    written: u64,
+    expected_len: Option<u64>,
+    head: &[u8],
+    os: &str,
+    actual_sha: &str,
+    expected_sha: Option<&str>,
+) -> Result<(), String> {
+    if let Some(expected) = expected_len {
+        if written != expected {
+            return Err(format!(
+                "download incomplete: got {written} of {expected} bytes"
+            ));
+        }
+    }
+    if !looks_like_executable(head, os) {
+        return Err("downloaded file is not an executable for this platform".into());
+    }
+    if let Some(expected) = expected_sha {
+        if actual_sha != expected {
+            return Err(format!(
+                "checksum mismatch: expected {expected}, got {actual_sha}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -234,29 +311,83 @@ async fn do_apply() -> Result<String, Box<dyn std::error::Error + Send + Sync>> 
     let new_path = exe.with_extension("new");
     let old_path = exe.with_extension("old");
 
-    // Stream download to <exe>.new. No total timeout here — a full binary on a
-    // slow device link can legitimately take minutes — but cap connect time and
-    // stall time so a dead connection can't wedge the update flag forever.
-    let resp = reqwest::Client::builder()
+    // No total timeout on this client — a full binary on a slow device link
+    // can legitimately take minutes — but cap connect time and stall time so a
+    // dead connection can't wedge the update flag forever.
+    let client = reqwest::Client::builder()
         .user_agent("amber-dav")
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(30))
-        .build()?
+        .build()?;
+
+    // If the release ships a SHA256SUMS asset, the binary's hash MUST match
+    // its entry. Releases that predate the checksum job simply don't have the
+    // asset, and fall back to the length + magic checks below.
+    let expected_sha = match release.assets.iter().find(|a| a.name == "SHA256SUMS") {
+        None => None,
+        Some(sums_asset) => {
+            let sums = client
+                .get(&sums_asset.browser_download_url)
+                .send()
+                .await
+                .map_err(|e| friendly_reqwest_error(&e))?
+                .error_for_status()
+                .map_err(|e| friendly_reqwest_error(&e))?
+                .text()
+                .await
+                .map_err(|e| friendly_reqwest_error(&e))?;
+            Some(
+                sha256_entry(&sums, asset)
+                    .ok_or_else(|| format!("SHA256SUMS has no entry for {asset}"))?,
+            )
+        }
+    };
+
+    // Stream download to <exe>.new, hashing and counting as we go.
+    let resp = client
         .get(asset_url)
         .send()
         .await
         .map_err(|e| friendly_reqwest_error(&e))?
         .error_for_status()
         .map_err(|e| friendly_reqwest_error(&e))?;
+    let expected_len = resp.content_length();
 
     let mut file = tokio::fs::File::create(&new_path).await?;
     let mut stream = resp.bytes_stream();
+    let mut hasher = sha2::Sha256::new();
+    let mut written: u64 = 0;
+    let mut head: Vec<u8> = Vec::with_capacity(4);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| friendly_reqwest_error(&e))?;
+        if head.len() < 4 {
+            head.extend_from_slice(&chunk[..chunk.len().min(4 - head.len())]);
+        }
+        hasher.update(&chunk);
+        written += chunk.len() as u64;
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
     drop(file);
+
+    // Verify before touching the running binary; a bad download must never
+    // survive to the rename dance. Drop the partial file on rejection.
+    let actual_sha: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if let Err(e) = verify_download(
+        written,
+        expected_len,
+        &head,
+        current_os(),
+        &actual_sha,
+        expected_sha.as_deref(),
+    ) {
+        let _ = std::fs::remove_file(&new_path);
+        return Err(e.into());
+    }
 
     // Make the new binary executable (no-op on Windows).
     #[cfg(unix)]
@@ -386,6 +517,70 @@ mod tests {
         );
         // No status and not a connectivity failure: pass the raw error through.
         assert_eq!(friendly_http_failure(None, false, "boom"), "boom");
+    }
+
+    #[test]
+    fn executable_magic_is_checked_per_os() {
+        assert!(looks_like_executable(b"\x7fELF\x02\x01", "linux"));
+        assert!(looks_like_executable(b"MZ\x90\x00", "windows"));
+        // Thin 64-bit and fat Mach-O, both endiannesses.
+        assert!(looks_like_executable(&[0xcf, 0xfa, 0xed, 0xfe], "macos"));
+        assert!(looks_like_executable(&[0xfe, 0xed, 0xfa, 0xcf], "macos"));
+        assert!(looks_like_executable(&[0xca, 0xfe, 0xba, 0xbe], "macos"));
+
+        // An HTML error page is not a binary on any platform.
+        for os in ["linux", "macos", "windows"] {
+            assert!(!looks_like_executable(b"<!DOCTYPE html>", os));
+        }
+        // Wrong format for the platform is rejected too.
+        assert!(!looks_like_executable(b"MZ\x90\x00", "linux"));
+        assert!(!looks_like_executable(b"\x7fELF", "macos"));
+        // Truncated/empty downloads never match, nor does an unknown OS.
+        assert!(!looks_like_executable(b"\x7fEL", "linux"));
+        assert!(!looks_like_executable(b"", "windows"));
+        assert!(!looks_like_executable(b"\x7fELF", ""));
+    }
+
+    #[test]
+    fn sha256_entry_parses_sha256sum_output() {
+        let h = "a".repeat(64);
+        let sums = format!(
+            "{h}  amber-dav-aarch64-linux\n{}  *amber-dav-x86_64-windows.exe\n",
+            "B".repeat(64)
+        );
+        assert_eq!(sha256_entry(&sums, "amber-dav-aarch64-linux"), Some(h));
+        // Binary-mode '*' prefix is stripped, and hashes are lowercased.
+        assert_eq!(
+            sha256_entry(&sums, "amber-dav-x86_64-windows.exe"),
+            Some("b".repeat(64))
+        );
+        assert_eq!(sha256_entry(&sums, "amber-dav-x86_64-linux"), None);
+        // Malformed lines (wrong hash length, missing name) are ignored.
+        assert_eq!(
+            sha256_entry("deadbeef  amber-dav-x86_64-linux", "amber-dav-x86_64-linux"),
+            None
+        );
+        assert_eq!(sha256_entry("just-one-token", "just-one-token"), None);
+    }
+
+    #[test]
+    fn verify_download_rejects_each_failure_mode() {
+        let elf = b"\x7fELF";
+        let sha = "a".repeat(64);
+        // Happy path: length, magic, and checksum all line up.
+        assert!(verify_download(100, Some(100), elf, "linux", &sha, Some(&sha)).is_ok());
+        // No Content-Length and no SHA256SUMS still passes on magic alone.
+        assert!(verify_download(100, None, elf, "linux", &sha, None).is_ok());
+
+        // Truncated download.
+        let err = verify_download(50, Some(100), elf, "linux", &sha, Some(&sha)).unwrap_err();
+        assert!(err.contains("50 of 100"), "{err}");
+        // Wrong content (e.g. an error page).
+        assert!(verify_download(100, Some(100), b"<!DO", "linux", &sha, None).is_err());
+        // Checksum mismatch.
+        let other = "b".repeat(64);
+        let err = verify_download(100, Some(100), elf, "linux", &sha, Some(&other)).unwrap_err();
+        assert!(err.contains("checksum mismatch"), "{err}");
     }
 
     #[test]
