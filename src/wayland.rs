@@ -34,8 +34,13 @@ use smithay_client_toolkit::{
     },
 };
 
-use crate::canvas::{black_canvas, info_canvas, Canvas};
+use crate::render::FrameSource;
 use crate::screen::{set_status, Mode, ModeHandle, Status};
+
+/// Consult the content source every this-many frame callbacks (~3s at the
+/// Deck's 60Hz panel) — the same cadence as the fb sink's re-latch. A mode
+/// change or an owed repaint checks immediately (issue #39).
+const CHECK_EVERY: u64 = 180;
 
 /// Entry point: open the compositor connection and run the paint loop. Returns
 /// only on error (so the caller can fall back / log). Blocks the calling thread.
@@ -89,16 +94,16 @@ pub fn run(
         shm,
         pool,
         window,
-        port,
-        password,
+        source: FrameSource::new(port, password, startup_error, None),
         status,
         mode,
-        startup_error,
         width: 1280,
         height: 800,
         configured: false,
         closed: false,
         frame: 0,
+        last_mode: None,
+        dirty: true,
         buffer: None,
         buf_dims: (0, 0),
     };
@@ -117,18 +122,24 @@ struct App {
     shm: Shm,
     pool: SlotPool,
     window: Window,
-    port: u16,
-    password: Option<String>,
+    /// Shared content producer: caches the rendered static canvas and only
+    /// re-renders when the mode/dims/IP change. Constructed with no bounce
+    /// engine — the screensaver is not supported under Wayland (see the
+    /// README's screensaver note) and falls back to the info screen.
+    source: FrameSource,
     status: Status,
     mode: ModeHandle,
-    /// Startup problem (config parse failure, issue #19; failed bind,
-    /// issue #35) to surface on the info screen.
-    startup_error: Option<String>,
     width: u32,
     height: u32,
     configured: bool,
     closed: bool,
+    /// Frame-callback counter, drives the periodic content re-check.
     frame: u64,
+    /// The mode rendered last; a change re-checks the content immediately.
+    last_mode: Option<Mode>,
+    /// A paint is owed: the buffer was (re)created blank, or the last paint
+    /// failed (buffer busy / attach error). Cleared by a successful paint.
+    dirty: bool,
     /// The single shm buffer, reused across frames. `SlotPool` only grows
     /// (doubling, never shrinking), so allocating a fresh buffer each frame
     /// would ratchet the mmap up over a long session — instead we recreate it
@@ -140,23 +151,6 @@ struct App {
 }
 
 impl App {
-    fn build_canvas(&self) -> Canvas {
-        let (w, h) = (self.width as usize, self.height as usize);
-        let mode = self.mode.lock().map(|m| *m).unwrap_or(Mode::Info);
-        match mode {
-            // Bounce is framebuffer-only for now; under Wayland it shows Info.
-            Mode::Info | Mode::Bounce => info_canvas(
-                w,
-                h,
-                crate::state::current_ip(),
-                self.port,
-                self.password.as_deref(),
-                self.startup_error.as_deref(),
-            ),
-            Mode::Black => black_canvas(w, h),
-        }
-    }
-
     /// Paint and present one frame.
     ///
     /// Repaint (and therefore the periodic `current_ip()` refresh) is driven
@@ -173,14 +167,25 @@ impl App {
     /// frame callback is the only thing that re-enters `draw()`, so skipping it
     /// on a transient error (buffer busy, attach failure) would freeze the
     /// screen permanently; instead we always retry on the next frame.
+    ///
+    /// Throttle (issue #39): callbacks arrive at panel rate (~60/s), and
+    /// rebuilding the info screen — QR, netlink IP lookup, ~1M-pixel convert —
+    /// on each one burned CPU/battery for a static image. The content source
+    /// is only consulted on a mode change, while a paint is owed (`dirty`),
+    /// or every [`CHECK_EVERY`] callbacks — and even then its cache only
+    /// re-renders when the mode/dims/IP actually changed. An untouched frame
+    /// is just the re-arm + commit.
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         let (w, h) = (self.width as i32, self.height as i32);
         let stride = w * 4;
         // Clone the surface handle (cheap, Arc-backed) so we never hold a
         // `&self`-derived borrow across the `&mut self.pool` borrow below.
         let surface = self.window.wl_surface().clone();
+        self.frame = self.frame.wrapping_add(1);
 
-        // (Re)create the retained buffer only on first paint or a resize.
+        // (Re)create the retained buffer only on first paint or a resize. A
+        // fresh buffer is blank, so a paint is owed even if the content cache
+        // still matches.
         if self.buffer.is_none() || self.buf_dims != (self.width, self.height) {
             match self
                 .pool
@@ -189,6 +194,7 @@ impl App {
                 Ok((buffer, _)) => {
                     self.buffer = Some(buffer);
                     self.buf_dims = (self.width, self.height);
+                    self.dirty = true;
                 }
                 Err(e) => {
                     set_status(&self.status, format!("wayland buffer: {e}"));
@@ -201,39 +207,53 @@ impl App {
             }
         }
 
-        let canvas = self.build_canvas();
-        // Borrow `pool` and `buffer` as distinct fields so the canvas slice
-        // (a `&mut self.pool` borrow keyed by `&self.buffer`) doesn't conflict.
-        let buffer = self.buffer.as_ref().expect("buffer set above");
-        match self.pool.canvas(buffer) {
-            Some(data) => {
-                // Argb8888 little-endian on the wire is byte order B,G,R,A.
-                for (i, px) in canvas.px.iter().enumerate() {
-                    let o = i * 4;
-                    if o + 4 <= data.len() {
-                        data[o] = px[2];
-                        data[o + 1] = px[1];
-                        data[o + 2] = px[0];
-                        data[o + 3] = 0xff;
+        let mode = self.mode.lock().map(|m| *m).unwrap_or(Mode::Info);
+        let changed = self.last_mode != Some(mode);
+        self.last_mode = Some(mode);
+
+        if changed || self.dirty || self.frame.is_multiple_of(CHECK_EVERY) {
+            let (fresh, px) = self.source.frame(mode, w as usize, h as usize);
+            if fresh || self.dirty {
+                // Borrow `pool` and `buffer` as distinct fields so the canvas
+                // slice (a `&mut self.pool` borrow keyed by `&self.buffer`)
+                // doesn't conflict.
+                let buffer = self.buffer.as_ref().expect("buffer set above");
+                match self.pool.canvas(buffer) {
+                    Some(data) => {
+                        // Argb8888 little-endian on the wire is byte order B,G,R,A.
+                        for (i, p) in px.iter().enumerate() {
+                            let o = i * 4;
+                            if o + 4 <= data.len() {
+                                data[o] = p[2];
+                                data[o + 1] = p[1];
+                                data[o + 2] = p[0];
+                                data[o + 3] = 0xff;
+                            }
+                        }
+                        if let Err(e) = buffer.attach_to(&surface) {
+                            set_status(&self.status, format!("wayland attach: {e}"));
+                            // Retry the paint on the next callback.
+                            self.dirty = true;
+                        } else {
+                            surface.damage_buffer(0, 0, w, h);
+                            self.dirty = false;
+                            set_status(
+                                &self.status,
+                                format!(
+                                    "ok (wayland {}x{}) frame={}",
+                                    self.width, self.height, self.frame
+                                ),
+                            );
+                        }
+                    }
+                    // The compositor still holds the buffer; keep the paint
+                    // owed and retry on the next callback rather than freezing.
+                    None => {
+                        self.dirty = true;
+                        set_status(&self.status, "wayland: buffer busy, retrying".to_string());
                     }
                 }
-                if let Err(e) = buffer.attach_to(&surface) {
-                    set_status(&self.status, format!("wayland attach: {e}"));
-                } else {
-                    surface.damage_buffer(0, 0, w, h);
-                    self.frame = self.frame.wrapping_add(1);
-                    set_status(
-                        &self.status,
-                        format!(
-                            "ok (wayland {}x{}) frame={}",
-                            self.width, self.height, self.frame
-                        ),
-                    );
-                }
             }
-            // The compositor still holds the buffer; skip this frame's paint and
-            // retry on the next callback rather than freezing.
-            None => set_status(&self.status, "wayland: buffer busy, retrying".to_string()),
         }
 
         // Always re-arm the next callback and commit so the loop never stalls.
