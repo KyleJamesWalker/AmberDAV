@@ -69,13 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handheld: keep auto-creating a default config on first run — the device
     // is configured through the web UI, so the file must exist to be edited.
     // Desktop/server builds never write implicitly; use `--save` to opt in.
-    #[cfg(any(feature = "fb", feature = "sdl"))]
-    if !config_path.exists() {
-        match config::save(&config_path, &config::Settings::default()) {
-            Ok(()) => eprintln!("config: wrote default {}", config_path.display()),
-            Err(e) => eprintln!("config: could not write {}: {e}", config_path.display()),
-        }
-    }
+    let config_write_error = ensure_default_config(&config_path);
 
     // Resolve settings: CLI args and AMBERDAV_* env vars merged on top of the
     // config file (CLI > env > file > default). This also fixes the old bug
@@ -84,8 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A broken config falls back to defaults but the error is carried along
     // and surfaced on the device screen and the web Status tab — on a handheld
     // stderr is invisible, so a silent fallback would look like the config is
-    // simply ignored (issue #19).
+    // simply ignored (issue #19). A failed first-run write rides the same
+    // plumbing (issue #35); it can only happen when the file is absent, and a
+    // parse error only when it is present, so the two never compete.
     let (file_settings, config_error) = config::load(&config_path);
+    let config_error = config_error.or(config_write_error);
     let settings = cli.resolve(file_settings);
 
     // --save: persist the fully-resolved config and exit. No server is started.
@@ -249,6 +246,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Device builds: write a default config on first run (the device is
+/// configured through the web UI, so the file must exist to be edited) and
+/// return a human-readable error when that write fails — on a read-only or
+/// full SD card, stderr is invisible from the OS menu, so the caller threads
+/// the message into the `config_error` machinery that the device screen and
+/// the web Status tab already display (issue #35).
+#[cfg(any(feature = "fb", feature = "sdl"))]
+fn ensure_default_config(path: &std::path::Path) -> Option<String> {
+    if path.exists() {
+        return None;
+    }
+    match config::save(path, &config::Settings::default()) {
+        Ok(()) => {
+            eprintln!("config: wrote default {}", path.display());
+            None
+        }
+        Err(e) => {
+            let msg = format!("cannot write default config {}: {e}", path.display());
+            eprintln!("config: {msg}");
+            Some(msg)
+        }
+    }
+}
+
+/// Desktop/server builds never write a config implicitly (`--save` opts in),
+/// so there is nothing to attempt and nothing to report.
+#[cfg(not(any(feature = "fb", feature = "sdl")))]
+fn ensure_default_config(_path: &std::path::Path) -> Option<String> {
+    None
+}
+
 fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
     let status_url = format!("http://{ip}:{port}/");
     println!("\n  amber-dav");
@@ -362,5 +390,51 @@ mod tests {
             waited.is_err(),
             "shutdown_requested resolved with no signal and no cancellation"
         );
+    }
+
+    // First-run config handling on device builds: a failed write must be
+    // *returned* (not just logged) so it reaches the device screen and the
+    // Status tab via the config_error machinery (issue #35).
+    #[cfg(any(feature = "fb", feature = "sdl"))]
+    mod ensure_default_config {
+        use crate::ensure_default_config;
+
+        fn tmp(name: &str) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!("amberdav-test-{}-{name}", std::process::id()))
+        }
+
+        #[test]
+        fn write_failure_is_reported() {
+            // A regular file where a directory is needed makes the save fail,
+            // standing in for a read-only/full SD card.
+            let blocker = tmp("blocker");
+            std::fs::write(&blocker, b"in the way").unwrap();
+            let err = ensure_default_config(&blocker.join("config.json"));
+            assert!(
+                err.expect("write failure must be reported")
+                    .contains("cannot write default config"),
+                "message should say what failed"
+            );
+            let _ = std::fs::remove_file(&blocker);
+        }
+
+        #[test]
+        fn existing_config_is_left_alone() {
+            let path = tmp("existing.jsonc");
+            std::fs::write(&path, b"{ // mine\n}").unwrap();
+            assert_eq!(ensure_default_config(&path), None);
+            assert_eq!(std::fs::read(&path).unwrap(), b"{ // mine\n}");
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn first_run_writes_the_default() {
+            let dir = tmp("first-run");
+            let _ = std::fs::remove_dir_all(&dir);
+            let path = dir.join("config.json");
+            assert_eq!(ensure_default_config(&path), None);
+            assert!(path.exists(), "default config should have been written");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
