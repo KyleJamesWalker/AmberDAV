@@ -555,10 +555,22 @@ function syncToolbar() {
 }
 
 // ---- navigation / selection ----
+// All listing refreshes (navigation, refresh button, post-mutation reloads)
+// route through go(); navToken discards /api/list responses that resolve
+// after a newer go() started, so a slow response can never overwrite the
+// entries of the directory the user is actually in (mirrors previewToken).
+let navToken = 0;
 async function go(path) {
+  const token = ++navToken;
   cwd = path; selection = new Set(); lastIndex = null;
-  try { entries = await api('GET', '/api/list?path=' + enc(cwd)); }
-  catch (e) { toast(e.message, true); entries = []; }
+  try {
+    const list = await api('GET', '/api/list?path=' + enc(cwd));
+    if (token !== navToken) return;        // superseded by a newer navigation
+    entries = list;
+  } catch (e) {
+    if (token !== navToken) return;        // stale failure — newer go() owns the UI
+    toast(e.message, true); entries = [];
+  }
   renderCrumbs(); rebuild(); syncToolbar();
 }
 function onRowClick(ev, e, idx) {
