@@ -7,9 +7,20 @@
 
 use std::path::PathBuf;
 
+use rand::seq::SliceRandom;
 use rand::Rng;
 
 const BLACK: [u8; 3] = [0, 0, 0];
+
+/// How many distinct images one screensaver session rotates between. Each is
+/// decoded exactly once — downscaled to ≤ ~1/3 of the canvas before pooling
+/// (a couple hundred KB apiece), never kept at full size — so a wall bounce
+/// is a pool swap, not another full-image decode (issue #40).
+const POOL_SIZE: usize = 8;
+
+/// Give up filling the pool after this many decode attempts, so a folder of
+/// corrupt files can't stall a frame indefinitely.
+const POOL_ATTEMPTS: usize = POOL_SIZE * 4;
 
 /// A decoded image scaled to a sprite (the moving picture).
 struct Sprite {
@@ -25,7 +36,13 @@ pub struct Bounce {
     images: Vec<PathBuf>,
     scanned: bool,
     started: bool,
-    sprite: Option<Sprite>,
+    /// The session's pre-decoded sprites (see [`POOL_SIZE`]).
+    pool: Vec<Sprite>,
+    /// Index into `pool` of the sprite currently on screen.
+    current: usize,
+    /// The size cap the pool was decoded for; a canvas-dimension change
+    /// invalidates the pool (different cap → different sprite sizes).
+    pool_cap: u32,
     x: i32,
     y: i32,
     vx: i32,
@@ -39,7 +56,9 @@ impl Bounce {
             images: Vec::new(),
             scanned: false,
             started: false,
-            sprite: None,
+            pool: Vec::new(),
+            current: 0,
+            pool_cap: 0,
             x: 0,
             y: 0,
             vx: 3,
@@ -64,8 +83,8 @@ impl Bounce {
             self.started = true;
             return;
         }
-        let Some(sprite) = &self.sprite else {
-            // Decode kept failing earlier; try again before moving.
+        let Some(sprite) = self.pool.get(self.current) else {
+            // Every decode failed earlier; try again before moving.
             self.start(w, h);
             return;
         };
@@ -95,53 +114,79 @@ impl Bounce {
         }
         // Classic DVD behaviour: swap the image on each edge bounce. Keep the
         // current position and the just-reflected heading.
-        if bounced && self.images.len() > 1 {
+        if bounced && self.pool.len() > 1 {
             self.swap_image(w, h);
         }
     }
 
-    /// First placement: a centered sprite with a random diagonal heading.
+    /// First placement: fill the sprite pool, then center a sprite with a
+    /// random diagonal heading.
     fn start(&mut self, w: usize, h: usize) {
         let mut rng = rand::rng();
-        if let Some(sprite) = self.pick_sprite(w, h, &mut rng) {
+        self.fill_pool(w, h, &mut rng);
+        if let Some(sprite) = self.pool.get(self.current) {
             self.x = (w.saturating_sub(sprite.w) / 2) as i32;
             self.y = (h.saturating_sub(sprite.h) / 2) as i32;
             self.vx = if rng.random_bool(0.5) { 3 } else { -3 };
             self.vy = if rng.random_bool(0.5) { 2 } else { -2 };
-            self.sprite = Some(sprite);
         }
     }
 
-    /// Replace the sprite with a new random image, preserving position and
-    /// heading. Position is clamped so a larger image stays on screen.
-    fn swap_image(&mut self, w: usize, h: usize) {
-        let mut rng = rand::rng();
-        if let Some(sprite) = self.pick_sprite(w, h, &mut rng) {
-            let maxx = w.saturating_sub(sprite.w) as i32;
-            let maxy = h.saturating_sub(sprite.h) as i32;
-            self.x = self.x.clamp(0, maxx.max(0));
-            self.y = self.y.clamp(0, maxy.max(0));
-            self.sprite = Some(sprite);
+    /// Decode the session's sprite pool: up to [`POOL_SIZE`] distinct random
+    /// images, each downscaled to the canvas cap, decoded *once* up front.
+    /// Decoding a large camera JPEG means materializing the full-size RGB
+    /// first (tens of MB, hundreds of ms on an A53) — doing that on every
+    /// wall bounce was a visible hitch each time the sprite hit an edge.
+    /// After this, a bounce only swaps between already-decoded sprites
+    /// (issue #40). No-op while a pool decoded for the same cap exists.
+    fn fill_pool(&mut self, w: usize, h: usize, rng: &mut impl Rng) {
+        let cap = sprite_cap(w, h);
+        if self.pool_cap == cap && !self.pool.is_empty() {
+            return;
         }
-    }
-
-    /// Pick and decode a random image, sized to ~1/3 of the canvas. Tries a
-    /// handful in case some fail to decode (e.g. a corrupt file).
-    fn pick_sprite(&self, w: usize, h: usize, rng: &mut impl Rng) -> Option<Sprite> {
-        let cap = (w.min(h) / 3).max(32) as u32;
-        for _ in 0..self.images.len().min(8) {
-            let idx = rng.random_range(0..self.images.len());
+        self.pool.clear();
+        self.pool_cap = cap;
+        self.current = 0;
+        // Shuffled indices = picks without replacement, so one session shows
+        // distinct images; attempts are bounded so corrupt files can't stall.
+        let mut order: Vec<usize> = (0..self.images.len()).collect();
+        order.shuffle(rng);
+        for idx in order.into_iter().take(POOL_ATTEMPTS) {
+            if self.pool.len() >= POOL_SIZE {
+                break;
+            }
             if let Some(sprite) = decode_sprite(&self.images[idx], cap) {
-                return Some(sprite);
+                self.pool.push(sprite);
             }
         }
-        None
+    }
+
+    /// Swap to a *different* pooled sprite, preserving position and heading
+    /// (position is clamped so a larger sprite stays on screen). No decode
+    /// happens here — the pool was filled at activation (issue #40).
+    fn swap_image(&mut self, w: usize, h: usize) {
+        if self.pool.len() < 2 {
+            return;
+        }
+        let mut rng = rand::rng();
+        // Random index excluding `current`: draw from one fewer slot and
+        // shift the values at/after `current` up by one.
+        let mut idx = rng.random_range(0..self.pool.len() - 1);
+        if idx >= self.current {
+            idx += 1;
+        }
+        self.current = idx;
+        let sprite = &self.pool[self.current];
+        let maxx = w.saturating_sub(sprite.w) as i32;
+        let maxy = h.saturating_sub(sprite.h) as i32;
+        self.x = self.x.clamp(0, maxx.max(0));
+        self.y = self.y.clamp(0, maxy.max(0));
     }
 
     /// Render the current sprite onto a black `w`x`h` canvas.
     pub fn canvas(&self, w: usize, h: usize) -> Vec<[u8; 3]> {
         let mut canvas = vec![BLACK; w * h];
-        if let Some(s) = &self.sprite {
+        if let Some(s) = self.pool.get(self.current) {
             for sy in 0..s.h {
                 let ty = self.y + sy as i32;
                 if ty < 0 || ty >= h as i32 {
@@ -158,6 +203,11 @@ impl Bounce {
         }
         canvas
     }
+}
+
+/// Largest sprite side for a `w`x`h` canvas: ~1/3 of the smaller dimension.
+fn sprite_cap(w: usize, h: usize) -> u32 {
+    (w.min(h) / 3).max(32) as u32
 }
 
 /// Extensions we can decode for the screensaver.
@@ -210,6 +260,20 @@ fn decode_sprite(path: &std::path::Path, cap: u32) -> Option<Sprite> {
 mod tests {
     use super::*;
 
+    const RED: [u8; 3] = [255, 0, 0];
+
+    /// A Bounce showing one synthetic 4x4 red sprite (no disk involved).
+    fn with_red_sprite() -> Bounce {
+        let mut b = Bounce::new(Vec::new());
+        b.pool = vec![Sprite {
+            w: 4,
+            h: 4,
+            px: vec![RED; 16],
+        }];
+        b.current = 0;
+        b
+    }
+
     // With no images configured, the canvas is fully black (still prevents
     // burn-in) and the right size — and stepping never panics.
     #[test]
@@ -225,13 +289,7 @@ mod tests {
     // outside it, regardless of where the sprite sits.
     #[test]
     fn sprite_renders_in_bounds() {
-        let mut b = Bounce::new(Vec::new());
-        let red = [255u8, 0, 0];
-        b.sprite = Some(Sprite {
-            w: 4,
-            h: 4,
-            px: vec![red; 16],
-        });
+        let mut b = with_red_sprite();
         b.x = 2;
         b.y = 3;
         let (w, h) = (16usize, 12usize);
@@ -240,7 +298,7 @@ mod tests {
         let mut painted = 0;
         for y in 0..h {
             for x in 0..w {
-                if cv[y * w + x] == red {
+                if cv[y * w + x] == RED {
                     assert!((2..6).contains(&x) && (3..7).contains(&y), "({x},{y}) oob");
                     painted += 1;
                 }
@@ -252,18 +310,86 @@ mod tests {
     // A sprite partly past the right/bottom edge clips instead of panicking.
     #[test]
     fn sprite_clips_at_edges() {
-        let mut b = Bounce::new(Vec::new());
-        let red = [255u8, 0, 0];
-        b.sprite = Some(Sprite {
-            w: 4,
-            h: 4,
-            px: vec![red; 16],
-        });
+        let mut b = with_red_sprite();
         b.x = 14; // 14..18 on a width-16 canvas → 2 columns visible
         b.y = 10; // 10..14 on a height-12 canvas → 2 rows visible
         let (w, h) = (16usize, 12usize);
         let cv = b.canvas(w, h);
-        let painted = cv.iter().filter(|&&p| p == red).count();
+        let painted = cv.iter().filter(|&&p| p == RED).count();
         assert_eq!(painted, 4, "only the 2x2 overlapping corner is visible");
+    }
+
+    /// Scratch image dir that cleans itself up.
+    struct TmpImages(PathBuf);
+    impl TmpImages {
+        fn new(name: &str, count: u32) -> TmpImages {
+            let dir = std::env::temp_dir().join(format!(
+                "amberdav-bounce-test-{}-{name}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..count {
+                // Tiny solid-color PNGs; color varies so sprites are distinct.
+                let img =
+                    image::RgbImage::from_pixel(8, 8, image::Rgb([(i * 40 % 256) as u8, 64, 32]));
+                img.save(dir.join(format!("img-{i}.png"))).unwrap();
+            }
+            TmpImages(dir)
+        }
+    }
+    impl Drop for TmpImages {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // The whole point of the pool (issue #40): after the first activation,
+    // wall bounces swap between already-decoded sprites and never read the
+    // disk again. Deleting the source files mid-session proves it — any
+    // re-decode attempt would come up empty and drop the sprite.
+    #[test]
+    fn bounces_after_activation_never_touch_the_disk() {
+        let imgs = TmpImages::new("no-disk", 4);
+        let mut b = Bounce::new(vec![imgs.0.clone()]);
+        b.step(96, 96); // scan + fill the pool + first placement
+        assert!(
+            b.pool.len() >= 2,
+            "expected several pooled sprites, got {}",
+            b.pool.len()
+        );
+        let pooled = b.pool.len();
+
+        std::fs::remove_dir_all(&imgs.0).unwrap();
+        // Hundreds of steps on a small canvas → plenty of edge bounces.
+        for _ in 0..500 {
+            b.step(96, 96);
+        }
+        assert_eq!(b.pool.len(), pooled, "a bounce must not re-fill the pool");
+        assert!(
+            b.pool.get(b.current).is_some(),
+            "the sprite must survive the source files vanishing"
+        );
+    }
+
+    // The pool is bounded: a big library still decodes at most POOL_SIZE
+    // sprites (the RAM budget), and they are downscaled to the canvas cap.
+    #[test]
+    fn pool_is_bounded_and_downscaled() {
+        let imgs = TmpImages::new("bounded", (POOL_SIZE as u32) + 4);
+        let mut b = Bounce::new(vec![imgs.0.clone()]);
+        b.step(300, 300);
+        assert_eq!(b.pool.len(), POOL_SIZE);
+        let cap = sprite_cap(300, 300) as usize;
+        assert!(b
+            .pool
+            .iter()
+            .all(|s| s.w <= cap && s.h <= cap && !s.px.is_empty()));
+    }
+
+    #[test]
+    fn sprite_cap_is_a_third_of_the_short_side_with_a_floor() {
+        assert_eq!(sprite_cap(1280, 800), 266);
+        assert_eq!(sprite_cap(480, 640), 160);
+        assert_eq!(sprite_cap(60, 60), 32, "tiny canvases keep a 32px floor");
     }
 }
