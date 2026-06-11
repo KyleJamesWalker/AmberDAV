@@ -35,6 +35,10 @@ clap = { version = "4", features = ["derive"] }
 # otherwise.
 directories = "6"
 jsonc-parser = { version = "0.32.4", features = ["serde"] }
+# Decodes and downscales images: the /api/thumb endpoint on every build shape,
+# plus the burn-in "DVD bounce" screensaver under fb/sdl. Pure-Rust codecs
+# only, so the static musl builds keep working.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
 # On-device builds come in two shapes, each selected by its own feature. Both
 # pull in the same substrate — gamepad input, the screen Mode state machine, the
@@ -43,20 +47,17 @@ jsonc-parser = { version = "0.32.4", features = ["serde"] }
 # off and ship without any of the device-only deps.
 [features]
 # Static framebuffer/Wayland sink (Anbernic; Steam Deck without SDL).
-fb = ["dep:evdev", "dep:framebuffer", "dep:image", "dep:smithay-client-toolkit"]
+fb = ["dep:evdev", "dep:framebuffer", "dep:smithay-client-toolkit"]
 # Dynamic SDL2 on-screen sink: links the system libSDL2 (not static musl) and
 # brings its own sink, so it does not pull the framebuffer/Wayland crates. Steam
 # Deck + Anbernic. If both `fb` and `sdl` are enabled, `sdl` wins.
-sdl = ["dep:evdev", "dep:image", "dep:sdl2"]
+sdl = ["dep:evdev", "dep:sdl2"]
 
 # Device-only deps. Linux-only crates (framebuffer/evdev/sdl2), pulled in solely
 # by the `fb`/`sdl` features, which are only ever built for the handheld devices.
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { version = "0.13", features = ["tokio"], optional = true }
 framebuffer = { version = "0.3", optional = true }
-# Decodes images for the burn-in "DVD bounce" screensaver. Pure-Rust decoders
-# only, so the static musl build keeps working.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"], optional = true }
 # Pure-Rust Wayland client (no libwayland; static-musl friendly). Drives the
 # Steam Deck screen, where Gamescope owns DRM and /dev/fb0 is hidden.
 # default-features disabled on purpose: the defaults pull in `xkbcommon` (a C

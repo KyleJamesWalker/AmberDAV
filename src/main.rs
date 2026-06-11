@@ -232,6 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/download", get(files::download))
         .route("/api/zip", get(files::zip))
         .route("/api/raw", get(files::raw))
+        .route("/api/thumb", get(files::thumb))
         .route("/api/upload", put(files::upload))
         .route("/api/mkdir", post(files::mkdir))
         .route("/api/delete", post(files::delete))

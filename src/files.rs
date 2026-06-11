@@ -887,6 +887,178 @@ pub async fn raw(
     }
 }
 
+// --- thumbnails (issue #28) ---------------------------------------------------
+
+/// Default and hard bounds for the `w` query parameter. The frontend asks
+/// for 256 (largest grid cell at 2x DPR); the clamp keeps a hand-crafted
+/// request from turning the endpoint into a free image-resizing service.
+const THUMB_DEFAULT_W: u32 = 128;
+const THUMB_MIN_W: u32 = 16;
+const THUMB_MAX_W: u32 = 512;
+
+#[derive(Deserialize)]
+pub struct ThumbQuery {
+    path: Option<String>,
+    w: Option<u32>,
+}
+
+/// Directory for the on-disk thumbnail cache. Lives under the OS temp dir:
+/// on the handhelds `/tmp` is tmpfs, so cached thumbnails cost zero SD-card
+/// wear and the cache clears itself on reboot. Entries are keyed by content
+/// identity ([`thumb_cache_key`]), so a stale entry is never *served* — a
+/// changed file simply misses and leaves the old entry behind to die with
+/// the temp dir.
+fn thumb_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("amber-dav-thumbs")
+}
+
+/// Cache file stem for one rendered thumbnail: a hash of the canonical source
+/// path (hex, so never a path separator) plus the same mtime+size identity
+/// the ETag uses, plus the requested width. Any change to the source flips
+/// the key, so lookups can trust a hit without re-checking the source.
+fn thumb_cache_key(path: &Path, meta: &std::fs::Metadata, w: u32) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let hash = Sha256::digest(path.as_os_str().as_encoded_bytes());
+    let mut hex = String::with_capacity(32);
+    for b in &hash[..16] {
+        let _ = write!(hex, "{b:02x}");
+    }
+    let (s, n) = mtime_parts(meta);
+    format!("{hex}-{s:x}.{n:x}.{:x}.{w}", meta.len())
+}
+
+/// The two encodings a thumbnail is stored and served as, with their cache
+/// file extension and MIME type. JPEG for opaque images (a 256 px photo cell
+/// is ~5–15 KB instead of ~50 KB as PNG), PNG when the source has an alpha
+/// channel worth keeping.
+const THUMB_FORMATS: [(&str, &str); 2] = [("jpg", "image/jpeg"), ("png", "image/png")];
+
+/// Decode `path` and downscale it to fit in `w`×`w` (aspect ratio preserved,
+/// never upscaled). Runs on a blocking thread — decoding a 12 MP JPEG takes
+/// hundreds of ms on the A53. `thumbnail()` is the image crate's fast path
+/// (integer box-sample, then a triangle filter), the right trade for this
+/// CPU. Returns the encoded bytes and the cache extension from
+/// [`THUMB_FORMATS`]. Decode memory is capped so one absurd PNG cannot eat
+/// the device's ~1 GB of RAM.
+fn render_thumb(path: &Path, w: u32) -> Result<(Vec<u8>, &'static str), image::ImageError> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(image::ImageError::IoError)?
+        .with_guessed_format()
+        .map_err(image::ImageError::IoError)?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode()?;
+    let thumb = if img.width() <= w && img.height() <= w {
+        img // already small enough: re-encode as-is, never upscale
+    } else {
+        img.thumbnail(w, w)
+    };
+    let mut out = Vec::new();
+    if thumb.color().has_alpha() {
+        thumb.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+        Ok((out, "png"))
+    } else {
+        let mut cursor = std::io::Cursor::new(&mut out);
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 80);
+        thumb.to_rgb8().write_with_encoder(enc)?;
+        Ok((out, "jpg"))
+    }
+}
+
+/// Best-effort cache write: temp file in the cache dir, then an atomic rename
+/// (the same write-then-rename shape as uploads), so a concurrent request for
+/// the same thumbnail never reads a half-written file. Failures are swallowed
+/// — a broken cache only costs a re-render, never the response.
+async fn store_thumb(dir: &Path, name: &str, bytes: &[u8]) {
+    if tokio::fs::create_dir_all(dir).await.is_err() {
+        return;
+    }
+    let tmp = dir.join(format!(".{name}.{}.part", std::process::id()));
+    if tokio::fs::write(&tmp, bytes).await.is_ok()
+        && tokio::fs::rename(&tmp, dir.join(name)).await.is_ok()
+    {
+        return;
+    }
+    let _ = tokio::fs::remove_file(&tmp).await;
+}
+
+/// `GET /api/thumb?path=…&w=128`: serve a server-side downscaled thumbnail
+/// instead of the full original — the grid no longer pulls 2 MB per 128 px
+/// cell off the SD card (issue #28). Same auth gate and path hardening as
+/// every other handler, same cache validators as [`raw`] (the ETag carries
+/// the width so the two endpoints' validators can never cross-match):
+///
+/// 1. conditional hit → 304, nothing read;
+/// 2. disk-cache hit → serve the cached encoding;
+/// 3. miss → decode + downscale off the runtime, cache, serve.
+///
+/// Non-image files (and formats the pure-Rust decoders don't know, e.g. SVG)
+/// answer 415 — the frontend falls back to `/api/raw` for those.
+pub async fn thumb(
+    _: Session,
+    State(s): State<AppState>,
+    Query(q): Query<ThumbQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let rel = q.path.unwrap_or_default();
+    let Some(path) = resolve(&s.root, &rel) else {
+        return bad("invalid path");
+    };
+    let path = match confine(&s.root, &path).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) => m,
+        Err(e) => return io_err(e),
+    };
+    if meta.is_dir() {
+        return bad("not a file");
+    }
+    let w =
+        q.w.unwrap_or(THUMB_DEFAULT_W)
+            .clamp(THUMB_MIN_W, THUMB_MAX_W);
+
+    let etag = etag_for(&meta, Some(w));
+    let modified = meta.modified().ok();
+    if not_modified(&headers, &etag, modified) {
+        return with_cache_headers(StatusCode::NOT_MODIFIED.into_response(), &etag, modified);
+    }
+
+    let dir = thumb_cache_dir();
+    let key = thumb_cache_key(&path, &meta, w);
+    for (ext, mime) in THUMB_FORMATS {
+        if let Ok(bytes) = tokio::fs::read(dir.join(format!("{key}.{ext}"))).await {
+            let resp = ([(header::CONTENT_TYPE, mime)], bytes).into_response();
+            return with_cache_headers(resp, &etag, modified);
+        }
+    }
+
+    let src = path.clone();
+    let (bytes, ext) = match tokio::task::spawn_blocking(move || render_thumb(&src, w)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(image::ImageError::IoError(e))) => return io_err(e),
+        Ok(Err(e)) => {
+            return (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("cannot thumbnail: {e}"),
+            )
+                .into_response()
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    store_thumb(&dir, &format!("{key}.{ext}"), &bytes).await;
+    let mime = if ext == "png" {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    let resp = ([(header::CONTENT_TYPE, mime)], bytes).into_response();
+    with_cache_headers(resp, &etag, modified)
+}
+
 // --- zip (download multiple items / folders) -------------------------------
 
 #[derive(Deserialize)]
@@ -1582,5 +1754,111 @@ mod tests {
             etag,
             Some(mtime)
         ));
+    }
+
+    // Issue #28 §2: the rendered thumbnail fits the requested box with the
+    // aspect ratio preserved, and the encoding follows the alpha channel —
+    // JPEG for opaque sources, PNG when transparency must survive.
+    #[test]
+    fn thumb_downscales_and_picks_format() {
+        let tree = TmpTree::new("thumb-render");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+
+        let opaque = root.join("opaque.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            64,
+            48,
+            image::Rgb([200, 60, 60]),
+        ))
+        .save(&opaque)
+        .unwrap();
+        let (bytes, ext) = render_thumb(&opaque, 16).unwrap();
+        assert_eq!(ext, "jpg");
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((out.width(), out.height()), (16, 12), "fits 16x16 box");
+
+        let alpha = root.join("alpha.png");
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            48,
+            64,
+            image::Rgba([0, 120, 0, 128]),
+        ))
+        .save(&alpha)
+        .unwrap();
+        let (bytes, ext) = render_thumb(&alpha, 16).unwrap();
+        assert_eq!(ext, "png", "alpha source keeps transparency via PNG");
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((out.width(), out.height()), (12, 16));
+    }
+
+    // A source already smaller than the box ships at its own size — blowing
+    // an 8 px icon up to 256 px would only waste bytes and blur.
+    #[test]
+    fn thumb_never_upscales() {
+        let tree = TmpTree::new("thumb-small");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        let small = root.join("small.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 6))
+            .save(&small)
+            .unwrap();
+        let (bytes, _) = render_thumb(&small, 256).unwrap();
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((out.width(), out.height()), (8, 6));
+    }
+
+    // The 415-vs-IO split the handler relies on: bytes that don't decode
+    // (e.g. a macOS "._" AppleDouble file named .png) are a decode error the
+    // frontend turns into a /api/raw fallback, while a missing file stays an
+    // IO error mapped through io_err (404).
+    #[test]
+    fn thumb_separates_decode_errors_from_io() {
+        let tree = TmpTree::new("thumb-errors");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("fake.png"), b"this is not an image").unwrap();
+
+        let err = render_thumb(&root.join("fake.png"), 128).unwrap_err();
+        assert!(
+            !matches!(err, image::ImageError::IoError(_)),
+            "decode failure, not IO: {err}"
+        );
+        let err = render_thumb(&root.join("missing.png"), 128).unwrap_err();
+        assert!(matches!(err, image::ImageError::IoError(_)));
+    }
+
+    // The disk-cache key is the thumbnail's full identity: any change to the
+    // source path, its content (mtime/size), or the requested width must miss
+    // — and the key must be a single plain file name, never a path.
+    #[test]
+    fn thumb_cache_key_tracks_identity() {
+        let tree = TmpTree::new("thumb-key");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("a.png"), b"aaaa").unwrap();
+        std::fs::write(root.join("b.png"), b"aaaa").unwrap();
+        let ma = std::fs::metadata(root.join("a.png")).unwrap();
+        let mb = std::fs::metadata(root.join("b.png")).unwrap();
+
+        let key = thumb_cache_key(&root.join("a.png"), &ma, 128);
+        assert!(safe_name(&key).is_some(), "plain file name: {key}");
+        assert_eq!(key, thumb_cache_key(&root.join("a.png"), &ma, 128));
+        assert_ne!(key, thumb_cache_key(&root.join("b.png"), &mb, 128));
+        assert_ne!(key, thumb_cache_key(&root.join("a.png"), &ma, 256));
+
+        std::fs::write(root.join("a.png"), b"aaaa-changed").unwrap();
+        let ma2 = std::fs::metadata(root.join("a.png")).unwrap();
+        assert_ne!(key, thumb_cache_key(&root.join("a.png"), &ma2, 128));
+    }
+
+    // store_thumb commits atomically (no .part litter) and a second write of
+    // the same key — two concurrent first requests — lands cleanly.
+    #[tokio::test]
+    async fn thumb_cache_store_roundtrip() {
+        let tree = TmpTree::new("thumb-store");
+        let dir = std::fs::canonicalize(&tree.0).unwrap().join("cache");
+
+        store_thumb(&dir, "k.jpg", b"payload").await;
+        assert_eq!(std::fs::read(dir.join("k.jpg")).unwrap(), b"payload");
+        store_thumb(&dir, "k.jpg", b"payload2").await;
+        assert_eq!(std::fs::read(dir.join("k.jpg")).unwrap(), b"payload2");
+        assert!(part_files(&dir).is_empty(), "no temp litter");
     }
 }
