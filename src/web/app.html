@@ -703,9 +703,17 @@ async function showPreviewAt(i) {
 function closePreview() { $('modal').classList.remove('show'); $('mbody').innerHTML = ''; previewIdx = -1; previewList = []; }
 
 // ---- text editor (config files etc.) ----
+let edBaseline = null;            // editor text as last loaded/saved; null = nothing loaded yet
+const editorDirty = () => editing !== null && edBaseline !== null && $('ed-area').value !== edBaseline;
+// Single guard for every action that would throw away the buffer (✕ button,
+// Esc, opening another file). Returns true when it is safe to proceed.
+function confirmDiscard() {
+  return !editorDirty() || confirm('Discard unsaved changes to ' + editing.name + '?');
+}
 async function openEditor(e) {
   if (!canWrite()) { toast('Read-only — editing is disabled', true); return; }
-  editing = e;
+  if (!confirmDiscard()) return;
+  editing = e; edBaseline = null;
   $('ed-title').textContent = e.name;
   const area = $('ed-area'); area.value = ''; area.disabled = true;
   $('editor').classList.add('show');
@@ -714,23 +722,26 @@ async function openEditor(e) {
     const r = await fetch('/api/raw?path=' + enc(join(cwd, e.name)));
     if (r.status === 401) { location.href = '/login'; return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
-    area.value = await r.text(); area.disabled = false; area.focus();
+    area.value = await r.text(); edBaseline = area.value; area.disabled = false; area.focus();
   } catch (err) { toast(err.message, true); closeEditor(); }
 }
 async function saveEditor() {
   if (!editing) return;
-  const name = editing.name;
+  const name = editing.name, text = $('ed-area').value;
   try {
     // Saving rewrites the file being edited on purpose → overwrite=true
     // (without it the server now 409s instead of replacing an existing file).
     const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name) + '&overwrite=true',
-                          { method: 'PUT', body: $('ed-area').value });
+                          { method: 'PUT', body: text });
     if (r.status === 401) { location.href = '/login'; return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    edBaseline = text;                // what we just persisted — editor is clean again
     toast('Saved ' + name); closeEditor(); go(cwd);
   } catch (err) { toast('Save failed: ' + err.message, true); }
 }
-function closeEditor() { $('editor').classList.remove('show'); $('ed-area').value = ''; editing = null; }
+// Unconditional teardown — callers that may discard edits go through requestCloseEditor().
+function closeEditor() { $('editor').classList.remove('show'); $('ed-area').value = ''; editing = null; edBaseline = null; }
+function requestCloseEditor() { if (confirmDiscard()) closeEditor(); }
 
 // ---- uploads (XHR so we get upload progress) ----
 function showUpload() { $('uploadbar').classList.add('show'); }
@@ -963,7 +974,7 @@ $('v-list').onclick = () => setView('list'); $('v-grid').onclick = () => setView
 $('t-hidden').onclick = () => { showHidden = !showHidden; $('t-hidden').classList.toggle('on', showHidden);
   selection = new Set(); lastIndex = null; rebuild(); syncToolbar(); };
 $('ed-save').onclick = saveEditor;
-$('ed-close').onclick = closeEditor;
+$('ed-close').onclick = requestCloseEditor;
 $('upd-check').onclick = checkUpdate;
 $('upd-apply').onclick = applyUpdate;
 $('filepick').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
@@ -983,7 +994,7 @@ $('modal').onclick = (e) => { if (e.target === $('modal')) closePreview(); };
 document.addEventListener('keydown', (e) => {
   // Editor captures its own keys (don't let Esc bubble to the file list).
   if ($('editor').classList.contains('show')) {
-    if (e.key === 'Escape') { e.preventDefault(); closeEditor(); }
+    if (e.key === 'Escape') { e.preventDefault(); requestCloseEditor(); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveEditor(); }
     return;
   }
@@ -992,6 +1003,15 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowRight') { e.preventDefault(); navigatePreview(1); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); navigatePreview(-1); }
   }
+});
+
+// Warn before tab close / reload / back navigation while the editor holds
+// unsaved edits. Inert when clean: browsers only show the leave-page prompt
+// when the handler calls preventDefault / sets returnValue.
+window.addEventListener('beforeunload', (e) => {
+  if (!editorDirty()) return;
+  e.preventDefault();
+  e.returnValue = '';                 // legacy Chrome requires a set returnValue
 });
 
 // click-away to clear selection / close menu
