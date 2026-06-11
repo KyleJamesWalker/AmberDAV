@@ -90,7 +90,37 @@ impl Cli {
     /// file, honouring CLI > env > file > compiled default. A field left unset
     /// at every layer keeps the value already on `s` (the loaded file, or the
     /// compiled default behind it).
-    pub fn resolve(&self, mut s: Settings) -> Settings {
+    pub fn resolve(&self, s: Settings) -> Settings {
+        self.resolve_with(s, |key| std::env::var(key).ok())
+    }
+
+    /// [`resolve`](Cli::resolve) with the environment lookup injected, so the
+    /// precedence rules are testable without mutating the process environment
+    /// (`std::env::set_var` is unsafe under parallel tests).
+    fn resolve_with(&self, mut s: Settings, env: impl Fn(&str) -> Option<String>) -> Settings {
+        // A non-empty env var, or `None` (unset or empty so it can't mask a
+        // config value).
+        let env_str = |key: &str| env(key).filter(|v| !v.is_empty());
+        let env_u16 = |key: &str| -> Option<u16> { env_str(key)?.parse().ok() };
+        let env_bool = |key: &str| -> Option<bool> { parse_bool(&env_str(key)?) };
+        let env_list = |key: &str| -> Option<Vec<String>> {
+            Some(
+                env_str(key)?
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            )
+        };
+        // A comma-separated `u16` env var (e.g. evdev key codes). A value with
+        // no usable codes is treated as unset, so it can't blank a config list.
+        let env_u16_list = |key: &str| -> Option<Vec<u16>> {
+            let codes = parse_u16_list(&env_str(key)?);
+            (!codes.is_empty()).then_some(codes)
+        };
+        let env_permission =
+            |key: &str| -> Option<Permission> { Permission::from_str(&env_str(key)?, true).ok() };
+
         if let Some(v) = self
             .root
             .clone()
@@ -102,8 +132,8 @@ impl Cli {
         if let Some(v) = self
             .port
             .or(self.port_pos)
-            .or_else(|| env_parse("AMBERDAV_PORT"))
-            .or_else(|| env_parse("PORT"))
+            .or_else(|| env_u16("AMBERDAV_PORT"))
+            .or_else(|| env_u16("PORT"))
         {
             s.port = Some(v);
         }
@@ -159,7 +189,7 @@ impl Cli {
             .clone()
             .or_else(|| env_u16_list("AMBERDAV_EXIT_KEYS"))
             // Back-compat: honour the old singular AMBERDAV_EXIT_KEY too.
-            .or_else(|| env_parse::<u16>("AMBERDAV_EXIT_KEY").map(|k| vec![k]))
+            .or_else(|| env_u16("AMBERDAV_EXIT_KEY").map(|k| vec![k]))
         {
             s.exit_keys = v;
         }
@@ -193,49 +223,20 @@ fn flag_tristate(on: bool, off: bool) -> Option<bool> {
     }
 }
 
-/// A non-empty env var, or `None` (unset or empty so it can't mask a config value).
-fn env_str(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-
-fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
-    env_str(key).and_then(|v| v.parse().ok())
-}
-
-/// Parse a boolean env var. Accepts the usual on/off spellings; anything else
+/// Parse a boolean setting. Accepts the usual on/off spellings; anything else
 /// is ignored (treated as unset) rather than silently meaning `false`.
-fn env_bool(key: &str) -> Option<bool> {
-    match env_str(key)?.to_ascii_lowercase().as_str() {
+fn parse_bool(v: &str) -> Option<bool> {
+    match v.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
 }
 
-fn env_list(key: &str) -> Option<Vec<String>> {
-    env_str(key).map(|v| {
-        v.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    })
-}
-
 /// Parse a comma-separated list of `u16` (e.g. evdev key codes). Surrounding
 /// whitespace is trimmed and unparseable entries are skipped.
 fn parse_u16_list(s: &str) -> Vec<u16> {
     s.split(',').filter_map(|c| c.trim().parse().ok()).collect()
-}
-
-/// A comma-separated `u16` env var (e.g. evdev key codes). A value with no
-/// usable codes is treated as unset, so it can't blank a config list.
-fn env_u16_list(key: &str) -> Option<Vec<u16>> {
-    let codes = parse_u16_list(&env_str(key)?);
-    (!codes.is_empty()).then_some(codes)
-}
-
-fn env_permission(key: &str) -> Option<Permission> {
-    Permission::from_str(&env_str(key)?, true).ok()
 }
 
 #[cfg(test)]

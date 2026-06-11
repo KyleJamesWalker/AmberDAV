@@ -143,7 +143,7 @@ fn run_with_driver(
                     info_canvas(
                         wu,
                         hu,
-                        crate::current_ip(),
+                        crate::state::current_ip(),
                         port,
                         password.as_deref(),
                         config_error,

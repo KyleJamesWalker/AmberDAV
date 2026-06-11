@@ -167,7 +167,7 @@ fn show_framebuffer(
                         Mode::Info => {
                             // Re-query the IP each paint so the screen recovers
                             // once Wi-Fi connects after launch.
-                            let ip = crate::current_ip();
+                            let ip = crate::state::current_ip();
                             crate::canvas::info_canvas(
                                 geom.lw,
                                 geom.lh,

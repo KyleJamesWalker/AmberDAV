@@ -150,7 +150,7 @@ impl App {
             Mode::Info | Mode::Bounce => info_canvas(
                 w,
                 h,
-                crate::current_ip(),
+                crate::state::current_ip(),
                 self.port,
                 self.password.as_deref(),
                 self.config_error.as_deref(),
