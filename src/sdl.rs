@@ -10,8 +10,6 @@
 //! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
 #[cfg(feature = "sdl")]
-use crate::canvas::{black_canvas, info_canvas};
-#[cfg(feature = "sdl")]
 use crate::screen::{set_status, Mode, ModeHandle, Status};
 
 #[cfg(feature = "sdl")]
@@ -117,7 +115,12 @@ fn run_with_driver(
     eprintln!("sdl: using driver {driver} at {w}x{h}");
 
     let (wu, hu) = (w as usize, h as usize);
-    let mut bounce = crate::bounce::Bounce::new(bounce_paths);
+    let mut source = crate::render::FrameSource::new(
+        port,
+        password,
+        startup_error.map(String::from),
+        Some(crate::bounce::Bounce::new(bounce_paths)),
+    );
     let mut last_mode: Option<Mode> = None;
     let mut frame: u64 = 0;
     loop {
@@ -140,54 +143,48 @@ fn run_with_driver(
         }
 
         let cur = mode.lock().map(|m| *m).unwrap_or(Mode::Info);
-        // Static screens (Info/Black) only re-render on a mode change or
-        // periodically (to re-query the IP after late Wi-Fi). Bounce animates,
-        // so it re-renders on a fixed cadence — every 5th 16ms loop (~80ms,
-        // matching the framebuffer sink) — enough motion without re-decoding
-        // images or pinning the CPU on every frame.
-        let refresh = match cur {
-            Mode::Bounce => last_mode != Some(cur) || frame.is_multiple_of(5),
-            _ => last_mode != Some(cur) || frame.is_multiple_of(30),
+        let changed = last_mode != Some(cur);
+        // Per-mode cadence (issue #39): Bounce animates — ~80ms steps on 16ms
+        // ticks, so quit/shutdown polling stays snappy. Info/Black are static:
+        // tick at ~10/s and re-check the content every ~3s (matching the fb
+        // sink); the FrameSource cache turns those checks into no-ops unless
+        // the mode, dims, or IP actually changed.
+        let (tick_ms, check_every) = match cur {
+            Mode::Bounce => (16u64, 5u64),
+            _ => (100, 30),
         };
-        if refresh {
-            let px: Vec<[u8; 3]> = match cur {
-                Mode::Black => black_canvas(wu, hu).px,
-                Mode::Info => {
-                    info_canvas(
-                        wu,
-                        hu,
-                        crate::state::current_ip(),
-                        port,
-                        password.as_deref(),
-                        startup_error,
-                    )
-                    .px
-                }
-                Mode::Bounce => {
-                    bounce.step(wu, hu);
-                    bounce.canvas(wu, hu)
-                }
-            };
-            // px is a contiguous Vec<[u8;3]> == w*h*3 bytes of RGB24.
-            let bytes: &[u8] =
-                unsafe { std::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 3) };
-            texture
-                .update(None, bytes, wu * 3)
-                .map_err(|e| e.to_string())?;
-            set_status(
-                status,
-                format!("ok (sdl {driver} {w}x{h}) frame={frame} mode={cur:?}"),
-            );
+        let mut updated = false;
+        if changed || frame.is_multiple_of(check_every) {
+            let (fresh, px) = source.frame(cur, wu, hu);
+            if fresh {
+                // px is a contiguous &[[u8;3]] == w*h*3 bytes of RGB24.
+                let bytes: &[u8] =
+                    unsafe { std::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 3) };
+                texture
+                    .update(None, bytes, wu * 3)
+                    .map_err(|e| e.to_string())?;
+                set_status(
+                    status,
+                    format!("ok (sdl {driver} {w}x{h}) frame={frame} mode={cur:?}"),
+                );
+                updated = true;
+            }
             last_mode = Some(cur);
         }
 
-        canvas.clear();
-        canvas.copy(&texture, None, None)?;
-        canvas.present();
+        // Present only when the texture changed, plus an occasional re-present
+        // so a driver that drops the front buffer (VT switch, compositor
+        // restart) recovers — not a clear/copy/present at ~60fps for a screen
+        // that isn't changing.
+        if updated || frame.is_multiple_of(60) {
+            canvas.clear();
+            canvas.copy(&texture, None, None)?;
+            canvas.present();
+        }
         frame = frame.wrapping_add(1);
         // Floor the loop rate so we never busy-spin when a driver ignores vsync
         // (kmsdrm/fbcon often do). A static info screen doesn't need high fps.
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        std::thread::sleep(std::time::Duration::from_millis(tick_ms));
     }
 }
 
