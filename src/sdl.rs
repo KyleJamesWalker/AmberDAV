@@ -18,6 +18,8 @@ use crate::screen::{Mode, ModeHandle, Status};
 use sdl2::event::Event;
 #[cfg(feature = "sdl")]
 use sdl2::pixels::PixelFormatEnum;
+#[cfg(feature = "sdl")]
+use tokio_util::sync::CancellationToken;
 
 /// Video drivers to try, in order, when `SDL_VIDEODRIVER` isn't forced. `x11`
 /// is first so the Steam Deck gets an Xwayland window (the surface Steam
@@ -37,8 +39,9 @@ pub fn driver_candidates(forced: Option<&str>) -> Vec<String> {
 }
 
 /// Open a fullscreen SDL window and paint the connection-info canvas, trying
-/// each candidate video driver until one initializes. Returns only on error or
-/// when the window is closed; blocks the calling thread.
+/// each candidate video driver until one initializes. Returns on error or once
+/// `shutdown` is cancelled (the window closing cancels it too); blocks the
+/// calling thread.
 #[cfg(feature = "sdl")]
 pub fn run(
     port: u16,
@@ -47,6 +50,7 @@ pub fn run(
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
     config_error: Option<String>,
+    shutdown: CancellationToken,
 ) -> Result<(), String> {
     let forced = std::env::var("SDL_VIDEODRIVER").ok();
     let candidates = driver_candidates(forced.as_deref());
@@ -63,6 +67,7 @@ pub fn run(
             &mode,
             bounce_paths.clone(),
             config_error.as_deref(),
+            &shutdown,
         ) {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -84,6 +89,7 @@ fn set_status(status: &Status, msg: String) {
 }
 
 #[cfg(feature = "sdl")]
+#[allow(clippy::too_many_arguments)]
 fn run_with_driver(
     port: u16,
     password: Option<String>,
@@ -91,6 +97,7 @@ fn run_with_driver(
     mode: &ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
     config_error: Option<&str>,
+    shutdown: &CancellationToken,
 ) -> Result<(), String> {
     let sdl = sdl2::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
@@ -121,11 +128,21 @@ fn run_with_driver(
     let mut last_mode: Option<Mode> = None;
     let mut frame: u64 = 0;
     loop {
+        // Shutdown requested anywhere (window close below, the gamepad exit
+        // key, Ctrl+C/SIGTERM): stop painting and let the sink thread end while
+        // the server drains its connections (issue #34).
+        if shutdown.is_cancelled() {
+            set_status(status, "sdl: stopped (shutting down)".to_string());
+            return Ok(());
+        }
+
         for ev in pump.poll_iter() {
             if let Event::Quit { .. } = ev {
-                // Window closed (e.g. Steam stopped the game) — quit the whole
-                // app, mirroring the input thread's exit-key behaviour.
-                std::process::exit(0);
+                // Window closed (e.g. Steam stopped the game) — request app
+                // shutdown, mirroring the input thread's exit-key behaviour.
+                // Cancelling (not exiting) lets in-flight uploads drain.
+                eprintln!("sdl: quit event; shutting down");
+                shutdown.cancel();
             }
         }
 

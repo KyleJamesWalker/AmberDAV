@@ -160,6 +160,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Shared screen mode, driven by the gamepad (A = blank, X = screensaver).
     let screen_mode = screen::mode_handle();
 
+    // Cancelled on Ctrl+C/SIGTERM — and *by* the device exit paths (gamepad
+    // exit key, SDL window close) — so in-flight SSE streams end and graceful
+    // shutdown can drain instead of hanging on a held-open Status page or
+    // killing uploads mid-write (issues #15, #34).
+    let shutdown = CancellationToken::new();
+
     // Broadcast channel carrying input events to all connected SSE clients.
     let (events, _) = broadcast::channel::<InputUpdate>(256);
     input::spawn(
@@ -171,13 +177,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bounce: settings.bounce_keys.clone(),
             bounce_enabled,
         },
+        shutdown.clone(),
     );
 
     let screen_status: screen::Status = Arc::new(std::sync::Mutex::new("starting…".to_string()));
-
-    // Cancelled on Ctrl+C so in-flight SSE streams end and graceful shutdown
-    // can drain instead of hanging on a held-open Status page (issue #15).
-    let shutdown = CancellationToken::new();
 
     // One per-IP failure throttle shared by both password surfaces (the web
     // login and the WebDAV Basic auth), so a guesser gets one budget total.
@@ -229,6 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         screen_mode,
         bounce_paths,
         config_error,
+        shutdown.clone(),
     );
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
@@ -266,7 +270,37 @@ fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
     }
 }
 
+/// How long graceful shutdown may spend draining in-flight connections before
+/// the process exits anyway. Short enough to beat Docker's default 10s
+/// SIGKILL, long enough to finish a write that is actually progressing.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The future handed to `axum::serve(...).with_graceful_shutdown`: resolves
+/// when shutdown is requested, cancels the shared token (idempotent — the
+/// device paths cancel it themselves), and arms the drain watchdog.
 async fn shutdown_signal(shutdown: CancellationToken) {
+    shutdown_requested(&shutdown).await;
+
+    // End in-flight SSE streams so graceful shutdown can drain the connections
+    // instead of waiting forever on a held-open Status page (issue #15).
+    shutdown.cancel();
+
+    // Watchdog: if a stalled client keeps a connection open past the grace
+    // period (axum waits for *all* of them), exit anyway — on the handheld the
+    // exit key must actually exit (issue #34).
+    tokio::spawn(async {
+        tokio::time::sleep(DRAIN_GRACE).await;
+        eprintln!("shutdown: connections did not drain within {DRAIN_GRACE:?}; exiting now");
+        std::process::exit(0);
+    });
+}
+
+/// Resolves when anything asks the server to stop: Ctrl+C (SIGINT), SIGTERM
+/// (Unix service managers — Docker/systemd/NAS, issue #34), or the shared
+/// CancellationToken (the gamepad exit key and the SDL window-close path
+/// cancel it instead of calling `std::process::exit`, so in-flight uploads
+/// and WebDAV writes drain instead of dying mid-stream).
+async fn shutdown_requested(shutdown: &CancellationToken) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -295,9 +329,38 @@ async fn shutdown_signal(shutdown: CancellationToken) {
     tokio::select! {
         () = ctrl_c => {}
         () = terminate => {}
+        () = shutdown.cancelled() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // The device exit paths (gamepad exit key, SDL window close) cancel the
+    // shared token instead of calling std::process::exit; the serve loop's
+    // shutdown future must resolve from that alone, no OS signal involved
+    // (issue #34).
+    #[tokio::test]
+    async fn shutdown_requested_resolves_when_the_token_is_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), shutdown_requested(&token))
+            .await
+            .expect("shutdown_requested must resolve once the token is cancelled");
     }
 
-    // End in-flight SSE streams so graceful shutdown can drain the connections
-    // instead of waiting forever on a held-open Status page (issue #15).
-    shutdown.cancel();
+    // …and it must NOT resolve on its own: an un-cancelled token with no
+    // signal keeps the server running.
+    #[tokio::test]
+    async fn shutdown_requested_pends_until_something_asks() {
+        let token = CancellationToken::new();
+        let waited =
+            tokio::time::timeout(Duration::from_millis(50), shutdown_requested(&token)).await;
+        assert!(
+            waited.is_err(),
+            "shutdown_requested resolved with no signal and no cancellation"
+        );
+    }
 }

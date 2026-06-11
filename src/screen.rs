@@ -58,6 +58,9 @@ fn set(status: &Status, msg: String) {
 }
 
 /// SDL build: always use the SDL sink (it auto-selects the video driver).
+/// `shutdown` flows into the sink: closing the window cancels it (so the
+/// server drains instead of dying mid-write), and a cancellation from
+/// anywhere else stops the sink's render loop.
 #[cfg(all(target_os = "linux", feature = "sdl"))]
 pub fn show(
     port: u16,
@@ -66,6 +69,7 @@ pub fn show(
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
     config_error: Option<String>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     set(&status, "sdl: starting…".to_string());
     std::thread::spawn(move || {
@@ -76,6 +80,7 @@ pub fn show(
             mode,
             bounce_paths,
             config_error,
+            shutdown,
         ) {
             set(&status, format!("sdl failed: {e}"));
             eprintln!("screen: sdl sink failed ({e}); connection info is in the log only");
@@ -86,6 +91,9 @@ pub fn show(
 /// Pick the active display sink (Wayland in Game Mode, framebuffer on the
 /// Anbernic/TTY/Desktop Mode, else headless) and start painting connection
 /// info. Returns immediately; the chosen sink runs in a background thread.
+// The fb/Wayland sinks have no exit event of their own (quitting comes from
+// the gamepad exit key, which `input::spawn` routes through the token), so
+// this variant does not consume `shutdown`.
 #[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
 pub fn show(
     port: u16,
@@ -94,6 +102,7 @@ pub fn show(
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
     config_error: Option<String>,
+    _shutdown: tokio_util::sync::CancellationToken,
 ) {
     use crate::display::{detect, DisplayKind};
     match detect() {
@@ -222,6 +231,7 @@ pub fn show(
     _mode: ModeHandle,
     _bounce_paths: Vec<std::path::PathBuf>,
     _config_error: Option<String>,
+    _shutdown: tokio_util::sync::CancellationToken,
 ) {
     set(&status, "disabled (headless build)".to_string());
 }

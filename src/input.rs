@@ -9,6 +9,7 @@
 //! so both kinds are forwarded.
 
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// A single input change, serialized to the browser as JSON.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -84,7 +85,12 @@ pub fn key_action(code: u16, keys: &InputKeys) -> Option<KeyAction> {
 }
 
 #[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
-pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle, keys: InputKeys) {
+pub fn spawn(
+    tx: broadcast::Sender<InputUpdate>,
+    mode: crate::screen::ModeHandle,
+    keys: InputKeys,
+    shutdown: CancellationToken,
+) {
     use evdev::EventSummary;
 
     for (path, dev) in evdev::enumerate() {
@@ -97,8 +103,10 @@ pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle
         let path = path.to_string_lossy().into_owned();
         let tx = tx.clone();
         let mode = mode.clone();
-        // One reader task per device; each needs its own copy of the key sets.
+        // One reader task per device; each needs its own copy of the key sets
+        // and its own handle on the shutdown token.
         let keys = keys.clone();
+        let shutdown = shutdown.clone();
 
         let mut stream = match dev.into_event_stream() {
             Ok(s) => s,
@@ -129,8 +137,11 @@ pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle
                             use crate::screen::{self, Mode};
                             match key_action(code, &keys) {
                                 Some(KeyAction::Exit) => {
+                                    // Cancel rather than exit: the server gets to
+                                    // drain in-flight uploads/WebDAV writes before
+                                    // the process ends (issue #34).
                                     eprintln!("input: exit key ({code}) pressed; shutting down");
-                                    std::process::exit(0);
+                                    shutdown.cancel();
                                 }
                                 Some(KeyAction::Blank) => screen::toggle(&mode, Mode::Black),
                                 Some(KeyAction::Bounce) => screen::toggle(&mode, Mode::Bounce),
@@ -175,6 +186,7 @@ pub fn spawn(
     _tx: broadcast::Sender<InputUpdate>,
     _mode: crate::screen::ModeHandle,
     _keys: InputKeys,
+    _shutdown: CancellationToken,
 ) {
     eprintln!("input: gamepad support is a device-only feature; live input view disabled");
 }
