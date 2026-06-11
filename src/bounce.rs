@@ -183,9 +183,17 @@ impl Bounce {
         self.y = self.y.clamp(0, maxy.max(0));
     }
 
-    /// Render the current sprite onto a black `w`x`h` canvas.
-    pub fn canvas(&self, w: usize, h: usize) -> Vec<[u8; 3]> {
-        let mut canvas = vec![BLACK; w * h];
+    /// Render the current sprite onto a black `w`x`h` canvas, reusing the
+    /// caller's buffer — at 12.5 fps a fresh ~900 KB allocation per frame is
+    /// pure churn (issue #40). The buffer is (re)sized and cleared in place;
+    /// the caller keeps it alive across frames.
+    pub fn render(&self, w: usize, h: usize, canvas: &mut Vec<[u8; 3]>) {
+        if canvas.len() == w * h {
+            canvas.fill(BLACK);
+        } else {
+            canvas.clear();
+            canvas.resize(w * h, BLACK);
+        }
         if let Some(s) = self.pool.get(self.current) {
             for sy in 0..s.h {
                 let ty = self.y + sy as i32;
@@ -201,7 +209,6 @@ impl Bounce {
                 }
             }
         }
-        canvas
     }
 }
 
@@ -274,13 +281,20 @@ mod tests {
         b
     }
 
+    /// One-shot render into a fresh buffer (the sinks reuse theirs).
+    fn rendered(b: &Bounce, w: usize, h: usize) -> Vec<[u8; 3]> {
+        let mut buf = Vec::new();
+        b.render(w, h, &mut buf);
+        buf
+    }
+
     // With no images configured, the canvas is fully black (still prevents
     // burn-in) and the right size — and stepping never panics.
     #[test]
     fn empty_bounce_is_all_black_and_inert() {
         let mut b = Bounce::new(Vec::new());
         b.step(64, 48);
-        let cv = b.canvas(64, 48);
+        let cv = rendered(&b, 64, 48);
         assert_eq!(cv.len(), 64 * 48);
         assert!(cv.iter().all(|&p| p == BLACK));
     }
@@ -293,7 +307,7 @@ mod tests {
         b.x = 2;
         b.y = 3;
         let (w, h) = (16usize, 12usize);
-        let cv = b.canvas(w, h);
+        let cv = rendered(&b, w, h);
         assert_eq!(cv.len(), w * h);
         let mut painted = 0;
         for y in 0..h {
@@ -314,9 +328,45 @@ mod tests {
         b.x = 14; // 14..18 on a width-16 canvas → 2 columns visible
         b.y = 10; // 10..14 on a height-12 canvas → 2 rows visible
         let (w, h) = (16usize, 12usize);
-        let cv = b.canvas(w, h);
+        let cv = rendered(&b, w, h);
         let painted = cv.iter().filter(|&&p| p == RED).count();
         assert_eq!(painted, 4, "only the 2x2 overlapping corner is visible");
+    }
+
+    // The buffer is reused across same-size frames (no per-frame allocation)
+    // and a moved sprite leaves no ghost pixels behind; a dimension change
+    // resizes it correctly.
+    #[test]
+    fn render_reuses_the_buffer_without_ghosting() {
+        let mut b = with_red_sprite();
+        b.x = 2;
+        b.y = 3;
+        let (w, h) = (16usize, 12usize);
+        let mut buf = Vec::new();
+        b.render(w, h, &mut buf);
+        let ptr = buf.as_ptr();
+
+        b.x = 10;
+        b.y = 5;
+        b.render(w, h, &mut buf);
+        assert_eq!(buf.as_ptr(), ptr, "same-size render must not reallocate");
+        assert_eq!(
+            buf.iter().filter(|&&p| p == RED).count(),
+            16,
+            "exactly one sprite on screen"
+        );
+        // The old position is black again — nothing of the previous frame
+        // bleeds through the reused buffer.
+        for y in 3..7 {
+            for x in 2..6 {
+                if !(10..14).contains(&x) || !(5..9).contains(&y) {
+                    assert_eq!(buf[y * w + x], BLACK, "ghost pixel at ({x},{y})");
+                }
+            }
+        }
+
+        b.render(8, 6, &mut buf);
+        assert_eq!(buf.len(), 8 * 6, "a dimension change resizes the buffer");
     }
 
     /// Scratch image dir that cleans itself up.
