@@ -81,11 +81,12 @@ impl StaticCache {
         &self.px
     }
 
-    /// Store an animated frame: kept (a sink may re-present it) but never a
-    /// hit, so the next call re-renders.
-    pub fn put_animated(&mut self, px: Vec<[u8; 3]>) -> &[[u8; 3]] {
+    /// Hand the internal buffer to an animated renderer: the static key is
+    /// cleared (an animated frame is never a future hit) and the buffer is
+    /// reused across frames instead of reallocated (issue #40).
+    pub fn render_animated(&mut self, draw: impl FnOnce(&mut Vec<[u8; 3]>)) -> &[[u8; 3]] {
         self.key = None;
-        self.px = px;
+        draw(&mut self.px);
         &self.px
     }
 }
@@ -131,8 +132,9 @@ impl FrameSource {
             Mode::Bounce => {
                 let b = self.bounce.as_mut().expect("gated by effective_mode");
                 b.step(w, h);
-                let px = b.canvas(w, h);
-                (true, self.cache.put_animated(px))
+                // Draw into the cache's buffer in place — no per-frame canvas
+                // allocation (issue #40).
+                (true, self.cache.render_animated(|buf| b.render(w, h, buf)))
             }
             Mode::Info => {
                 // Re-query the IP each time so the screen recovers once Wi-Fi
@@ -223,13 +225,19 @@ mod tests {
     }
 
     #[test]
-    fn animated_frames_never_hit() {
+    fn animated_frames_reuse_the_buffer_and_never_hit() {
         let mut c = StaticCache::default();
         let k = key([10, 0, 0, 1], 64);
         c.put(k, vec![[9, 9, 9]]);
-        c.put_animated(vec![[1, 1, 1]]);
+        let before = c.px().as_ptr();
+        let px = c.render_animated(|buf| buf.fill([1, 1, 1]));
+        assert_eq!(px, &[[1, 1, 1]]);
+        assert_eq!(
+            c.px().as_ptr(),
+            before,
+            "the in-place draw must reuse the buffer"
+        );
         assert!(!c.matches(&k), "an animated frame clears the static key");
-        assert_eq!(c.px(), &[[1, 1, 1]]);
     }
 
     // Device builds: the full FrameSource over the real canvases. Static
