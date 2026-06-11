@@ -28,6 +28,7 @@ dependencies = [
  "font8x8",
  "framebuffer",
  "futures-util",
+ "httpdate",
  "image",
  "jsonc-parser",
  "local-ip-address",
