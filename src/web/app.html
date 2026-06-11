@@ -433,7 +433,9 @@ async function api(method, url, body) {
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(url, opts);
   if (r.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
-  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  // Keep the HTTP status on the error so callers can react to specific
+  // failures (doPaste turns a 409 collision into an overwrite prompt).
+  if (!r.ok) { const err = new Error((await r.text()) || r.statusText); err.status = r.status; throw err; }
   const ct = r.headers.get('content-type') || '';
   return ct.includes('json') ? r.json() : r.text();
 }
@@ -640,9 +642,22 @@ function doCopy() { clipboard = { mode: 'copy', paths: selectedPaths() }; toast(
 async function doPaste() {
   if (!clipboard) return;
   const ep = clipboard.mode === 'cut' ? '/api/move' : '/api/copy';
-  try { await api('POST', ep, { srcs: clipboard.paths, dest: cwd }); toast(clipboard.mode === 'cut' ? 'Moved' : 'Copied');
-        if (clipboard.mode === 'cut') clipboard = null; syncToolbar(); go(cwd); }
-  catch (e) { toast(e.message, true); }
+  const body = { srcs: clipboard.paths, dest: cwd };
+  try {
+    try { await api('POST', ep, body); }
+    catch (e) {
+      // 409 = name collision(s); the server validated the whole batch before
+      // touching anything, so one confirm covers it and the retry redoes the
+      // lot. Same-file copies come back as 400 (never retried — overwriting
+      // a file with itself is the truncation bug) and land in the outer catch.
+      if (e.status !== 409) throw e;
+      if (!confirm(e.message + '\n\nOverwrite?')) return;
+      await api('POST', ep, { ...body, overwrite: true });
+    }
+  } catch (e) { toast(e.message, true); return; }
+  toast(clipboard.mode === 'cut' ? 'Moved' : 'Copied');
+  if (clipboard.mode === 'cut') clipboard = null;
+  syncToolbar(); go(cwd);
 }
 
 // ---- preview modal (navigable gallery) ----
@@ -706,7 +721,9 @@ async function saveEditor() {
   if (!editing) return;
   const name = editing.name;
   try {
-    const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name),
+    // Saving rewrites the file being edited on purpose → overwrite=true
+    // (without it the server now 409s instead of replacing an existing file).
+    const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name) + '&overwrite=true',
                           { method: 'PUT', body: $('ed-area').value });
     if (r.status === 401) { location.href = '/login'; return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
@@ -723,14 +740,17 @@ function setUpload(name, idx, n, overallFrac, filePct) {
   $('ub-pct').textContent = filePct + '%';
   $('ub-fill').style.width = (overallFrac * 100).toFixed(1) + '%';
 }
-function putFile(file, onProgress) {
+function putFile(file, onProgress, overwrite) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', '/api/upload?path=' + enc(cwd) + '&name=' + enc(file.name));
+    xhr.open('PUT', '/api/upload?path=' + enc(cwd) + '&name=' + enc(file.name)
+                  + (overwrite ? '&overwrite=true' : ''));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       if (xhr.status === 401) { location.href = '/login'; return; }
-      (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(xhr.responseText || xhr.statusText));
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
+      // Keep the status so uploadFiles can turn a 409 into an overwrite prompt.
+      const err = new Error(xhr.responseText || xhr.statusText); err.status = xhr.status; reject(err);
     };
     xhr.onerror = () => reject(new Error('network error'));
     xhr.send(file);
@@ -739,17 +759,26 @@ function putFile(file, onProgress) {
 async function uploadFiles(fileList) {
   const files = [...fileList]; if (!files.length) return;
   showUpload();
-  let done = 0;
+  let done = 0, skipped = 0;
   for (const f of files) {
-    const overall = (frac) => (done + frac) / files.length;
-    setUpload(f.name, done + 1, files.length, overall(0), 0);
+    const idx = done + skipped + 1;
+    const overall = (frac) => (done + skipped + frac) / files.length;
+    const prog = (frac) => setUpload(f.name, idx, files.length, overall(frac), Math.round(frac * 100));
+    prog(0);
     try {
-      await putFile(f, (frac) => setUpload(f.name, done + 1, files.length, overall(frac), Math.round(frac * 100)));
+      try { await putFile(f, prog, false); }
+      catch (e) {
+        // 409 = a file with this name already exists; the server refused to
+        // clobber it. Ask per file — declining skips just that file.
+        if (e.status !== 409) throw e;
+        if (!confirm('"' + f.name + '" already exists. Overwrite it?')) { skipped++; continue; }
+        await putFile(f, prog, true);
+      }
       done++;
     } catch (e) { hideUpload(); toast('Upload failed: ' + e.message, true); go(cwd); return; }
   }
   hideUpload();
-  toast('Uploaded ' + done + ' file(s)');
+  toast('Uploaded ' + done + ' file(s)' + (skipped ? ', skipped ' + skipped : ''));
   go(cwd);
 }
 
