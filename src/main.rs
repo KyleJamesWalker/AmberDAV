@@ -24,7 +24,7 @@
 //! `state::AppState`, hand it to `router::router()`, serve.
 
 mod auth;
-#[cfg(any(feature = "fb", feature = "sdl"))]
+#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
 mod bounce;
 mod canvas;
 mod cli;

@@ -1,7 +1,8 @@
 //! Gamepad/button input. On device builds we read `/dev/input/event*` via
 //! evdev and publish every event to a broadcast channel for the live web view.
-//! Without either the `fb` or `sdl` feature (desktop/server builds, dev
-//! machines) this compiles to a no-op stub.
+//! Without either the `fb` or `sdl` feature (desktop/server builds), or off
+//! Linux (where evdev does not exist — macOS/Windows dev machines building the
+//! device features), this compiles to a no-op stub.
 //!
 //! Buttons/keys arrive as `EV_KEY`; the d-pad and analog sticks arrive as
 //! `EV_ABS` absolute axes (e.g. ABS_HAT0X for the d-pad, ABS_X/Y for sticks),
@@ -43,7 +44,7 @@ pub struct InputKeys {
     pub bounce_enabled: bool,
 }
 
-#[cfg(any(feature = "fb", feature = "sdl"))]
+#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
 pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle, keys: InputKeys) {
     use evdev::EventSummary;
 
@@ -133,7 +134,7 @@ pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle
     }
 }
 
-#[cfg(not(any(feature = "fb", feature = "sdl")))]
+#[cfg(not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))))]
 pub fn spawn(
     _tx: broadcast::Sender<InputUpdate>,
     _mode: crate::screen::ModeHandle,

@@ -7,11 +7,15 @@
 //! See also — content: `canvas.rs` → choice: `display.rs` → sinks:
 //! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
-// On headless builds the canvas API is not called (the framebuffer/Wayland and
-// SDL sinks that consume it are only compiled with the `fb`/`sdl` features).
-// Suppress dead-code lints so that `cargo clippy -- -D warnings` stays clean on
-// every host without hiding real dead code on device builds.
-#![cfg_attr(not(any(feature = "fb", feature = "sdl")), allow(dead_code))]
+// On headless builds — and on non-Linux hosts, whatever the features — the
+// canvas API is not called (the framebuffer/Wayland and SDL sinks that consume
+// it are only compiled with the `fb`/`sdl` features on Linux). Suppress
+// dead-code lints so that `cargo clippy -- -D warnings` stays clean on every
+// host without hiding real dead code on device builds.
+#![cfg_attr(
+    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
+    allow(dead_code)
+)]
 
 use std::net::IpAddr;
 
