@@ -16,16 +16,33 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::{auth::Session, AppState};
 
+/// True when `seg` is a plain file name: no backslash or NUL, and it parses
+/// as exactly one `Normal` path component on this OS. The component check is
+/// what keeps `PathBuf::push` honest on Windows, where pushing a segment with
+/// a prefix (`C:`, `\\?\C:\x`) or a root *replaces* the base path instead of
+/// appending — handing out the whole drive. Rooted segments (`/etc`) and
+/// `.`/`..` parse as non-`Normal` components and are rejected the same way.
+fn plain_segment(seg: &str) -> bool {
+    if seg.contains('\\') || seg.contains('\0') {
+        return false;
+    }
+    let mut comps = Path::new(seg).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
 /// Resolve a request path (relative to root, `/`-separated) to an absolute
-/// path that is guaranteed to stay within `root`. No `..` is ever allowed.
+/// path that stays within `root`: every segment must be a plain name, so no
+/// `..`, no rooted or drive-letter segments, no separators.
 fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
     let mut out = root.to_path_buf();
     for seg in rel.split('/') {
         match seg {
             "" | "." => continue,
-            ".." => return None,
-            s if s.contains('\\') || s.contains('\0') => return None,
-            s => out.push(s),
+            s if plain_segment(s) => out.push(s),
+            _ => return None,
         }
     }
     Some(out)
@@ -33,13 +50,7 @@ fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
 
 /// Validate a single new file/dir name (no path separators or traversal).
 fn safe_name(name: &str) -> Option<&str> {
-    let bad = name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains('\0');
-    (!bad).then_some(name)
+    plain_segment(name).then_some(name)
 }
 
 fn ok() -> Response {
@@ -591,6 +602,30 @@ mod tests {
     }
 
     #[test]
+    fn resolve_blocks_windows_style_escapes() {
+        let root = Path::new("/srv/root");
+        // Backslash forms are rejected on every OS: drive-letter paths,
+        // `\\?\` verbatim prefixes, and backslash-rooted segments.
+        assert_eq!(resolve(root, "C:\\foo"), None);
+        assert_eq!(resolve(root, "\\\\?\\C:\\x"), None);
+        assert_eq!(resolve(root, "\\etc"), None);
+        assert_eq!(resolve(root, "a\\b"), None);
+        // NUL never makes a valid name.
+        assert_eq!(resolve(root, "a\0b"), None);
+        // A bare drive-letter segment parses as a Prefix component on
+        // Windows, where `PathBuf::push` would REPLACE the root with it
+        // (`GET /api/list?path=C:` serving the whole drive). On Unix `C:`
+        // is an ordinary file name and stays inside the root.
+        #[cfg(windows)]
+        assert_eq!(resolve(root, "C:"), None);
+        #[cfg(unix)]
+        assert_eq!(resolve(root, "C:"), Some(PathBuf::from("/srv/root/C:")));
+        // `/`-rooted input cannot escape: paths are split on `/`, so the
+        // empty leading segment is skipped and `etc` lands under the root.
+        assert_eq!(resolve(root, "/etc"), Some(PathBuf::from("/srv/root/etc")));
+    }
+
+    #[test]
     fn range_parsing() {
         assert_eq!(parse_range("bytes=0-99", 1000), Some(Ok((0, 99))));
         assert_eq!(parse_range("bytes=100-", 1000), Some(Ok((100, 999))));
@@ -610,6 +645,17 @@ mod tests {
         assert!(safe_name("../x").is_none());
         assert!(safe_name("a/b").is_none());
         assert!(safe_name("").is_none());
+        assert!(safe_name(".").is_none());
         assert!(safe_name("..").is_none());
+        assert!(safe_name("a\\b").is_none());
+        assert!(safe_name("a\0b").is_none());
+        assert!(safe_name("/etc").is_none());
+        // Drive-letter names: a Prefix component on Windows (where `join`
+        // would replace the base path), a plain file name elsewhere.
+        assert!(safe_name("C:\\foo").is_none());
+        #[cfg(windows)]
+        assert!(safe_name("C:").is_none());
+        #[cfg(unix)]
+        assert!(safe_name("C:").is_some());
     }
 }
