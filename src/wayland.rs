@@ -35,7 +35,7 @@ use smithay_client_toolkit::{
 };
 
 use crate::canvas::{black_canvas, info_canvas, Canvas};
-use crate::screen::{Mode, ModeHandle, Status};
+use crate::screen::{set_status, Mode, ModeHandle, Status};
 
 /// Entry point: open the compositor connection and run the paint loop. Returns
 /// only on error (so the caller can fall back / log). Blocks the calling thread.
@@ -140,12 +140,6 @@ struct App {
 }
 
 impl App {
-    fn set_status(&self, msg: String) {
-        if let Ok(mut s) = self.status.lock() {
-            *s = msg;
-        }
-    }
-
     fn build_canvas(&self) -> Canvas {
         let (w, h) = (self.width as usize, self.height as usize);
         let mode = self.mode.lock().map(|m| *m).unwrap_or(Mode::Info);
@@ -197,7 +191,7 @@ impl App {
                     self.buf_dims = (self.width, self.height);
                 }
                 Err(e) => {
-                    self.set_status(format!("wayland buffer: {e}"));
+                    set_status(&self.status, format!("wayland buffer: {e}"));
                     // Re-arm so we retry allocating next frame instead of
                     // freezing the screen.
                     surface.frame(qh, surface.clone());
@@ -224,19 +218,22 @@ impl App {
                     }
                 }
                 if let Err(e) = buffer.attach_to(&surface) {
-                    self.set_status(format!("wayland attach: {e}"));
+                    set_status(&self.status, format!("wayland attach: {e}"));
                 } else {
                     surface.damage_buffer(0, 0, w, h);
                     self.frame = self.frame.wrapping_add(1);
-                    self.set_status(format!(
-                        "ok (wayland {}x{}) frame={}",
-                        self.width, self.height, self.frame
-                    ));
+                    set_status(
+                        &self.status,
+                        format!(
+                            "ok (wayland {}x{}) frame={}",
+                            self.width, self.height, self.frame
+                        ),
+                    );
                 }
             }
             // The compositor still holds the buffer; skip this frame's paint and
             // retry on the next callback rather than freezing.
-            None => self.set_status("wayland: buffer busy, retrying".to_string()),
+            None => set_status(&self.status, "wayland: buffer busy, retrying".to_string()),
         }
 
         // Always re-arm the next callback and commit so the loop never stalls.

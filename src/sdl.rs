@@ -12,7 +12,7 @@
 #[cfg(feature = "sdl")]
 use crate::canvas::{black_canvas, info_canvas};
 #[cfg(feature = "sdl")]
-use crate::screen::{Mode, ModeHandle, Status};
+use crate::screen::{set_status, Mode, ModeHandle, Status};
 
 #[cfg(feature = "sdl")]
 use sdl2::event::Event;
@@ -79,13 +79,6 @@ pub fn run(
     Err(format!(
         "no usable SDL video driver (tried {candidates:?}): {last_err}"
     ))
-}
-
-#[cfg(feature = "sdl")]
-fn set_status(status: &Status, msg: String) {
-    if let Ok(mut s) = status.lock() {
-        *s = msg;
-    }
 }
 
 #[cfg(feature = "sdl")]
