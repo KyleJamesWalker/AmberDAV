@@ -857,6 +857,80 @@ fn parse_range(h: &str, total: u64) -> Option<Result<(u64, u64), ()>> {
     Some(Ok((start, end)))
 }
 
+/// Body-serving tail shared by `/api/raw` and `/api/download` (issue #29):
+/// open `path` and serve it honoring a single `Range` header — `206` +
+/// `Content-Range` when a satisfiable range applies (gated by `If-Range`, so
+/// bytes of two file versions are never spliced), `416` + `Content-Range:
+/// bytes */{total}` when one is present but unsatisfiable, else `200` with
+/// the whole body. Success responses advertise `Accept-Ranges: bytes`, carry
+/// `Content-Length`, and get the cache validators; the caller layers any
+/// per-endpoint headers (e.g. `Content-Disposition`) on top.
+async fn serve_ranged(
+    path: &Path,
+    total: u64,
+    ct: &str,
+    etag: &str,
+    modified: Option<std::time::SystemTime>,
+    headers: &HeaderMap,
+) -> Response {
+    // A Range only applies when its If-Range validator (if any) still matches
+    // the file — otherwise fall back to the full body, never mixed versions.
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| parse_range(h, total))
+        .filter(|_| if_range_matches(headers, etag, modified));
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(e) => return io_err(e),
+    };
+
+    match range {
+        Some(Ok((start, end))) => {
+            if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "seek failed").into_response();
+            }
+            let len = end - start + 1;
+            let body = Body::from_stream(tokio_util::io::ReaderStream::new(file.take(len)));
+            let resp = (
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    (header::CONTENT_TYPE, ct.to_string()),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (
+                        header::CONTENT_RANGE,
+                        format!("bytes {start}-{end}/{total}"),
+                    ),
+                    (header::CONTENT_LENGTH, len.to_string()),
+                ],
+                body,
+            )
+                .into_response();
+            with_cache_headers(resp, etag, modified)
+        }
+        Some(Err(())) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+        )
+            .into_response(),
+        None => {
+            let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
+            let resp = (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, ct.to_string()),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (header::CONTENT_LENGTH, total.to_string()),
+                ],
+                body,
+            )
+                .into_response();
+            with_cache_headers(resp, etag, modified)
+        }
+    }
+}
+
 /// Serve a file inline (for thumbnails and previews), honoring Range requests
 /// so the browser can seek video/audio. Responses carry cache validators
 /// (`ETag` from mtime+size, `Last-Modified`) and a matched conditional
@@ -898,62 +972,7 @@ pub async fn raw(
         return with_cache_headers(StatusCode::NOT_MODIFIED.into_response(), &etag, modified);
     }
 
-    // A Range only applies when its If-Range validator (if any) still matches
-    // the file — otherwise fall back to the full body, never mixed versions.
-    let range = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| parse_range(h, total))
-        .filter(|_| if_range_matches(&headers, &etag, modified));
-
-    let mut file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(e) => return io_err(e),
-    };
-
-    match range {
-        Some(Ok((start, end))) => {
-            if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "seek failed").into_response();
-            }
-            let len = end - start + 1;
-            let body = Body::from_stream(tokio_util::io::ReaderStream::new(file.take(len)));
-            let resp = (
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, ct.to_string()),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (
-                        header::CONTENT_RANGE,
-                        format!("bytes {start}-{end}/{total}"),
-                    ),
-                    (header::CONTENT_LENGTH, len.to_string()),
-                ],
-                body,
-            )
-                .into_response();
-            with_cache_headers(resp, &etag, modified)
-        }
-        Some(Err(())) => (
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            [(header::CONTENT_RANGE, format!("bytes */{total}"))],
-        )
-            .into_response(),
-        None => {
-            let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
-            let resp = (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, ct.to_string()),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (header::CONTENT_LENGTH, total.to_string()),
-                ],
-                body,
-            )
-                .into_response();
-            with_cache_headers(resp, &etag, modified)
-        }
-    }
+    serve_ranged(&path, total, ct, &etag, modified, &headers).await
 }
 
 // --- thumbnails (issue #28) ---------------------------------------------------
@@ -1225,10 +1244,18 @@ async fn build_zip(
     Ok(())
 }
 
+/// Download a file as an attachment, honoring `Range` so an interrupted
+/// transfer resumes where it died instead of re-reading the whole file off
+/// the SD card (issue #29). Shares the tested parse/seek/`take` machinery
+/// with `/api/raw` via [`serve_ranged`]; the validators it emits (`ETag`,
+/// `Last-Modified`) give download managers an `If-Range` token, so a resume
+/// of a since-changed file falls back to the full body rather than splicing
+/// two versions together.
 pub async fn download(
     _: Session,
     State(s): State<AppState>,
     Query(q): Query<PathQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let rel = q.path.unwrap_or_default();
     let Some(path) = resolve(&s.root, &rel) else {
@@ -1244,25 +1271,37 @@ pub async fn download(
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
-    let file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) => m,
         Err(e) => return io_err(e),
     };
-    let stream = tokio_util::io::ReaderStream::new(file);
-    (
-        [
-            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!(
-                    "attachment; filename=\"{}\"",
-                    fname.replace(['"', '\\'], "")
-                ),
-            ),
-        ],
-        Body::from_stream(stream),
+    if meta.is_dir() {
+        // Folders go through /api/zip; opening one here would only fail at
+        // first read, after the 200 and the attachment headers are long gone.
+        return bad("not a file");
+    }
+    let etag = etag_for(&meta, None);
+    let modified = meta.modified().ok();
+    let mut resp = serve_ranged(
+        &path,
+        meta.len(),
+        "application/octet-stream",
+        &etag,
+        modified,
+        &headers,
     )
-        .into_response()
+    .await;
+    // Attachment disposition on both the full (200) and partial (206) body —
+    // error responses (416, open/seek failures) must not invite a "save as".
+    if matches!(resp.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "attachment; filename=\"{}\"",
+            fname.replace(['"', '\\'], "")
+        )) {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    resp
 }
 
 #[cfg(test)]
