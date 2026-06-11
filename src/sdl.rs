@@ -49,7 +49,7 @@ pub fn run(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
-    config_error: Option<String>,
+    startup_error: Option<String>,
     shutdown: CancellationToken,
 ) -> Result<(), String> {
     let forced = std::env::var("SDL_VIDEODRIVER").ok();
@@ -66,7 +66,7 @@ pub fn run(
             &status,
             &mode,
             bounce_paths.clone(),
-            config_error.as_deref(),
+            startup_error.as_deref(),
             &shutdown,
         ) {
             Ok(()) => return Ok(()),
@@ -96,7 +96,7 @@ fn run_with_driver(
     status: &Status,
     mode: &ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
-    config_error: Option<&str>,
+    startup_error: Option<&str>,
     shutdown: &CancellationToken,
 ) -> Result<(), String> {
     let sdl = sdl2::init().map_err(|e| e.to_string())?;
@@ -166,7 +166,7 @@ fn run_with_driver(
                         crate::state::current_ip(),
                         port,
                         password.as_deref(),
-                        config_error,
+                        startup_error,
                     )
                     .px
                 }

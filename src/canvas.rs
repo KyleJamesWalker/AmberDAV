@@ -55,16 +55,20 @@ pub fn black_canvas(w: usize, h: usize) -> Canvas {
 }
 
 /// Build the connection-info canvas: IP, credentials, and a centered QR code.
-/// `w`/`h` are the logical (landscape-as-authored) dimensions. A broken config
-/// (`config_error`) is surfaced as a warning — on a handheld, stderr is
-/// invisible, so this screen is where a parse failure must show up (issue #19).
+/// `w`/`h` are the logical (landscape-as-authored) dimensions.
+///
+/// `startup_error` surfaces a startup problem (a broken config, issue #19; a
+/// failed bind, issue #35) — on a handheld, stderr is invisible, so this
+/// screen is where it must show up. The message's first line is the red
+/// headline (e.g. "Config error - using defaults"); any remaining text is the
+/// detail, wrapped below it in the muted colour.
 pub fn info_canvas(
     w: usize,
     h: usize,
     ip: IpAddr,
     port: u16,
     password: Option<&str>,
-    config_error: Option<&str>,
+    startup_error: Option<&str>,
 ) -> Canvas {
     let mut c = Canvas::filled(w, h, BG);
     let scale = (w / 240).max(2);
@@ -80,20 +84,17 @@ pub fn info_canvas(
     draw_text(&mut c, margin, y, "amber-dav  file access", scale, AMBER);
     y += line_h;
 
-    // Drawn before the Wi-Fi early-return so a config problem is diagnosable
-    // even with no network. The detail line carries the parser's line/column.
-    if let Some(err) = config_error {
-        draw_text(
-            &mut c,
-            margin,
-            y,
-            "Config error - using defaults",
-            scale,
-            DANGER,
-        );
+    // Drawn before the Wi-Fi early-return so a startup problem is diagnosable
+    // even with no network. The detail carries e.g. the config parser's
+    // line/column or the OS bind error.
+    if let Some(err) = startup_error {
+        let (head, detail) = err.split_once('\n').unwrap_or((err, ""));
+        draw_text(&mut c, margin, y, head, scale, DANGER);
         y += line_h;
         let cols = (w.saturating_sub(margin * 2) / (8 * scale)).max(8);
-        for line in wrap_chars(err, cols).into_iter().take(2) {
+        // The 8x8 font has no newline glyph; flatten any further line breaks.
+        let detail = detail.replace('\n', " ");
+        for line in wrap_chars(&detail, cols).into_iter().take(2) {
             draw_text(&mut c, margin, y, &line, scale, MUTED);
             y += line_h;
         }
@@ -224,10 +225,11 @@ mod tests {
         assert!(!c.px.contains(&DANGER), "warning drawn without an error");
     }
 
-    // A broken config must be visible on the device screen — stderr is
-    // invisible on a handheld launched from the menu (issue #19).
+    // A startup problem (broken config, failed bind) must be visible on the
+    // device screen — stderr is invisible on a handheld launched from the
+    // menu (issues #19, #35).
     #[test]
-    fn info_canvas_shows_config_error_warning() {
+    fn info_canvas_shows_startup_error_warning() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50));
         let c = info_canvas(
             480,
@@ -235,24 +237,52 @@ mod tests {
             ip,
             8080,
             Some("ab12"),
-            Some("config.json is invalid"),
+            Some("Config error - using defaults\nconfig.json is invalid"),
         );
-        assert!(c.px.contains(&DANGER), "config error warning not drawn");
+        assert!(c.px.contains(&DANGER), "startup error headline not drawn");
+    }
+
+    // The first message line is the headline; the rest is detail drawn below
+    // it — so a canvas with detail must differ from a headline-only one.
+    #[test]
+    fn info_canvas_draws_the_error_detail_below_the_headline() {
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50));
+        let with_detail = info_canvas(
+            480,
+            320,
+            ip,
+            8080,
+            Some("ab12"),
+            Some("Cannot start server\nport 8080 already in use"),
+        );
+        let head_only = info_canvas(
+            480,
+            320,
+            ip,
+            8080,
+            Some("ab12"),
+            Some("Cannot start server"),
+        );
+        assert!(with_detail.px.contains(&DANGER));
+        assert_ne!(
+            with_detail.px, head_only.px,
+            "the detail line should be drawn"
+        );
     }
 
     // The warning must also show while waiting for Wi-Fi — a user diagnosing
     // their config should not need a network connection first.
     #[test]
-    fn info_canvas_shows_config_error_even_without_ip() {
+    fn info_canvas_shows_startup_error_even_without_ip() {
         let c = info_canvas(
             480,
             320,
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             8080,
             None,
-            Some("config.json is invalid"),
+            Some("Config error - using defaults\nconfig.json is invalid"),
         );
-        assert!(c.px.contains(&DANGER), "config error warning not drawn");
+        assert!(c.px.contains(&DANGER), "startup error headline not drawn");
     }
 
     #[test]

@@ -220,6 +220,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     print_banner(ip, port, &root, &password);
+    // On-screen startup-error text: the first line is the red headline, the
+    // rest the detail (the `canvas::info_canvas` contract).
+    let screen_error = config_error
+        .as_ref()
+        .map(|e| format!("Config error - using defaults\n{e}"));
     // Paint the connection info + QR onto the device screen (password hidden
     // when configured, but only ever allowed when it's a fixed password).
     screen::show(
@@ -228,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         screen_status,
         screen_mode,
         bounce_paths,
-        config_error,
+        screen_error,
         shutdown.clone(),
     );
 
