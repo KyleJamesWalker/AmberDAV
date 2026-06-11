@@ -408,6 +408,7 @@ let clipboard = null;             // { mode:'cut'|'copy', paths:[fullpath...] }
 let viewMode = 'list';            // 'list' | 'grid'
 let sortKey = 'name', sortDir = 1;
 let lastIndex = null;             // for shift-range selection
+const rowEls = new Map();         // name → row/card element, for selection-only updates (issue #41)
 let perm = 'read_write';          // live permission level from settings
 let defaultFolder = '';           // folder to open after login
 let editing = null;               // entry currently open in the text editor
@@ -528,16 +529,26 @@ function renderCrumbs() {
 }
 
 function attachRowEvents(el, e, idx) {
+  rowEls.set(e.name, el);         // selection updates re-style this element in place
   el.dataset.idx = idx;           // lets the long-press recognizer map element → view[idx]
   // In select mode every click/tap toggles — double-click open is off, like
   // iOS Files; use the Open button (or leave select mode) to enter folders.
   el.onclick = (ev) => { if (!selectMode && ev.detail >= 2) { onRowOpen(e); return; } onRowClick(ev, e, idx); };
   el.oncontextmenu = (ev) => { ev.preventDefault();
-    if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; render(); syncToolbar(); }
+    if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; syncSelection(); syncToolbar(); }
     openMenu(ev.clientX, ev.clientY); };
 }
 
-function render() { viewMode === 'grid' ? renderGrid() : renderList(); }
+function render() { rowEls.clear(); viewMode === 'grid' ? renderGrid() : renderList(); }
+
+// Selection-only repaint (issue #41): toggle the `sel` class on the existing
+// rows/cards instead of rebuilding the whole DOM — in a 3,000-entry folder a
+// full render() per click is hundreds of ms of layout jank on a phone. Full
+// render() remains for anything that changes row content or order (listing,
+// sort, view mode, the select-mode checkboxes).
+function syncSelection() {
+  rowEls.forEach((el, name) => el.classList.toggle('sel', selection.has(name)));
+}
 
 function renderList() {
   const arrow = (k) => sortKey === k ? `<span class="arrow">${sortDir>0?'▲':'▼'}</span>` : '';
@@ -588,7 +599,15 @@ function renderGrid() {
 
 function setSort(k) {
   if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
-  sortView(); render();
+  // Keep the shift-range anchor on the same *entry* across the re-sort: the
+  // anchor is an index into `view`, so re-sorting under it would silently
+  // re-point it at whatever row landed there and the next shift-click would
+  // select a wrong contiguous range (issue #41).
+  const anchor = lastIndex !== null && view[lastIndex] ? view[lastIndex].name : null;
+  sortView();
+  lastIndex = anchor !== null ? view.findIndex(e => e.name === anchor) : null;
+  if (lastIndex === -1) lastIndex = null;
+  render();
 }
 function setView(v) {
   viewMode = v; $('v-list').classList.toggle('on', v === 'list'); $('v-grid').classList.toggle('on', v === 'grid');
@@ -640,7 +659,7 @@ function onRowClick(ev, e, idx) {
   } else if (ev.ctrlKey || ev.metaKey) {
     selection.has(e.name) ? selection.delete(e.name) : selection.add(e.name); lastIndex = idx;
   } else { selection = new Set([e.name]); lastIndex = idx; }
-  render(); syncToolbar();
+  syncSelection(); syncToolbar();
 }
 function onRowOpen(e) {
   if (e.dir) go(join(cwd, e.name));
@@ -1006,8 +1025,8 @@ function fireLP() {
     const idx = +row.dataset.idx, e = view[idx];
     // Same rule as right-click: pressing outside the selection refocuses it,
     // pressing inside keeps the multi-selection for a bulk action.
-    if (e && !selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; render(); syncToolbar(); }
-  } else { selection = new Set(); render(); syncToolbar(); }   // background press, like blank-space right-click
+    if (e && !selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; syncSelection(); syncToolbar(); }
+  } else { selection = new Set(); syncSelection(); syncToolbar(); }   // background press, like blank-space right-click
   openMenu(x, y);
 }
 const lw = $('listwrap');
@@ -1225,9 +1244,9 @@ window.addEventListener('beforeunload', (e) => {
 // click-away to clear selection / close menu
 document.addEventListener('click', (e) => { closeMenu();
   if (e.target.closest('#view-files .listwrap') && !e.target.closest('tr') && !e.target.closest('.gcard')) {
-    selection = new Set(); render(); syncToolbar(); } });
+    selection = new Set(); syncSelection(); syncToolbar(); } });
 $('listwrap').oncontextmenu = (e) => { if (!e.target.closest('tr') && !e.target.closest('.gcard')) {
-  e.preventDefault(); selection = new Set(); render(); syncToolbar(); openMenu(e.clientX, e.clientY); } };
+  e.preventDefault(); selection = new Set(); syncSelection(); syncToolbar(); openMenu(e.clientX, e.clientY); } };
 
 // drag & drop upload
 const main = document.querySelector('main'); let dragDepth = 0;
