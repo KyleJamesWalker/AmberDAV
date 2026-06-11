@@ -9,6 +9,9 @@
 //!
 //! If the image comes out rotated on a given panel, set the env var
 //! `AMBERDAV_FB_ROTATE` to 90, 180, or 270.
+//!
+//! See also — content: `canvas.rs` → choice: `display.rs` → sinks:
+//! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
 use std::sync::{Arc, Mutex};
 

@@ -5,6 +5,9 @@
 //! — `x11` (Xwayland, which Steam foregrounds) on the Deck, the `mali` vendor
 //! driver on Anbernic. Compiled only with the `sdl` feature; links the system
 //! libSDL2 dynamically so each device's own driver is available at runtime.
+//!
+//! See also — content: `canvas.rs` → choice: `display.rs` → sinks:
+//! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
 #[cfg(feature = "sdl")]
 use crate::canvas::{black_canvas, info_canvas};

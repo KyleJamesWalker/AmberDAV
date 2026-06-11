@@ -5,6 +5,9 @@
 //!
 //! Software buffers only (no GPU/EGL), so `smithay-client-toolkit` stays on its
 //! default pure-Rust backend and the static musl binary keeps working.
+//!
+//! See also — content: `canvas.rs` → choice: `display.rs` → sinks:
+//! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
 use smithay_client_toolkit::reexports::client::{
     globals::registry_queue_init,
