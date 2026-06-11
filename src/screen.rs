@@ -147,7 +147,6 @@ fn show_framebuffer(
 ) {
     use std::{thread, time::Duration};
 
-    let pw = password;
     // Background thread: keep the screen painted in case the text console
     // cursor (or anything else) overwrites the framebuffer.
     thread::spawn(move || match framebuffer::Framebuffer::new("/dev/fb0") {
@@ -164,42 +163,31 @@ fn show_framebuffer(
             let mut page = 0usize;
             let mut frame = 0u64;
             let mut last_mode: Option<Mode> = None;
-            let mut bounce = crate::bounce::Bounce::new(bounce_paths);
+            let mut source = crate::render::FrameSource::new(
+                port,
+                password,
+                startup_error,
+                Some(crate::bounce::Bounce::new(bounce_paths)),
+            );
 
             loop {
                 let mode = mode.lock().map(|m| *m).unwrap_or(Mode::Info);
                 let changed = last_mode != Some(mode);
 
-                // Info/Black are static: only repaint on a mode change or every
-                // couple of seconds (to re-latch). Bounce animates every frame.
+                // Info/Black are static: only re-blit on a mode change or every
+                // couple of seconds (deliberate — the console cursor stomps the
+                // fb, so the periodic re-latch stays). Bounce animates every
+                // frame. The blit reuses the FrameSource's cached canvas; the
+                // QR/info render itself only re-runs when the mode, dims, or
+                // IP actually changed (issue #39).
                 let render = match mode {
                     Mode::Bounce => true,
                     _ => changed || frame.is_multiple_of(40),
                 };
 
                 if render {
-                    let canvas = match mode {
-                        Mode::Info => {
-                            // Re-query the IP each paint so the screen recovers
-                            // once Wi-Fi connects after launch.
-                            let ip = crate::state::current_ip();
-                            crate::canvas::info_canvas(
-                                geom.lw,
-                                geom.lh,
-                                ip,
-                                port,
-                                pw.as_deref(),
-                                startup_error.as_deref(),
-                            )
-                            .px
-                        }
-                        Mode::Black => crate::canvas::black_canvas(geom.lw, geom.lh).px,
-                        Mode::Bounce => {
-                            bounce.step(geom.lw, geom.lh);
-                            bounce.canvas(geom.lw, geom.lh)
-                        }
-                    };
-                    match imp::commit(&mut fb, &geom, &canvas, page) {
+                    let (_, canvas) = source.frame(mode, geom.lw, geom.lh);
+                    match imp::commit(&mut fb, &geom, canvas, page) {
                         Ok(info) => set_status(&status, format!("ok ({info}) mode={mode:?}")),
                         Err(e) => {
                             set_status(&status, format!("render failed: {e}"));

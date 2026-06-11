@@ -34,6 +34,7 @@ mod display;
 mod files;
 mod input;
 mod password;
+mod render;
 mod router;
 mod screen;
 #[cfg(all(target_os = "linux", feature = "sdl"))]
