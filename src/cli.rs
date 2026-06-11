@@ -251,4 +251,156 @@ mod tests {
         assert!(parse_u16_list("").is_empty());
         assert!(parse_u16_list("abc").is_empty());
     }
+
+    /// Parse a CLI invocation (argv[0] included automatically).
+    fn cli(args: &[&str]) -> Cli {
+        Cli::parse_from(std::iter::once("amber-dav").chain(args.iter().copied()))
+    }
+
+    /// A fake process environment backed by a slice of pairs.
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    // The documented ladder, per field: CLI flag > env var > config file >
+    // compiled default.
+    #[test]
+    fn precedence_is_cli_env_file_default() {
+        let file = Settings {
+            root: Some("file-root".to_string()),
+            port: Some(1111),
+            bind: Some("10.0.0.1".to_string()),
+            ..Settings::default()
+        };
+        let env = [("AMBERDAV_ROOT", "env-root"), ("AMBERDAV_PORT", "2222")];
+
+        // CLI beats env (root); env beats file (port); file survives when
+        // neither CLI nor env supplies a value (bind).
+        let s = cli(&["--root", "cli-root"]).resolve_with(file.clone(), env_of(&env));
+        assert_eq!(s.root.as_deref(), Some("cli-root"));
+        assert_eq!(s.port, Some(2222));
+        assert_eq!(s.bind.as_deref(), Some("10.0.0.1"));
+
+        // No CLI: env wins over the file.
+        let s = cli(&[]).resolve_with(file.clone(), env_of(&env));
+        assert_eq!(s.root.as_deref(), Some("env-root"));
+
+        // Nothing set anywhere: the compiled default (None here) holds.
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&[]));
+        assert_eq!(s.root, None);
+        assert_eq!(s.port, None);
+        assert_eq!(s.permission, Permission::ReadWrite);
+    }
+
+    // The positional `root`/`port` aliases participate in the CLI layer, but
+    // the named flags outrank them.
+    #[test]
+    fn positional_args_count_as_cli_but_flags_win() {
+        let s = cli(&["pos-root", "9000"]).resolve_with(Settings::default(), env_of(&[]));
+        assert_eq!(s.root.as_deref(), Some("pos-root"));
+        assert_eq!(s.port, Some(9000));
+
+        let s = cli(&["pos-root", "9000", "--root", "flag-root", "--port", "9001"])
+            .resolve_with(Settings::default(), env_of(&[]));
+        assert_eq!(s.root.as_deref(), Some("flag-root"));
+        assert_eq!(s.port, Some(9001));
+
+        // Positionals still beat the environment.
+        let s = cli(&["pos-root"]).resolve_with(
+            Settings::default(),
+            env_of(&[("AMBERDAV_ROOT", "env-root")]),
+        );
+        assert_eq!(s.root.as_deref(), Some("pos-root"));
+    }
+
+    // AMBERDAV_PORT outranks the generic PORT, which is honoured as the
+    // container-friendly fallback.
+    #[test]
+    fn amberdav_port_beats_generic_port() {
+        let both = [("AMBERDAV_PORT", "2222"), ("PORT", "3333")];
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&both));
+        assert_eq!(s.port, Some(2222));
+
+        let generic = [("PORT", "3333")];
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&generic));
+        assert_eq!(s.port, Some(3333));
+    }
+
+    // An env var that is set but empty (or unparseable) must not mask the
+    // config file's value.
+    #[test]
+    fn empty_or_garbage_env_values_are_ignored() {
+        let file = Settings {
+            root: Some("file-root".to_string()),
+            port: Some(1111),
+            ..Settings::default()
+        };
+        let env = [
+            ("AMBERDAV_ROOT", ""),
+            ("AMBERDAV_PORT", "not-a-port"),
+            ("AMBERDAV_DISPLAY_PASSWORD", "maybe"),
+            ("AMBERDAV_BLANK_KEYS", "abc,def"),
+        ];
+        let s = cli(&[]).resolve_with(file, env_of(&env));
+        assert_eq!(s.root.as_deref(), Some("file-root"));
+        assert_eq!(s.port, Some(1111));
+        // Unparseable bool/list values are treated as unset, not as false/empty.
+        assert!(s.display_password);
+        assert_eq!(s.blank_keys, Settings::default().blank_keys);
+    }
+
+    // Boolean env spellings, and the --flag/--no-flag pair outranking them.
+    #[test]
+    fn bool_env_spellings_and_cli_override() {
+        for (val, want) in [("1", true), ("on", true), ("FALSE", false), ("no", false)] {
+            let env = [("AMBERDAV_DISPLAY_PASSWORD", val)];
+            let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+            assert_eq!(s.display_password, want, "value {val:?}");
+        }
+
+        // The CLI flag wins over a contradicting env var.
+        let env = [("AMBERDAV_DISPLAY_PASSWORD", "true")];
+        let s = cli(&["--no-display-password"]).resolve_with(Settings::default(), env_of(&env));
+        assert!(!s.display_password);
+    }
+
+    // The permission ladder resolves through every layer, including the
+    // value-enum spelling used by both the env var and the flag.
+    #[test]
+    fn permission_resolves_through_the_layers() {
+        let env = [("AMBERDAV_PERMISSION", "read_only")];
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        assert_eq!(s.permission, Permission::ReadOnly);
+
+        let s = cli(&["--permission", "read_write_delete"])
+            .resolve_with(Settings::default(), env_of(&env));
+        assert_eq!(s.permission, Permission::ReadWriteDelete);
+
+        // Garbage env spelling: ignored, file/default holds.
+        let env = [("AMBERDAV_PERMISSION", "rwx")];
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        assert_eq!(s.permission, Permission::ReadWrite);
+    }
+
+    // Key-code lists: the plural var wins, the legacy singular AMBERDAV_EXIT_KEY
+    // is still honoured, and a no-usable-codes value cannot blank a config list.
+    #[test]
+    fn exit_key_lists_and_legacy_singular() {
+        let env = [("AMBERDAV_EXIT_KEYS", "1, 2"), ("AMBERDAV_EXIT_KEY", "9")];
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        assert_eq!(s.exit_keys, vec![1, 2]);
+
+        let env = [("AMBERDAV_EXIT_KEY", "9")];
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        assert_eq!(s.exit_keys, vec![9]);
+
+        let env = [("AMBERDAV_EXIT_KEYS", "nope")];
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        assert_eq!(s.exit_keys, Settings::default().exit_keys);
+    }
 }

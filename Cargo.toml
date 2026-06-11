@@ -40,6 +40,13 @@ jsonc-parser = { version = "0.32.4", features = ["serde"] }
 # only, so the static musl builds keep working.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
+# Test-only: drive the full router through `tower::ServiceExt::oneshot` (no
+# socket, no process) and collect response bodies. Both are already in the
+# dependency graph via axum, so this adds no new code to vendor.
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
 # On-device builds come in two shapes, each selected by its own feature. Both
 # pull in the same substrate — gamepad input, the screen Mode state machine, the
 # DVD-bounce screensaver, and config-beside-the-binary — and differ only in the

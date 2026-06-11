@@ -94,3 +94,51 @@ fn authorized(req: &Request, password: &str) -> bool {
 
     matches!(text.split_once(':'), Some((_, pass)) if pass == password)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::method_allowed;
+    use crate::config::Permission;
+
+    // The full method × permission table. Every WebDAV write method must be
+    // listed here with `false` under read_only — a method missing from the
+    // gate in `method_allowed` would show up as an unexpected `true`.
+    #[test]
+    fn method_gate_matches_the_permission_ladder() {
+        // (method, allowed at: read_only, read_write, read_write_delete)
+        let table = [
+            // Read methods pass at every level.
+            ("GET", true, true, true),
+            ("HEAD", true, true, true),
+            ("OPTIONS", true, true, true),
+            ("PROPFIND", true, true, true),
+            // Write methods need read_write.
+            ("PUT", false, true, true),
+            ("MKCOL", false, true, true),
+            ("MOVE", false, true, true),
+            ("COPY", false, true, true),
+            ("PROPPATCH", false, true, true),
+            ("LOCK", false, true, true),
+            ("UNLOCK", false, true, true),
+            // Delete needs the full read_write_delete level.
+            ("DELETE", false, false, true),
+        ];
+        for (method, ro, rw, rwd) in table {
+            assert_eq!(
+                method_allowed(method, Permission::ReadOnly),
+                ro,
+                "{method} at read_only"
+            );
+            assert_eq!(
+                method_allowed(method, Permission::ReadWrite),
+                rw,
+                "{method} at read_write"
+            );
+            assert_eq!(
+                method_allowed(method, Permission::ReadWriteDelete),
+                rwd,
+                "{method} at read_write_delete"
+            );
+        }
+    }
+}
