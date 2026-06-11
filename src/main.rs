@@ -220,6 +220,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     print_banner(ip, port, &root, &password);
+
+    // Bind BEFORE painting the device screen: a failed bind must not flash the
+    // normal info screen (which implies the server is up) and then dump the
+    // user back at the OS menu with the only evidence buried in log.txt. On
+    // failure the same screen machinery paints the error instead, holds it
+    // long enough to read, then exits (issue #35).
+    let listener = match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            let msg = bind_error_message(&bind, port, &e);
+            eprintln!("{msg}");
+            screen::show(
+                port,
+                None,
+                screen_status,
+                screen_mode,
+                Vec::new(),
+                Some(format!("Cannot start server\n{msg}")),
+                shutdown,
+            );
+            // Give a handheld user time to read the panel before the process
+            // (and with it the screen) is gone; headless builds exit at once.
+            #[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            std::process::exit(1);
+        }
+    };
+
     // On-screen startup-error text: the first line is the red headline, the
     // rest the detail (the `canvas::info_canvas` contract).
     let screen_error = config_error
@@ -236,8 +264,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         screen_error,
         shutdown.clone(),
     );
-
-    let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
     // `with_connect_info` exposes the TCP peer address to the handlers — the
     // key for per-IP login throttling (issue #27). The server is direct-serve
     // (no reverse proxy in the normal deployment), so the socket address is
@@ -280,6 +306,20 @@ fn ensure_default_config(path: &std::path::Path) -> Option<String> {
 #[cfg(not(any(feature = "fb", feature = "sdl")))]
 fn ensure_default_config(_path: &std::path::Path) -> Option<String> {
     None
+}
+
+/// Friendly description of a TCP bind failure. The raw OS error alone
+/// (`Os { code: 48, kind: AddrInUse }`) gives no clue what to do about it, so
+/// name the likely cause and the knob that changes it: the port being taken
+/// by another instance, or a bad `--bind` address (which surfaces as a
+/// parse/lookup failure) (issue #35).
+fn bind_error_message(bind: &str, port: u16, e: &std::io::Error) -> String {
+    let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
+        "is another instance running? (change with --port / config \"port\")"
+    } else {
+        "check the bind address and port (--bind / --port, config \"bind\" / \"port\")"
+    };
+    format!("cannot listen on {bind}:{port}: {e} — {hint}")
 }
 
 fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
@@ -395,6 +435,46 @@ mod tests {
             waited.is_err(),
             "shutdown_requested resolved with no signal and no cancellation"
         );
+    }
+
+    // The raw OS error for a taken port is useless on a handheld; the message
+    // must name the likely cause and the knob that changes it (issue #35).
+    #[test]
+    fn bind_error_for_port_in_use_suggests_another_instance() {
+        let e = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+        let msg = bind_error_message("0.0.0.0", 8080, &e);
+        assert!(msg.starts_with("cannot listen on 0.0.0.0:8080:"), "{msg}");
+        assert!(msg.contains("another instance"), "{msg}");
+        assert!(msg.contains("--port"), "{msg}");
+    }
+
+    // An unparseable --bind fails the same call with a different kind; the
+    // hint must point at the bind address, not at a phantom other instance.
+    #[test]
+    fn bind_error_for_bad_address_points_at_bind() {
+        let e = std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "failed to lookup address information",
+        );
+        let msg = bind_error_message("not-an-ip", 8080, &e);
+        assert!(msg.contains("not-an-ip:8080"), "{msg}");
+        assert!(msg.contains("--bind"), "{msg}");
+        assert!(!msg.contains("another instance"), "{msg}");
+    }
+
+    // End to end on a real socket: a port that is actually taken produces the
+    // "another instance" wording.
+    #[tokio::test]
+    async fn binding_a_taken_port_yields_the_friendly_message() {
+        let first = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind an ephemeral port");
+        let port = first.local_addr().expect("local addr").port();
+        let err = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect_err("second bind of the same port must fail");
+        let msg = bind_error_message("127.0.0.1", port, &err);
+        assert!(msg.contains("another instance"), "{msg}");
     }
 
     // First-run config handling on device builds: a failed write must be
