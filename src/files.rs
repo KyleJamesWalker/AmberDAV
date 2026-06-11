@@ -86,13 +86,38 @@ fn forbidden() -> Response {
     (StatusCode::FORBIDDEN, "operation not permitted".to_string()).into_response()
 }
 
+fn conflict(msg: String) -> Response {
+    (StatusCode::CONFLICT, msg).into_response()
+}
+
 fn io_err(e: std::io::Error) -> Response {
     let code = match e.kind() {
         std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
         std::io::ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+        std::io::ErrorKind::AlreadyExists => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (code, e.to_string()).into_response()
+}
+
+/// True when `a` and `b` are the same directory entry (same device + inode).
+/// Used by [`rename`] to let case-only renames through on case-insensitive
+/// filesystems, where looking up the new name "finds" the source itself.
+#[cfg(unix)]
+async fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (
+        tokio::fs::symlink_metadata(a).await,
+        tokio::fs::symlink_metadata(b).await,
+    ) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+async fn same_entry(_a: &Path, _b: &Path) -> bool {
+    false
 }
 
 // --- list -------------------------------------------------------------------
@@ -243,7 +268,22 @@ pub async fn rename(_: Session, State(s): State<AppState>, Json(b): Json<RenameB
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
-    match tokio::fs::rename(parent.join(fname), parent.join(name)).await {
+    // Renaming to the current name is a no-op (the client filters this out,
+    // but keep the server honest rather than reporting a self-collision).
+    if std::ffi::OsStr::new(name) == fname {
+        return ok();
+    }
+    let (src, dst) = (parent.join(fname), parent.join(name));
+    // `tokio::fs::rename` silently clobbers an existing destination, so a
+    // rename to a taken name must not destroy that entry (issue #23). There
+    // is no overwrite escape hatch here — the client surfaces the 409 and the
+    // user picks a different name. Same-entry pairs are allowed so case-only
+    // renames still work on case-insensitive filesystems (e.g. macOS), where
+    // the destination lookup finds the source itself.
+    if tokio::fs::symlink_metadata(&dst).await.is_ok() && !same_entry(&src, &dst).await {
+        return conflict(format!("already exists: {name}"));
+    }
+    match tokio::fs::rename(src, dst).await {
         Ok(()) => ok(),
         Err(e) => io_err(e),
     }
@@ -255,33 +295,140 @@ pub async fn rename(_: Session, State(s): State<AppState>, Json(b): Json<RenameB
 pub struct TransferBody {
     srcs: Vec<String>,
     dest: String,
+    /// Replace existing destination entries instead of failing with 409.
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// Why [`plan_transfer`] refused a move/copy request; the handlers map each
+/// variant onto an HTTP response.
+#[derive(Debug)]
+enum PlanError {
+    /// The request can never succeed (bad path, same file, folder into
+    /// itself) — `overwrite` does not help. 400.
+    Bad(String),
+    /// Destination names already exist; a retry with `overwrite=true` will
+    /// replace them. 409.
+    Conflict(String),
+    Io(std::io::Error),
+}
+
+impl PlanError {
+    fn into_response(self) -> Response {
+        match self {
+            PlanError::Bad(m) => (StatusCode::BAD_REQUEST, m).into_response(),
+            PlanError::Conflict(m) => conflict(m),
+            PlanError::Io(e) => io_err(e),
+        }
+    }
+}
+
+/// Resolve and validate a move/copy request into concrete `(src, dst)` jobs
+/// **before** any filesystem mutation, so a rejected batch leaves the tree
+/// untouched and a client retry with `overwrite=true` simply redoes the whole
+/// batch. Guards against silent data loss (issue #23):
+///
+/// - same file: `std::fs::copy(x, x)` truncates `x` to zero bytes, so a copy
+///   onto itself is rejected outright — `overwrite` does not bypass this, and
+///   the comparison runs on canonicalized paths so a symlink alias of the
+///   source is caught too. A *move* onto itself is a harmless no-op and is
+///   skipped instead.
+/// - folder into itself: copying `d` into `d` would recurse forever
+///   (`d/d/d/…`); moving it there can never succeed. Rejected.
+/// - collisions: an existing destination entry is only replaced when the
+///   client explicitly passed `overwrite=true`; otherwise the batch fails
+///   with 409 naming every conflicting entry.
+///
+/// `copy_mode` mirrors how the operation treats the source leaf: copy reads
+/// *through* a symlinked source (confine the full path), move renames the
+/// leaf entry as-is (confine only the parent).
+async fn plan_transfer(
+    root: &Path,
+    srcs: &[String],
+    dest: &str,
+    overwrite: bool,
+    copy_mode: bool,
+) -> Result<Vec<(PathBuf, PathBuf)>, PlanError> {
+    let invalid = |m: &str| PlanError::Bad(m.to_string());
+    let destdir = resolve(root, dest).ok_or_else(|| invalid("invalid destination"))?;
+    let destdir = confine(root, &destdir).await.map_err(PlanError::Io)?;
+    let mut jobs = Vec::new();
+    let mut conflicts: Vec<String> = Vec::new();
+    for src in srcs {
+        let sp = resolve(root, src).ok_or_else(|| invalid("invalid source"))?;
+        // The destination entry keeps the name the user selected, not a link
+        // target's.
+        let Some(fname) = sp.file_name().map(std::ffi::OsStr::to_os_string) else {
+            return Err(invalid("invalid source"));
+        };
+        let sp = if copy_mode {
+            confine(root, &sp).await.map_err(PlanError::Io)?
+        } else {
+            let Some(parent) = sp.parent() else {
+                return Err(invalid("invalid source"));
+            };
+            confine(root, parent)
+                .await
+                .map_err(PlanError::Io)?
+                .join(&fname)
+        };
+        let dst = destdir.join(&fname);
+        let name = fname.to_string_lossy();
+        if dst == sp {
+            if copy_mode {
+                return Err(PlanError::Bad(format!(
+                    "source and destination are the same: {name}"
+                )));
+            }
+            // Moving an entry into the folder it is already in: nothing to do.
+            continue;
+        }
+        if dst.starts_with(&sp) {
+            let verb = if copy_mode { "copy" } else { "move" };
+            return Err(PlanError::Bad(format!(
+                "cannot {verb} a folder into itself: {name}"
+            )));
+        }
+        if tokio::fs::symlink_metadata(&dst).await.is_ok() {
+            // An entry with this name already exists at the destination. If
+            // it is the source itself behind a symlink, overwriting it would
+            // still copy the file onto itself — reject exactly like
+            // `dst == sp` above instead of treating it as a collision.
+            if copy_mode {
+                if let Ok(real) = tokio::fs::canonicalize(&dst).await {
+                    if real == sp {
+                        return Err(PlanError::Bad(format!(
+                            "source and destination are the same: {name}"
+                        )));
+                    }
+                }
+            }
+            if !overwrite {
+                conflicts.push(name.into_owned());
+                continue;
+            }
+        }
+        jobs.push((sp, dst));
+    }
+    if !conflicts.is_empty() {
+        return Err(PlanError::Conflict(format!(
+            "already exists: {}",
+            conflicts.join(", ")
+        )));
+    }
+    Ok(jobs)
 }
 
 pub async fn move_(_: Session, State(s): State<AppState>, Json(b): Json<TransferBody>) -> Response {
     if !s.permission().can_write() {
         return forbidden();
     }
-    let Some(destdir) = resolve(&s.root, &b.dest) else {
-        return bad("invalid destination");
+    let jobs = match plan_transfer(&s.root, &b.srcs, &b.dest, b.overwrite, false).await {
+        Ok(jobs) => jobs,
+        Err(e) => return e.into_response(),
     };
-    let destdir = match confine(&s.root, &destdir).await {
-        Ok(p) => p,
-        Err(e) => return io_err(e),
-    };
-    for src in &b.srcs {
-        let Some(sp) = resolve(&s.root, src) else {
-            return bad("invalid source");
-        };
-        // Confine the source's parent: rename moves the leaf entry itself
-        // (a symlink is moved as a link, never followed).
-        let (Some(parent), Some(fname)) = (sp.parent(), sp.file_name()) else {
-            return bad("invalid source");
-        };
-        let sp = match confine(&s.root, parent).await {
-            Ok(p) => p.join(fname),
-            Err(e) => return io_err(e),
-        };
-        if let Err(e) = tokio::fs::rename(&sp, destdir.join(fname)).await {
+    for (sp, dst) in jobs {
+        if let Err(e) = tokio::fs::rename(&sp, &dst).await {
             return io_err(e);
         }
     }
@@ -292,30 +439,10 @@ pub async fn copy(_: Session, State(s): State<AppState>, Json(b): Json<TransferB
     if !s.permission().can_write() {
         return forbidden();
     }
-    let Some(destdir) = resolve(&s.root, &b.dest) else {
-        return bad("invalid destination");
+    let jobs = match plan_transfer(&s.root, &b.srcs, &b.dest, b.overwrite, true).await {
+        Ok(jobs) => jobs,
+        Err(e) => return e.into_response(),
     };
-    let destdir = match confine(&s.root, &destdir).await {
-        Ok(p) => p,
-        Err(e) => return io_err(e),
-    };
-    let mut jobs = Vec::new();
-    for src in &b.srcs {
-        let Some(sp) = resolve(&s.root, src) else {
-            return bad("invalid source");
-        };
-        // The copy reads through the leaf (a symlinked file copies its
-        // target's bytes), so confine the full source path. The destination
-        // entry keeps the name the user selected, not the link target's.
-        let Some(fname) = sp.file_name().map(std::ffi::OsStr::to_os_string) else {
-            return bad("invalid source");
-        };
-        let sp = match confine(&s.root, &sp).await {
-            Ok(p) => p,
-            Err(e) => return io_err(e),
-        };
-        jobs.push((sp, destdir.join(fname)));
-    }
     // Recursive copy can be heavy; run it off the async runtime.
     let res = tokio::task::spawn_blocking(move || {
         for (src, dst) in jobs {
@@ -354,6 +481,9 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 pub struct UploadQuery {
     path: String,
     name: String,
+    /// Replace an existing file instead of failing with 409.
+    #[serde(default)]
+    overwrite: bool,
 }
 
 pub async fn upload(
@@ -372,8 +502,27 @@ pub async fn upload(
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
-    let mut file = match tokio::fs::File::create(dir.join(name)).await {
+    // `File::create` would silently truncate an existing file (issue #23):
+    // dropping `config.json` onto a folder that already has one must not
+    // destroy the old file without consent. Without `overwrite`, demand a
+    // brand-new entry (`create_new` = O_EXCL, which also refuses to write
+    // through a pre-planted symlink) and let the client turn the resulting
+    // 409 into an overwrite prompt.
+    let target = dir.join(name);
+    let file = if q.overwrite {
+        tokio::fs::File::create(&target).await
+    } else {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .await
+    };
+    let mut file = match file {
         Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return conflict(format!("already exists: {name}"));
+        }
         Err(e) => return io_err(e),
     };
     let mut stream = body.into_data_stream();
@@ -796,5 +945,152 @@ mod tests {
         std::os::unix::fs::symlink(root.join("ok.txt"), root.join("inlink")).unwrap();
         let inlink = resolve(&root, "inlink").unwrap();
         assert_eq!(confine(&root, &inlink).await.unwrap(), root.join("ok.txt"));
+    }
+
+    // Issue #23 §1: pasting a copied file back into its own folder used to
+    // run `std::fs::copy(A/x, A/x)`, which truncates the file to zero bytes.
+    // The plan must reject it before anything touches the disk — and
+    // `overwrite` must not bypass the guard.
+    #[tokio::test]
+    async fn plan_rejects_copy_onto_self() {
+        let tree = TmpTree::new("copy-self");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("x.txt"), b"payload").unwrap();
+
+        for overwrite in [false, true] {
+            let err = plan_transfer(&root, &["x.txt".into()], "", overwrite, true)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, PlanError::Bad(ref m) if m.contains("same")),
+                "want same-file rejection, got {err:?}"
+            );
+        }
+        assert_eq!(std::fs::read(root.join("x.txt")).unwrap(), b"payload");
+    }
+
+    // The same truncation reached through an alias: the destination entry is
+    // a symlink pointing back at the source file. Canonical comparison must
+    // catch it instead of offering an overwrite that would zero the file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plan_rejects_copy_onto_self_via_symlink() {
+        let tree = TmpTree::new("copy-self-link");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("x.txt"), b"payload").unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(root.join("x.txt"), root.join("sub/x.txt")).unwrap();
+
+        let err = plan_transfer(&root, &["x.txt".into()], "sub", true, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PlanError::Bad(ref m) if m.contains("same")));
+        assert_eq!(std::fs::read(root.join("x.txt")).unwrap(), b"payload");
+    }
+
+    // Cut-pasting an entry into the folder it already lives in is harmless;
+    // it plans to nothing instead of erroring or clobbering.
+    #[tokio::test]
+    async fn plan_skips_move_onto_self() {
+        let tree = TmpTree::new("move-self");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("x.txt"), b"payload").unwrap();
+
+        let jobs = plan_transfer(&root, &["x.txt".into()], "", false, false)
+            .await
+            .unwrap();
+        assert!(jobs.is_empty());
+        assert_eq!(std::fs::read(root.join("x.txt")).unwrap(), b"payload");
+    }
+
+    // Copying or moving a folder into itself can never finish (the copy
+    // would recurse into its own output forever).
+    #[tokio::test]
+    async fn plan_rejects_folder_into_itself() {
+        let tree = TmpTree::new("dir-into-self");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::create_dir(root.join("d")).unwrap();
+
+        for copy_mode in [false, true] {
+            let err = plan_transfer(&root, &["d".into()], "d", false, copy_mode)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, PlanError::Bad(ref m) if m.contains("into itself")),
+                "want into-itself rejection, got {err:?}"
+            );
+        }
+    }
+
+    // Issue #23 §2: a name collision at the destination must come back as a
+    // conflict naming the entry — only an explicit overwrite replaces it.
+    #[tokio::test]
+    async fn plan_collision_requires_overwrite() {
+        let tree = TmpTree::new("collision");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::create_dir(root.join("a")).unwrap();
+        std::fs::create_dir(root.join("b")).unwrap();
+        std::fs::write(root.join("a/x.txt"), b"new").unwrap();
+        std::fs::write(root.join("b/x.txt"), b"old").unwrap();
+
+        // Both copy and move refuse to clobber without consent…
+        for copy_mode in [false, true] {
+            let err = plan_transfer(&root, &["a/x.txt".into()], "b", false, copy_mode)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, PlanError::Conflict(ref m) if m.contains("x.txt")),
+                "want conflict, got {err:?}"
+            );
+        }
+        assert_eq!(std::fs::read(root.join("b/x.txt")).unwrap(), b"old");
+
+        // …and `overwrite=true` plans the very jobs the handler then runs.
+        let jobs = plan_transfer(&root, &["a/x.txt".into()], "b", true, true)
+            .await
+            .unwrap();
+        assert_eq!(jobs, vec![(root.join("a/x.txt"), root.join("b/x.txt"))]);
+        for (src, dst) in &jobs {
+            copy_recursive(src, dst).unwrap();
+        }
+        assert_eq!(std::fs::read(root.join("b/x.txt")).unwrap(), b"new");
+    }
+
+    // A clean transfer (no collision, distinct paths) plans one job per
+    // source and reports a missing destination folder as an I/O error.
+    #[tokio::test]
+    async fn plan_passes_clean_transfers() {
+        let tree = TmpTree::new("clean");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::create_dir(root.join("dst")).unwrap();
+        std::fs::write(root.join("x.txt"), b"payload").unwrap();
+
+        let jobs = plan_transfer(&root, &["x.txt".into()], "dst", false, false)
+            .await
+            .unwrap();
+        assert_eq!(jobs, vec![(root.join("x.txt"), root.join("dst/x.txt"))]);
+
+        let err = plan_transfer(&root, &["x.txt".into()], "missing", false, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PlanError::Io(_)));
+    }
+
+    // `rename` 409s on a taken name via `same_entry`: distinct files collide,
+    // while the source compared against itself (what a case-only rename sees
+    // on a case-insensitive filesystem) does not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_entry_separates_collisions_from_case_renames() {
+        let tree = TmpTree::new("same-entry");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("b.txt"), b"b").unwrap();
+
+        assert!(same_entry(&root.join("a.txt"), &root.join("a.txt")).await);
+        assert!(!same_entry(&root.join("a.txt"), &root.join("b.txt")).await);
+        // Nonexistent destination: not the same entry (and not a collision —
+        // the metadata probe in `rename` fails first).
+        assert!(!same_entry(&root.join("a.txt"), &root.join("missing")).await);
     }
 }
