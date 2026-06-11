@@ -588,7 +588,15 @@ function renderGrid() {
 
 function setSort(k) {
   if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
-  sortView(); render();
+  // Keep the shift-range anchor on the same *entry* across the re-sort: the
+  // anchor is an index into `view`, so re-sorting under it would silently
+  // re-point it at whatever row landed there and the next shift-click would
+  // select a wrong contiguous range (issue #41).
+  const anchor = lastIndex !== null && view[lastIndex] ? view[lastIndex].name : null;
+  sortView();
+  lastIndex = anchor !== null ? view.findIndex(e => e.name === anchor) : null;
+  if (lastIndex === -1) lastIndex = null;
+  render();
 }
 function setView(v) {
   viewMode = v; $('v-list').classList.toggle('on', v === 'list'); $('v-grid').classList.toggle('on', v === 'grid');
