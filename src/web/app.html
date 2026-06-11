@@ -11,7 +11,8 @@
 
   Script TOC (search for "// ----"): file type helpers · icons · helpers ·
   visible set (hidden filter) + sorting · rendering · navigation / selection ·
-  actions · preview modal (navigable gallery) · text editor · uploads (XHR) ·
+  actions · preview modal (navigable gallery) · text editor · uploads (XHR;
+  folders via webkitdirectory picker + webkitGetAsEntry drop traversal) ·
   context menu · status tab (live input) · settings (read-only view) ·
   software update · view switching · wire up
 -->
@@ -288,6 +289,7 @@
       </div>
       <div class="toolbar">
         <button class="tbtn primary" id="t-up">⬆ Upload</button>
+        <button class="tbtn" id="t-updir" title="Upload a folder (structure preserved)">⬆ Folder</button>
         <button class="tbtn" id="t-mkdir">＋ New Folder</button>
         <button class="tbtn" id="t-open" disabled>↗ Open</button>
         <button class="tbtn" id="t-dl" disabled>⬇ Download</button>
@@ -352,6 +354,7 @@
   <div class="side-overlay" id="side-overlay"></div>
   <div class="menu" id="menu"></div>
   <input type="file" id="filepick" multiple style="display:none;">
+  <input type="file" id="dirpick" webkitdirectory style="display:none;">
   <div class="toast" id="toast"></div>
   <div class="uploadbar" id="uploadbar">
     <div class="ub-text"><span class="name" id="ub-name"></span><span class="pct" id="ub-pct"></span></div>
@@ -574,6 +577,7 @@ function canDelete() { return perm === 'read_write_delete'; }
 function syncToolbar() {
   const n = selection.size, w = canWrite();
   $('t-up').disabled = !w;
+  $('t-updir').disabled = !w;
   $('t-mkdir').disabled = !w;
   $('t-open').disabled = n !== 1;
   $('t-dl').disabled = n < 1;   // download (read) always allowed
@@ -771,7 +775,7 @@ async function saveEditor() {
 function closeEditor() { $('editor').classList.remove('show'); $('ed-area').value = ''; editing = null; edBaseline = null; }
 function requestCloseEditor() { if (confirmDiscard()) closeEditor(); }
 
-// ---- uploads (XHR so we get upload progress) ----
+// ---- uploads (XHR so we get upload progress; folders carry a rel dir) ----
 function showUpload() { $('uploadbar').classList.add('show'); }
 function hideUpload() { $('uploadbar').classList.remove('show'); $('ub-fill').style.width = '0'; }
 function setUpload(name, idx, n, overallFrac, filePct) {
@@ -779,54 +783,135 @@ function setUpload(name, idx, n, overallFrac, filePct) {
   $('ub-pct').textContent = filePct + '%';
   $('ub-fill').style.width = (overallFrac * 100).toFixed(1) + '%';
 }
-function putFile(file, onProgress, overwrite) {
+// `rel` is the file's folder path under `dest` ('' = dest itself) — the
+// server validates every segment and creates the missing folders (issue #30).
+function putFile(dest, file, rel, onProgress, overwrite) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', '/api/upload?path=' + enc(cwd) + '&name=' + enc(file.name)
+    xhr.open('PUT', '/api/upload?path=' + enc(dest) + '&name=' + enc(file.name)
+                  + (rel ? '&dir=' + enc(rel) : '')
                   + (overwrite ? '&overwrite=true' : ''));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       if (xhr.status === 401) { location.href = '/login'; return; }
       if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
-      // Keep the status so uploadFiles can turn a 409 into an overwrite prompt.
+      // Keep the status so uploadItems can turn a 409 into an overwrite prompt.
       const err = new Error(xhr.responseText || xhr.statusText); err.status = xhr.status; reject(err);
     };
     xhr.onerror = () => reject(new Error('network error'));
     xhr.send(file);
   });
 }
-async function uploadFiles(fileList) {
-  const files = [...fileList]; if (!files.length) return;
+// Create `dest/rel` level by level via /api/mkdir — used for the *empty*
+// directories of a dropped folder, which no file upload would create.
+// "Already exists" (409) is success; anything else aborts the batch.
+async function ensureDir(dest, rel) {
+  let parent = dest;
+  for (const seg of rel.split('/')) {
+    if (!seg) continue;
+    try { await api('POST', '/api/mkdir', { path: parent, name: seg }); }
+    catch (e) { if (e.status !== 409) throw e; }
+    parent = join(parent, seg);
+  }
+}
+// Upload a batch into the current folder. `items` is [{file, rel}] where
+// `rel` is the folder path each file keeps under the destination ('' for
+// flat uploads); `emptyDirs` are folders with no files at all, recreated
+// explicitly so a dropped tree arrives complete.
+async function uploadItems(items, emptyDirs = []) {
+  if (!items.length && !emptyDirs.length) return;
+  const dest = cwd;                 // pin: the user may navigate away mid-batch
   showUpload();
+  try { for (const d of emptyDirs) await ensureDir(dest, d); }
+  catch (e) { hideUpload(); toast('Could not create folder: ' + e.message, true); go(cwd); return; }
   let done = 0, skipped = 0;
-  for (const f of files) {
+  let applyAll = null;              // remembered overwrite answer: true | false | null = ask
+  for (const it of items) {
+    const label = it.rel ? it.rel + '/' + it.file.name : it.file.name;
     const idx = done + skipped + 1;
-    const overall = (frac) => (done + skipped + frac) / files.length;
-    const prog = (frac) => setUpload(f.name, idx, files.length, overall(frac), Math.round(frac * 100));
+    const overall = (frac) => (done + skipped + frac) / items.length;
+    const prog = (frac) => setUpload(label, idx, items.length, overall(frac), Math.round(frac * 100));
     prog(0);
     try {
-      try { await putFile(f, prog, false); }
+      try { await putFile(dest, it.file, it.rel, prog, applyAll === true); }
       catch (e) {
         // 409 = a file with this name already exists; the server refused to
-        // clobber it. Ask per file — declining skips just that file.
+        // clobber it. Ask — and since a folder drop can collide hundreds of
+        // times, offer to reuse the answer for the rest of the batch.
         if (e.status !== 409) throw e;
-        if (!confirm('"' + f.name + '" already exists. Overwrite it?')) { skipped++; continue; }
-        await putFile(f, prog, true);
+        let ow = applyAll;
+        if (ow === null) {
+          ow = confirm('"' + label + '" already exists. Overwrite it?');
+          if (items.length > 1 &&
+              confirm((ow ? 'Overwrite' : 'Skip') + ' every other existing file in this upload too?'))
+            applyAll = ow;
+        }
+        if (!ow) { skipped++; continue; }
+        await putFile(dest, it.file, it.rel, prog, true);
       }
       done++;
     } catch (e) {
       // A mid-batch failure aborts the rest; say how far it got — "uploaded
       // X of N" — so the user knows which files made it (issue #24).
       hideUpload();
-      toast('Upload failed on "' + f.name + '": ' + e.message
-            + ' — uploaded ' + done + ' of ' + files.length
+      toast('Upload failed on "' + label + '": ' + e.message
+            + ' — uploaded ' + done + ' of ' + items.length
             + (skipped ? ' (skipped ' + skipped + ')' : ''), true);
       go(cwd); return;
     }
   }
   hideUpload();
-  toast('Uploaded ' + done + ' file(s)' + (skipped ? ', skipped ' + skipped : ''));
+  const bits = ['Uploaded ' + done + ' file(s)'];
+  if (skipped) bits.push('skipped ' + skipped);
+  if (emptyDirs.length) bits.push('created ' + emptyDirs.length + ' empty folder(s)');
+  toast(bits.join(', '));
   go(cwd);
+}
+// Flat upload (file picker, non-folder drops): everything lands in cwd.
+function uploadFiles(fileList) {
+  return uploadItems([...fileList].map(f => ({ file: f, rel: '' })));
+}
+// Folder picker (webkitdirectory): each File carries webkitRelativePath
+// ("Folder/sub/file.txt") — keep the dirname as the rel path. Note the
+// picker only yields files, so empty folders inside the selection are not
+// visible here (drag & drop does see them via the entry traversal below).
+function uploadPickedFolder(fileList) {
+  const items = [...fileList].map(f => {
+    const p = f.webkitRelativePath || '';
+    const i = p.lastIndexOf('/');
+    return { file: f, rel: i < 0 ? '' : p.slice(0, i) };
+  });
+  return uploadItems(items);
+}
+// Resolve one FileSystemEntry's File object (callback API → promise).
+function entryFile(entry) { return new Promise((res, rej) => entry.file(res, rej)); }
+// Drain a directory reader: readEntries() returns at most ~100 entries per
+// call and an empty batch only when exhausted, so it must be called in a loop.
+function readAllEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const out = [];
+    const step = () => reader.readEntries((batch) => {
+      if (!batch.length) { resolve(out); return; }
+      out.push(...batch); step();
+    }, reject);
+    step();
+  });
+}
+// Walk dropped FileSystemEntrys (webkitGetAsEntry) into the uploadItems
+// shape: files with their folder path relative to the drop target, plus the
+// folders that contain no files at all (recreated via mkdir).
+async function collectDropped(entries) {
+  const files = [], emptyDirs = [];
+  const walk = async (entry, rel) => {
+    if (entry.isFile) { files.push({ file: await entryFile(entry), rel }); return; }
+    if (!entry.isDirectory) return;
+    const sub = rel ? rel + '/' + entry.name : entry.name;
+    const children = await readAllEntries(entry.createReader());
+    if (!children.length) { emptyDirs.push(sub); return; }
+    for (const c of children) await walk(c, sub);
+  };
+  for (const en of entries) await walk(en, '');
+  return { files, emptyDirs };
 }
 
 // ---- context menu ----
@@ -839,6 +924,7 @@ function openMenu(x, y) {
   const items = [
     { label: '＋ New Folder', fn: doMkdir, off: !w },
     { label: '⬆ Upload Files', fn: () => $('filepick').click(), off: !w },
+    { label: '⬆ Upload Folder', fn: () => $('dirpick').click(), off: !w },
     { label: '⬇ Download Selected', fn: doDownload, off: n < 1 },
     'sep',
     { label: '✂ Cut', fn: doCut, off: n < 1 || !w },
@@ -992,6 +1078,7 @@ function showView(v) {
 
 // ---- wire up ----
 $('t-up').onclick = () => $('filepick').click();
+$('t-updir').onclick = () => $('dirpick').click();
 $('t-mkdir').onclick = doMkdir;
 $('t-open').onclick = doOpen;
 $('t-dl').onclick = doDownload;
@@ -1006,6 +1093,7 @@ $('ed-close').onclick = requestCloseEditor;
 $('upd-check').onclick = checkUpdate;
 $('upd-apply').onclick = applyUpdate;
 $('filepick').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
+$('dirpick').onchange = (e) => { uploadPickedFolder(e.target.files); e.target.value = ''; };
 $('i-clear').onclick = () => { held.clear(); axes.clear(); $('ilog').textContent=''; renderHeld(); renderAxes(); };
 function closeSidebar() {
   document.querySelector('aside').classList.remove('open');
@@ -1056,9 +1144,24 @@ const main = document.querySelector('main'); let dragDepth = 0;
   if (ev === 'dragenter') dragDepth++; $('drop').classList.add('show');
 }));
 main.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop').classList.remove('show'); } });
-main.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; $('drop').classList.remove('show');
-  if (!e.dataTransfer.files.length) return;
+main.addEventListener('drop', async (e) => { e.preventDefault(); dragDepth = 0; $('drop').classList.remove('show');
   if (!canWrite()) { toast('Read-only — uploads are disabled', true); return; }
+  // Folder-aware path: snapshot the entries *synchronously* — the
+  // DataTransferItemList is gone after the first await — then traverse
+  // directories recursively. A dropped folder used to surface as a useless
+  // directory File that failed with a generic error (issue #30).
+  const entries = [...(e.dataTransfer.items || [])]
+    .map(it => it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)
+    .filter(Boolean);
+  if (entries.length) {
+    try {
+      const { files, emptyDirs } = await collectDropped(entries);
+      uploadItems(files, emptyDirs);
+    } catch (err) { toast('Could not read the dropped items: ' + err.message, true); }
+    return;
+  }
+  // Fallback (no entry API): flat files only.
+  if (!e.dataTransfer.files.length) return;
   uploadFiles(e.dataTransfer.files); });
 
 // Render the sidebar favorites (named folder shortcuts). Empty → hidden.
