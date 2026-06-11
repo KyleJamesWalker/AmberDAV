@@ -1244,10 +1244,18 @@ async fn build_zip(
     Ok(())
 }
 
+/// Download a file as an attachment, honoring `Range` so an interrupted
+/// transfer resumes where it died instead of re-reading the whole file off
+/// the SD card (issue #29). Shares the tested parse/seek/`take` machinery
+/// with `/api/raw` via [`serve_ranged`]; the validators it emits (`ETag`,
+/// `Last-Modified`) give download managers an `If-Range` token, so a resume
+/// of a since-changed file falls back to the full body rather than splicing
+/// two versions together.
 pub async fn download(
     _: Session,
     State(s): State<AppState>,
     Query(q): Query<PathQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let rel = q.path.unwrap_or_default();
     let Some(path) = resolve(&s.root, &rel) else {
@@ -1263,25 +1271,37 @@ pub async fn download(
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
-    let file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) => m,
         Err(e) => return io_err(e),
     };
-    let stream = tokio_util::io::ReaderStream::new(file);
-    (
-        [
-            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!(
-                    "attachment; filename=\"{}\"",
-                    fname.replace(['"', '\\'], "")
-                ),
-            ),
-        ],
-        Body::from_stream(stream),
+    if meta.is_dir() {
+        // Folders go through /api/zip; opening one here would only fail at
+        // first read, after the 200 and the attachment headers are long gone.
+        return bad("not a file");
+    }
+    let etag = etag_for(&meta, None);
+    let modified = meta.modified().ok();
+    let mut resp = serve_ranged(
+        &path,
+        meta.len(),
+        "application/octet-stream",
+        &etag,
+        modified,
+        &headers,
     )
-        .into_response()
+    .await;
+    // Attachment disposition on both the full (200) and partial (206) body —
+    // error responses (416, open/seek failures) must not invite a "save as".
+    if matches!(resp.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "attachment; filename=\"{}\"",
+            fname.replace(['"', '\\'], "")
+        )) {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    resp
 }
 
 #[cfg(test)]

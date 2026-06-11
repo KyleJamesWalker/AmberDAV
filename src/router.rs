@@ -670,6 +670,140 @@ mod tests {
         );
     }
 
+    /// `get_authed` plus extra request headers (Range/If-Range tests).
+    fn get_authed_with(uri: &str, extra: &[(header::HeaderName, &str)]) -> Request<Body> {
+        let (k, v) = session_cookie();
+        let mut req = Request::builder().uri(uri).header(k, v);
+        for (name, val) in extra {
+            req = req.header(name, *val);
+        }
+        req.body(Body::empty()).unwrap()
+    }
+
+    // /api/download is resumable (issue #29): a Range request gets 206 with
+    // the exact slice + Content-Range, the full download is unchanged, both
+    // stay attachments, and an unsatisfiable range is 416 — mirroring the
+    // /api/raw machinery it shares.
+    #[tokio::test]
+    async fn download_honors_range_requests() {
+        let root = TmpRoot::new("download-range");
+        std::fs::write(root.0.join("disc.bin"), b"0123456789abcdef").unwrap();
+        let app = app(&root, Permission::ReadOnly);
+
+        // Full download: 200 + Accept-Ranges advertises resumability.
+        let resp = send(&app, get_authed("/api/download?path=disc.bin")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(resp.headers()[header::CONTENT_LENGTH], "16");
+        let cd = resp.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cd.contains("attachment") && cd.contains("disc.bin"), "{cd}");
+        assert_eq!(body_string(resp).await, "0123456789abcdef");
+
+        // Resume from byte 10 (the "died at 90%" case): the open-ended form.
+        let resp = send(
+            &app,
+            get_authed_with(
+                "/api/download?path=disc.bin",
+                &[(header::RANGE, "bytes=10-")],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 10-15/16");
+        assert_eq!(resp.headers()[header::CONTENT_LENGTH], "6");
+        let cd = resp.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cd.contains("attachment"), "partial must stay an attachment");
+        assert_eq!(body_string(resp).await, "abcdef");
+
+        // Bounded mid-file slice.
+        let resp = send(
+            &app,
+            get_authed_with(
+                "/api/download?path=disc.bin",
+                &[(header::RANGE, "bytes=4-7")],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 4-7/16");
+        assert_eq!(body_string(resp).await, "4567");
+
+        // Start past EOF: 416 with the total, and no attachment disposition
+        // (nothing should invite a "save as" on an error body).
+        let resp = send(
+            &app,
+            get_authed_with(
+                "/api/download?path=disc.bin",
+                &[(header::RANGE, "bytes=99-")],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes */16");
+        assert!(resp.headers().get(header::CONTENT_DISPOSITION).is_none());
+    }
+
+    // The If-Range gate carries over from /api/raw: resuming with a stale
+    // validator must serve the full body (200), never splice two versions;
+    // a current validator keeps the 206.
+    #[tokio::test]
+    async fn download_if_range_gates_the_resume() {
+        let root = TmpRoot::new("download-if-range");
+        std::fs::write(root.0.join("disc.bin"), b"0123456789abcdef").unwrap();
+        let app = app(&root, Permission::ReadOnly);
+
+        // The validator a client would have from its first attempt.
+        let resp = send(&app, get_authed("/api/download?path=disc.bin")).await;
+        let etag = resp.headers()[header::ETAG].to_str().unwrap().to_string();
+
+        // Current validator → the resume is honored.
+        let resp = send(
+            &app,
+            get_authed_with(
+                "/api/download?path=disc.bin",
+                &[
+                    (header::RANGE, "bytes=10-"),
+                    (header::IF_RANGE, etag.as_str()),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body_string(resp).await, "abcdef");
+
+        // Stale validator (the file changed since): full body instead.
+        let resp = send(
+            &app,
+            get_authed_with(
+                "/api/download?path=disc.bin",
+                &[
+                    (header::RANGE, "bytes=10-"),
+                    (header::IF_RANGE, "\"deadbeef.0.0\""),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_string(resp).await, "0123456789abcdef");
+    }
+
+    // Downloading a folder is rejected up front (folders go through /api/zip)
+    // instead of failing mid-stream after a 200.
+    #[tokio::test]
+    async fn download_of_a_directory_is_a_400() {
+        let root = TmpRoot::new("download-dir");
+        std::fs::create_dir(root.0.join("folder")).unwrap();
+        let app = app(&root, Permission::ReadOnly);
+        let resp = send(&app, get_authed("/api/download?path=folder")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     // Folder uploads (issue #30): the `dir` query field creates the missing
     // folder chain under the destination, the file lands at the leaf, and the
     // per-file 409 + overwrite semantics keep working for nested paths.
