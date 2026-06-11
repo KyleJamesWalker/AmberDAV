@@ -4,6 +4,9 @@
 //! Desktop Mode use the framebuffer. Everything else is headless (banner only).
 //!
 //! `AMBERDAV_DISPLAY` (`wayland` | `fb` | `headless`) forces a sink for testing.
+//!
+//! See also — content: `canvas.rs` → choice: `display.rs` → sinks:
+//! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
 // `DisplayKind` and `select` are used by the `fb` (framebuffer/Wayland) path
 // only; allow dead_code on headless and `sdl` builds (tests still exercise them).

@@ -3,6 +3,9 @@
 //! how it reaches a panel — the framebuffer sink (Anbernic/TTY/Desktop Mode)
 //! and the Wayland sink (Steam Deck) both present the same `Canvas`.
 //! Pure and platform-independent, so it is unit-tested on every host.
+//!
+//! See also — content: `canvas.rs` → choice: `display.rs` → sinks:
+//! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
 // On headless builds the canvas API is not called (the framebuffer/Wayland and
 // SDL sinks that consume it are only compiled with the `fb`/`sdl` features).

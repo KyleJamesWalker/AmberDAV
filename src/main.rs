@@ -1,5 +1,27 @@
 //! amber-dav: a tiny WebDAV file server + live gamepad button viewer for
 //! Anbernic handhelds (Allwinner H700, aarch64 Linux).
+//!
+//! Three build shapes, selected by Cargo features (see CLAUDE.md and the
+//! `[features]` comments in Cargo.toml):
+//!
+//! - **headless** (no features): WebDAV/file-manager server only — none of the
+//!   device code is compiled. What the desktop/server release assets ship.
+//! - **fb** (`--features fb`): static framebuffer/Wayland on-device screen +
+//!   gamepad input. The sink is chosen at runtime by `display::detect()`:
+//!   Wayland when a compositor socket is found (Steam Deck Game Mode, where
+//!   Gamescope owns DRM) → `/dev/fb0` (Anbernic, raw TTY, Desktop Mode) →
+//!   headless (banner only). `AMBERDAV_DISPLAY` (`wayland`|`fb`|`headless`)
+//!   forces a sink; `AMBERDAV_FB_ROTATE` (90/180/270) rotates the framebuffer.
+//! - **sdl** (`--features sdl`): the same screen in a fullscreen SDL2 window,
+//!   dynamically linking the system libSDL2. The video driver is tried in
+//!   preference order — `x11`, `mali`, `wayland`, `kmsdrm`, `fbcon`
+//!   (`sdl::DRIVER_PREFERENCE`) — unless `SDL_VIDEODRIVER` forces one.
+//!
+//! If both `fb` and `sdl` are enabled, `sdl` wins (the sink and the
+//! self-update asset both resolve to the SDL shape).
+//!
+//! `main()` is thin wiring: resolve settings (`cli`), build the shared
+//! `state::AppState`, hand it to `router::router()`, serve.
 
 mod auth;
 #[cfg(any(feature = "fb", feature = "sdl"))]

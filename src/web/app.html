@@ -1,4 +1,20 @@
 <!doctype html>
+<!--
+  AmberDAV file-manager SPA — one file: CSS + markup + script.
+
+  Served by ui::index via include_str! and gated behind the session cookie
+  (login.html is the public page). Its API surface is the /api/* route set
+  in src/router.rs — see the route table on router().
+
+  The :root palette below is hand-mirrored in src/canvas.rs (the on-device
+  connection screen): change one, change both.
+
+  Script TOC (search for "// ----"): file type helpers · icons · helpers ·
+  visible set (hidden filter) + sorting · rendering · navigation / selection ·
+  actions · preview modal (navigable gallery) · text editor · uploads (XHR) ·
+  context menu · status tab (live input) · settings (read-only view) ·
+  software update · view switching · wire up
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">

@@ -12,6 +12,40 @@ use axum::{
 use crate::{auth, files, state::AppState, ui, update, webdav};
 
 /// Build the complete application router over `state`.
+///
+/// Route map — auth: `S` = session cookie ([`auth::Session`]), `B` = HTTP
+/// Basic, `-` = public; permission: the level the handler additionally
+/// enforces on top of auth:
+///
+/// ```text
+/// GET  /                  -   app.html when authed, else redirect to /login
+/// GET  /login             -   login page
+/// POST /login             -   checks the password, sets the `sid` cookie
+/// GET  /logout            -   clears the session cookie
+/// GET  /events            S   live-input SSE stream (Status tab)
+/// GET  /api/info          S   connection info for the Status tab
+/// GET  /api/list          S   read
+/// GET  /api/download      S   read
+/// GET  /api/zip           S   read
+/// GET  /api/raw           S   read; HTTP Range + conditional cache validators
+/// GET  /api/thumb         S   read; server-side downscale + disk cache (#28)
+/// PUT  /api/upload        S   write
+/// POST /api/mkdir         S   write
+/// POST /api/delete        S   delete
+/// POST /api/rename        S   write
+/// POST /api/move          S   write
+/// POST /api/copy          S   write
+/// GET  /api/settings      S   read-only settings view
+/// GET  /api/update/check  S   queries GitHub Releases
+/// POST /api/update/apply  S   downloads + installs the matching asset
+/// ANY  /dav[/...]         B   read; write/delete methods gated by permission
+/// ```
+///
+/// Permission enforcement lives in TWO places that must stay in sync:
+/// `files.rs` checks `can_write`/`can_delete` per handler (the write/delete
+/// rows above), and `webdav::method_allowed` gates the WebDAV methods on the
+/// `/dav` mount. A mutating surface added to one without the other silently
+/// bypasses the permission ladder.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(ui::index))
