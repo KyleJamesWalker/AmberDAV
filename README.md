@@ -174,7 +174,7 @@ On startup the device screen and `log.txt` show the connection details:
   serving:  /mnt/sdcard
   status:   http://192.168.1.42:8080/
   webdav:   http://192.168.1.42:8080/dav
-  password: 9vqcm   (user: anything)
+  password: 9vqcm4xt   (user: anything)
   <QR code to the status page>
 ```
 
@@ -184,7 +184,7 @@ On startup the device screen and `log.txt` show the connection details:
 - **WebDAV:** point a client at `http://<device-ip>:8080/dav`. The username is
   ignored; the password is the one on screen.
 
-By default the password is a fresh random 5-character code each launch. Set a
+By default the password is a fresh random 8-character code each launch. Set a
 fixed `password` in `config.json` (below) so you don't have to re-read it every
 time.
 

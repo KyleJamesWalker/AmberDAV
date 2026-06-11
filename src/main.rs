@@ -108,7 +108,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "0.0.0.0".to_string());
 
-    // Effective password: fixed from config, else a fresh random one.
+    // Effective password: fixed from config, else a fresh random one. 8 chars
+    // from the 31-symbol charset is ~40 bits — combined with the per-IP login
+    // throttle this puts brute force far out of reach on a hostile LAN while
+    // staying easy to read off the device screen and type (issue #27).
     let random_password = settings
         .password
         .as_deref()
@@ -118,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .password
         .clone()
         .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| password::generate(5));
+        .unwrap_or_else(|| password::generate(8));
 
     // A random password must always be shown, or it can never be discovered.
     let display_password = random_password || settings.display_password;
