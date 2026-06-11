@@ -1,5 +1,7 @@
 //! JSON file-manager API backing the web UI. All paths are relative to the
-//! served root; traversal is rejected. Every handler requires a session.
+//! served root; traversal is rejected ([`resolve`]/[`safe_name`] validate the
+//! segments, [`confine`] keeps symlinks from escaping). Every handler
+//! requires a session.
 
 use std::path::{Path, PathBuf};
 
@@ -34,8 +36,9 @@ fn plain_segment(seg: &str) -> bool {
 }
 
 /// Resolve a request path (relative to root, `/`-separated) to an absolute
-/// path that stays within `root`: every segment must be a plain name, so no
-/// `..`, no rooted or drive-letter segments, no separators.
+/// path lexically inside `root`: every segment must be a plain name, so no
+/// `..`, no rooted or drive-letter segments, no separators. This is a purely
+/// textual check — symlink containment is enforced separately by [`confine`].
 fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
     let mut out = root.to_path_buf();
     for seg in rel.split('/') {
@@ -51,6 +54,24 @@ fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
 /// Validate a single new file/dir name (no path separators or traversal).
 fn safe_name(name: &str) -> Option<&str> {
     plain_segment(name).then_some(name)
+}
+
+/// Canonicalize `path` and require the result to stay within `root`, which
+/// `main` canonicalized once at startup so the comparison is apples-to-apples
+/// (e.g. `/var` vs `/private/var` on macOS). [`resolve`] only validates the
+/// textual segments; this is what stops a symlink inside the tree
+/// (`link -> /etc`) from escaping it. For operations that create or act on a
+/// leaf that must not be followed, confine the parent and re-join the name.
+async fn confine(root: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    let real = tokio::fs::canonicalize(path).await?;
+    if real.starts_with(root) {
+        Ok(real)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "path escapes the served root",
+        ))
+    }
 }
 
 fn ok() -> Response {
@@ -94,6 +115,10 @@ pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQue
     let rel = q.path.unwrap_or_default();
     let Some(dir) = resolve(&s.root, &rel) else {
         return bad("invalid path");
+    };
+    let dir = match confine(&s.root, &dir).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
     };
 
     let mut rd = match tokio::fs::read_dir(&dir).await {
@@ -144,6 +169,10 @@ pub async fn mkdir(_: Session, State(s): State<AppState>, Json(b): Json<MkdirBod
     let (Some(name), Some(parent)) = (safe_name(&b.name), resolve(&s.root, &b.path)) else {
         return bad("invalid name or path");
     };
+    let parent = match confine(&s.root, &parent).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
     match tokio::fs::create_dir(parent.join(name)).await {
         Ok(()) => ok(),
         Err(e) => io_err(e),
@@ -166,6 +195,16 @@ pub async fn delete(_: Session, State(s): State<AppState>, Json(b): Json<PathsBo
         if target == *s.root {
             return bad("refusing to delete the root");
         }
+        // Confine the parent, not the target: the leaf is removed as an entry
+        // (a symlink is deleted, never followed), but the directories leading
+        // to it must not escape the root through a symlink.
+        let (Some(parent), Some(fname)) = (target.parent(), target.file_name()) else {
+            return bad("invalid path");
+        };
+        let target = match confine(&s.root, parent).await {
+            Ok(p) => p.join(fname),
+            Err(e) => return io_err(e),
+        };
         let meta = match tokio::fs::symlink_metadata(&target).await {
             Ok(m) => m,
             Err(e) => return io_err(e),
@@ -195,10 +234,16 @@ pub async fn rename(_: Session, State(s): State<AppState>, Json(b): Json<RenameB
     let (Some(name), Some(src)) = (safe_name(&b.name), resolve(&s.root, &b.path)) else {
         return bad("invalid name or path");
     };
-    let Some(parent) = src.parent() else {
+    let (Some(parent), Some(fname)) = (src.parent(), src.file_name()) else {
         return bad("path has no parent");
     };
-    match tokio::fs::rename(&src, parent.join(name)).await {
+    // Confine the parent: rename acts on the leaf entry itself (a symlink is
+    // renamed, never followed), and the new name stays in the same directory.
+    let parent = match confine(&s.root, parent).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
+    match tokio::fs::rename(parent.join(fname), parent.join(name)).await {
         Ok(()) => ok(),
         Err(e) => io_err(e),
     }
@@ -219,12 +264,22 @@ pub async fn move_(_: Session, State(s): State<AppState>, Json(b): Json<Transfer
     let Some(destdir) = resolve(&s.root, &b.dest) else {
         return bad("invalid destination");
     };
+    let destdir = match confine(&s.root, &destdir).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
     for src in &b.srcs {
         let Some(sp) = resolve(&s.root, src) else {
             return bad("invalid source");
         };
-        let Some(fname) = sp.file_name() else {
+        // Confine the source's parent: rename moves the leaf entry itself
+        // (a symlink is moved as a link, never followed).
+        let (Some(parent), Some(fname)) = (sp.parent(), sp.file_name()) else {
             return bad("invalid source");
+        };
+        let sp = match confine(&s.root, parent).await {
+            Ok(p) => p.join(fname),
+            Err(e) => return io_err(e),
         };
         if let Err(e) = tokio::fs::rename(&sp, destdir.join(fname)).await {
             return io_err(e);
@@ -240,15 +295,26 @@ pub async fn copy(_: Session, State(s): State<AppState>, Json(b): Json<TransferB
     let Some(destdir) = resolve(&s.root, &b.dest) else {
         return bad("invalid destination");
     };
+    let destdir = match confine(&s.root, &destdir).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
     let mut jobs = Vec::new();
     for src in &b.srcs {
         let Some(sp) = resolve(&s.root, src) else {
             return bad("invalid source");
         };
-        let Some(fname) = sp.file_name() else {
+        // The copy reads through the leaf (a symlinked file copies its
+        // target's bytes), so confine the full source path. The destination
+        // entry keeps the name the user selected, not the link target's.
+        let Some(fname) = sp.file_name().map(std::ffi::OsStr::to_os_string) else {
             return bad("invalid source");
         };
-        jobs.push((sp.clone(), destdir.join(fname)));
+        let sp = match confine(&s.root, &sp).await {
+            Ok(p) => p,
+            Err(e) => return io_err(e),
+        };
+        jobs.push((sp, destdir.join(fname)));
     }
     // Recursive copy can be heavy; run it off the async runtime.
     let res = tokio::task::spawn_blocking(move || {
@@ -301,6 +367,10 @@ pub async fn upload(
     }
     let (Some(name), Some(dir)) = (safe_name(&q.name), resolve(&s.root, &q.path)) else {
         return bad("invalid name or path");
+    };
+    let dir = match confine(&s.root, &dir).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
     };
     let mut file = match tokio::fs::File::create(dir.join(name)).await {
         Ok(f) => f,
@@ -394,6 +464,10 @@ pub async fn raw(
     let Some(path) = resolve(&s.root, &rel) else {
         return bad("invalid path");
     };
+    let path = match confine(&s.root, &path).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
     let meta = match tokio::fs::metadata(&path).await {
         Ok(m) => m,
         Err(e) => return io_err(e),
@@ -484,8 +558,15 @@ pub async fn zip(_: Session, State(s): State<AppState>, Query(q): Query<ZipQuery
         let Some(abs) = resolve(&s.root, rel) else {
             return bad("invalid path");
         };
+        // The archive entry keeps the selected name; the path it reads from
+        // is confined (the zip reads through symlinks, so the full path is
+        // canonicalized).
         let Some(name) = abs.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             return bad("invalid path");
+        };
+        let abs = match confine(&s.root, &abs).await {
+            Ok(p) => p,
+            Err(e) => return io_err(e),
         };
         roots.push((abs, name));
     }
@@ -559,14 +640,20 @@ pub async fn download(
     let Some(path) = resolve(&s.root, &rel) else {
         return bad("invalid path");
     };
-    let file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(e) => return io_err(e),
-    };
+    // Suggested filename comes from the requested path (what the UI shows),
+    // while the bytes are read from the confined, canonical path.
     let fname = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".to_string());
+    let path = match confine(&s.root, &path).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => return io_err(e),
+    };
     let stream = tokio_util::io::ReaderStream::new(file);
     (
         [
@@ -657,5 +744,57 @@ mod tests {
         assert!(safe_name("C:").is_none());
         #[cfg(unix)]
         assert!(safe_name("C:").is_some());
+    }
+
+    /// A scratch directory tree that cleans itself up.
+    struct TmpTree(PathBuf);
+
+    impl TmpTree {
+        fn new(name: &str) -> TmpTree {
+            let path = std::env::temp_dir()
+                .join(format!("amberdav-files-test-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            TmpTree(path)
+        }
+    }
+
+    impl Drop for TmpTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // The lexical checks in `resolve` cannot see through symlinks; this
+    // exercises the canonicalize-and-compare step that actually jails them
+    // (issue #21 §2). Symlinks need a real filesystem, hence the tempdir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn confine_blocks_symlink_escape() {
+        let outside = TmpTree::new("confine-outside");
+        let tree = TmpTree::new("confine-root");
+        std::fs::write(outside.0.join("secret.txt"), b"top secret").unwrap();
+        // Canonicalize the root exactly like main() does, so the comparison
+        // is apples-to-apples (/var vs /private/var on macOS).
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::os::unix::fs::symlink(&outside.0, root.join("link")).unwrap();
+        std::fs::write(root.join("ok.txt"), b"fine").unwrap();
+
+        // The escape resolves lexically (no `..`, plain segments) and the
+        // target really exists — confine() is the layer that rejects it.
+        let escaped = resolve(&root, "link/secret.txt").unwrap();
+        assert!(tokio::fs::metadata(&escaped).await.is_ok());
+        let err = confine(&root, &escaped).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        // The out-pointing symlink itself is rejected too.
+        let link = resolve(&root, "link").unwrap();
+        assert!(confine(&root, &link).await.is_err());
+
+        // Plain paths inside the root pass and come back canonicalized…
+        let ok = resolve(&root, "ok.txt").unwrap();
+        assert_eq!(confine(&root, &ok).await.unwrap(), root.join("ok.txt"));
+        // …and a symlink that stays inside the root is still allowed.
+        std::os::unix::fs::symlink(root.join("ok.txt"), root.join("inlink")).unwrap();
+        let inlink = resolve(&root, "inlink").unwrap();
+        assert_eq!(confine(&root, &inlink).await.unwrap(), root.join("ok.txt"));
     }
 }
