@@ -54,6 +54,10 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
   other hosts the flags compile stubs.
 - Release assets follow `amber-dav-<arch>-<os>[-fb|-sdl]`; a binary only ever
   self-updates to its own shape.
+- The bounce screensaver runs on the framebuffer and SDL sinks only; the
+  **Wayland** sink (the fb build under Gamescope / Steam Deck Game Mode) has
+  no bounce support and falls back to the info screen
+  (`render::effective_mode`).
 
 ## Module map
 
@@ -75,6 +79,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 | `src/screen.rs` | device-screen orchestration: the `Mode` state machine (Info/Black/Bounce), sink startup, the framebuffer painter |
 | `src/display.rs` | runtime **sink selection** for fb builds: Wayland vs `/dev/fb0` vs headless (`AMBERDAV_DISPLAY` override) |
 | `src/canvas.rs` | connection-info pixel **content** (IP/password/QR), pure and host-testable; palette hand-synced with the web UI |
+| `src/render.rs` | shared frame production for the sinks (issue #39): `FrameSource` caches the static canvas (re-renders only on mode/dims/IP change); `effective_mode` is where Wayland's missing bounce support falls back to Info |
 | `src/wayland.rs` | Wayland `wl_shm` sink — Steam Deck Game Mode, where Gamescope owns DRM (fb builds, Linux) |
 | `src/sdl.rs` | SDL2 sink with driver auto-selection — Steam Deck + Anbernic (sdl builds, Linux) |
 | `src/bounce.rs` | DVD-bounce screensaver engine, shared by the fb and sdl sinks (device builds only) |

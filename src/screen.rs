@@ -51,7 +51,9 @@ pub fn toggle(handle: &ModeHandle, target: Mode) {
     }
 }
 
-fn set(status: &Status, msg: String) {
+/// Update the shared screen status. One copy for every sink — `sdl.rs` and
+/// `wayland.rs` carried their own identical helpers (issue #39).
+pub fn set_status(status: &Status, msg: String) {
     if let Ok(mut s) = status.lock() {
         *s = msg;
     }
@@ -71,7 +73,7 @@ pub fn show(
     startup_error: Option<String>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    set(&status, "sdl: starting…".to_string());
+    set_status(&status, "sdl: starting…".to_string());
     std::thread::spawn(move || {
         if let Err(e) = crate::sdl::run(
             port,
@@ -82,7 +84,7 @@ pub fn show(
             startup_error,
             shutdown,
         ) {
-            set(&status, format!("sdl failed: {e}"));
+            set_status(&status, format!("sdl failed: {e}"));
             eprintln!("screen: sdl sink failed ({e}); connection info is in the log only");
         }
     });
@@ -108,12 +110,12 @@ pub fn show(
     match detect() {
         DisplayKind::Wayland => {
             let socket = crate::display::wayland_socket();
-            set(&status, "wayland: starting…".to_string());
+            set_status(&status, "wayland: starting…".to_string());
             std::thread::spawn(move || {
                 if let Err(e) =
                     crate::wayland::run(port, password, status.clone(), mode, socket, startup_error)
                 {
-                    set(&status, format!("wayland failed: {e}"));
+                    set_status(&status, format!("wayland failed: {e}"));
                     eprintln!(
                         "screen: wayland sink failed ({e}); connection info is in the log only"
                     );
@@ -124,7 +126,7 @@ pub fn show(
             show_framebuffer(port, password, status, mode, bounce_paths, startup_error)
         }
         DisplayKind::Headless => {
-            set(&status, "disabled (no display detected)".to_string());
+            set_status(&status, "disabled (no display detected)".to_string());
             eprintln!(
                 "screen: no /dev/fb0 and no Wayland display; connection info is in the log only"
             );
@@ -145,7 +147,6 @@ fn show_framebuffer(
 ) {
     use std::{thread, time::Duration};
 
-    let pw = password;
     // Background thread: keep the screen painted in case the text console
     // cursor (or anything else) overwrites the framebuffer.
     thread::spawn(move || match framebuffer::Framebuffer::new("/dev/fb0") {
@@ -153,7 +154,7 @@ fn show_framebuffer(
             let geom = match imp::Geom::probe(&fb) {
                 Ok(g) => g,
                 Err(e) => {
-                    set(&status, format!("geometry failed: {e}"));
+                    set_status(&status, format!("geometry failed: {e}"));
                     eprintln!("screen: {e}; connection info is in the log only");
                     return;
                 }
@@ -162,45 +163,34 @@ fn show_framebuffer(
             let mut page = 0usize;
             let mut frame = 0u64;
             let mut last_mode: Option<Mode> = None;
-            let mut bounce = crate::bounce::Bounce::new(bounce_paths);
+            let mut source = crate::render::FrameSource::new(
+                port,
+                password,
+                startup_error,
+                Some(crate::bounce::Bounce::new(bounce_paths)),
+            );
 
             loop {
                 let mode = mode.lock().map(|m| *m).unwrap_or(Mode::Info);
                 let changed = last_mode != Some(mode);
 
-                // Info/Black are static: only repaint on a mode change or every
-                // couple of seconds (to re-latch). Bounce animates every frame.
+                // Info/Black are static: only re-blit on a mode change or every
+                // couple of seconds (deliberate — the console cursor stomps the
+                // fb, so the periodic re-latch stays). Bounce animates every
+                // frame. The blit reuses the FrameSource's cached canvas; the
+                // QR/info render itself only re-runs when the mode, dims, or
+                // IP actually changed (issue #39).
                 let render = match mode {
                     Mode::Bounce => true,
                     _ => changed || frame.is_multiple_of(40),
                 };
 
                 if render {
-                    let canvas = match mode {
-                        Mode::Info => {
-                            // Re-query the IP each paint so the screen recovers
-                            // once Wi-Fi connects after launch.
-                            let ip = crate::state::current_ip();
-                            crate::canvas::info_canvas(
-                                geom.lw,
-                                geom.lh,
-                                ip,
-                                port,
-                                pw.as_deref(),
-                                startup_error.as_deref(),
-                            )
-                            .px
-                        }
-                        Mode::Black => crate::canvas::black_canvas(geom.lw, geom.lh).px,
-                        Mode::Bounce => {
-                            bounce.step(geom.lw, geom.lh);
-                            bounce.canvas(geom.lw, geom.lh)
-                        }
-                    };
-                    match imp::commit(&mut fb, &geom, &canvas, page) {
-                        Ok(info) => set(&status, format!("ok ({info}) mode={mode:?}")),
+                    let (_, canvas) = source.frame(mode, geom.lw, geom.lh);
+                    match imp::commit(&mut fb, &geom, canvas, page) {
+                        Ok(info) => set_status(&status, format!("ok ({info}) mode={mode:?}")),
                         Err(e) => {
-                            set(&status, format!("render failed: {e}"));
+                            set_status(&status, format!("render failed: {e}"));
                             eprintln!("screen: render failed ({e}); info is in the log only");
                             break;
                         }
@@ -217,7 +207,7 @@ fn show_framebuffer(
             }
         }
         Err(e) => {
-            set(&status, format!("cannot open /dev/fb0: {e:?}"));
+            set_status(&status, format!("cannot open /dev/fb0: {e:?}"));
             eprintln!("screen: cannot open /dev/fb0 ({e:?}); connection info is in the log only");
         }
     });
@@ -233,7 +223,7 @@ pub fn show(
     _startup_error: Option<String>,
     _shutdown: tokio_util::sync::CancellationToken,
 ) {
-    set(&status, "disabled (headless build)".to_string());
+    set_status(&status, "disabled (headless build)".to_string());
 }
 
 /// Logical canvas dimensions for a given rotation and physical resolution.
