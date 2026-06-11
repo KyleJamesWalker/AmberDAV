@@ -13,7 +13,8 @@
   visible set (hidden filter) + sorting · rendering · navigation / selection ·
   actions · preview modal (navigable gallery) · text editor · uploads (XHR;
   folders via webkitdirectory picker + webkitGetAsEntry drop traversal) ·
-  context menu · status tab (live input) · settings (read-only view) ·
+  context menu · touch (select mode + long-press menu) ·
+  status tab (live input) · settings (read-only view) ·
   software update · view switching · wire up
 -->
 <html lang="en">
@@ -103,6 +104,7 @@
   .tbtn.primary { color: #1a1206; background: var(--amber); border-color: var(--amber); font-weight: 600; }
   .tbtn.primary:hover { filter: brightness(1.08); }
   .tbtn:disabled { opacity: .35; cursor: default; }
+  .tbtn.on { background: var(--amber-soft); border-color: var(--amber-hair); color: var(--amber); }
   .tbtn.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
   .seg-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .seg-toggle button { background: var(--panel); color: var(--muted); border: 0; padding: .42rem .6rem; cursor: pointer; font-size: .85rem; }
@@ -124,7 +126,12 @@
   th.size, td.size { text-align: right; white-space: nowrap; }
   th.type, td.type, th.date, td.date { white-space: nowrap; color: var(--muted); }
   tbody td { padding: .4rem 1.2rem; border-bottom: 1px solid var(--line-soft); }
-  tbody tr { cursor: default; user-select: none; }
+  /* touch-action: manipulation kills double-tap-zoom (so double-tap opens
+     reliably) while keeping scroll; -webkit-touch-callout stops iOS from
+     popping its image-save sheet during our long-press (it inherits to the
+     thumbnail <img>s); -webkit-user-select covers older Safari. */
+  tbody tr { cursor: default; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; touch-action: manipulation; }
   tbody tr:hover { background: rgba(255,180,84,.05); }
   tbody tr.sel { background: var(--amber-soft); box-shadow: inset 2px 0 0 var(--amber); }
   td.name { display: flex; align-items: center; gap: .6rem; min-width: 0; }
@@ -138,7 +145,9 @@
 
   /* grid view */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: .7rem; padding: 1rem 1.2rem; }
-  .gcard { border: 1px solid var(--line-soft); border-radius: 10px; padding: .6rem; cursor: default; user-select: none;
+  .gcard { border: 1px solid var(--line-soft); border-radius: 10px; padding: .6rem; cursor: default;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
+    position: relative; /* anchors the select-mode check badge */
     display: flex; flex-direction: column; align-items: center; gap: .5rem; transition: background .12s, border-color .12s; }
   .gcard:hover { background: rgba(255,180,84,.05); }
   .gcard.sel { background: var(--amber-soft); border-color: var(--amber-hair); }
@@ -146,6 +155,14 @@
   .gthumb img { width: 100%; height: 100%; object-fit: cover; }
   .gthumb .ic { width: 44px; height: 44px; }
   .gname { font-size: .78rem; text-align: center; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* select-mode checkboxes (list rows + grid cards); the whole row/card is
+     the tap target — the box is just the state indicator */
+  .ck { flex: none; width: 16px; height: 16px; border: 1.5px solid var(--dim); border-radius: 4px;
+    display: grid; place-items: center; font-size: 11px; line-height: 1; color: transparent; }
+  .sel .ck { background: var(--amber); border-color: var(--amber); color: #1a1206; }
+  .gcard .ck { position: absolute; top: .45rem; left: .45rem; background: rgba(12,13,17,.72); z-index: 1; }
+  .gcard.sel .ck { background: var(--amber); }
 
   /* context menu */
   .menu {
@@ -300,6 +317,7 @@
         <button class="tbtn danger" id="t-del" disabled>🗑 Delete</button>
         <button class="tbtn" id="t-refresh">↻</button>
         <span class="spacer"></span>
+        <button class="tbtn" id="t-select" title="Select mode: tap rows to toggle them (multi-select without Ctrl/Shift)">☑ Select</button>
         <button class="tbtn" id="t-hidden" title="Show hidden files (dotfiles)">⊘ Hidden</button>
         <span class="seg-toggle">
           <button id="v-list" class="on" title="List view">≣</button>
@@ -385,6 +403,7 @@ let entries = [];                 // raw listing from the API
 let view = [];                    // entries actually shown (hidden filtered + sorted)
 let showHidden = false;           // include dotfiles (e.g. macOS "._" sidecars)
 let selection = new Set();        // selected names in cwd
+let selectMode = false;           // touch multi-select: taps toggle, checkboxes shown
 let clipboard = null;             // { mode:'cut'|'copy', paths:[fullpath...] }
 let viewMode = 'list';            // 'list' | 'grid'
 let sortKey = 'name', sortDir = 1;
@@ -509,7 +528,10 @@ function renderCrumbs() {
 }
 
 function attachRowEvents(el, e, idx) {
-  el.onclick = (ev) => { if (ev.detail >= 2) { onRowOpen(e); return; } onRowClick(ev, e, idx); };
+  el.dataset.idx = idx;           // lets the long-press recognizer map element → view[idx]
+  // In select mode every click/tap toggles — double-click open is off, like
+  // iOS Files; use the Open button (or leave select mode) to enter folders.
+  el.onclick = (ev) => { if (!selectMode && ev.detail >= 2) { onRowOpen(e); return; } onRowClick(ev, e, idx); };
   el.oncontextmenu = (ev) => { ev.preventDefault();
     if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; render(); syncToolbar(); }
     openMenu(ev.clientX, ev.clientY); };
@@ -536,8 +558,9 @@ function renderList() {
     const icon = e.dir ? ICON_DIR : (isImg(e)
       ? `<img class="thumb" loading="lazy" src="${thumbUrl(e)}" data-raw="${rawUrl(e)}" onerror="thumbFail(this)">`
       : ICON_FILE);
+    const ck = selectMode ? '<span class="ck">✓</span>' : '';
     tr.innerHTML =
-      `<td class="name">${icon}<span class="nm">${escapeHtml(e.name)}</span></td>` +
+      `<td class="name">${ck}${icon}<span class="nm">${escapeHtml(e.name)}</span></td>` +
       `<td class="size">${e.dir ? '' : humanSize(e.size)}</td>` +
       `<td class="type">${typeOf(e.name, e.dir)}</td>` +
       `<td class="date">${fmtDate(e.modified)}</td>`;
@@ -555,7 +578,8 @@ function renderGrid() {
     const inner = e.dir ? ICON_DIR : (isImg(e)
       ? `<img loading="lazy" src="${thumbUrl(e)}" data-raw="${rawUrl(e)}" onerror="thumbFail(this)">`
       : ICON_FILE);
-    card.innerHTML = `<div class="gthumb">${inner}</div><div class="gname">${escapeHtml(e.name)}</div>`;
+    const ck = selectMode ? '<span class="ck">✓</span>' : '';
+    card.innerHTML = `${ck}<div class="gthumb">${inner}</div><div class="gname">${escapeHtml(e.name)}</div>`;
     attachRowEvents(card, e, idx);
     grid.appendChild(card);
   });
@@ -608,7 +632,9 @@ async function go(path) {
   renderCrumbs(); rebuild(); syncToolbar();
 }
 function onRowClick(ev, e, idx) {
-  if (ev.shiftKey && lastIndex !== null) {
+  if (selectMode) {               // touch multi-select: every tap toggles (issue #31)
+    selection.has(e.name) ? selection.delete(e.name) : selection.add(e.name); lastIndex = idx;
+  } else if (ev.shiftKey && lastIndex !== null) {
     const [lo, hi] = [Math.min(lastIndex, idx), Math.max(lastIndex, idx)];
     selection = new Set(); for (let i = lo; i <= hi; i++) selection.add(view[i].name);
   } else if (ev.ctrlKey || ev.metaKey) {
@@ -935,6 +961,9 @@ function openMenu(x, y) {
     { label: '✎ Rename', fn: doRename, off: n !== 1 || !w },
     { label: '📝 Edit', fn: () => openEditor(selEntry), off: !canEdit },
     'sep',
+    // Select mode is reachable from a long-press too, so the flow on a phone
+    // is: long-press → "Select Items" → tap the rest → long-press → action.
+    { label: selectMode ? '☑ Done Selecting' : '☑ Select Items', fn: () => setSelectMode(!selectMode) },
     { label: '↻ Refresh', fn: () => go(cwd) },
   ];
   m.innerHTML = '';
@@ -950,6 +979,68 @@ function openMenu(x, y) {
   m.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
 }
 function closeMenu() { $('menu').style.display = 'none'; }
+
+// ---- touch: select mode + long-press menu (issue #31) ----
+// Phones have no Ctrl/Shift-click and iOS Safari never fires contextmenu, so
+// the QR-to-phone flow dead-ended at single-select with no menu. Two pieces:
+// a "Select" toggle that turns every tap into a selection toggle (checkboxes
+// appear in both views), and a long-press recognizer (pointer events + timer)
+// that opens the existing context menu at the touch point. Mouse pointers are
+// ignored throughout — desktop behavior is unchanged.
+function setSelectMode(on) {
+  selectMode = on;
+  $('t-select').classList.toggle('on', on);
+  if (!on) { selection = new Set(); lastIndex = null; }   // leaving = done with the batch
+  render(); syncToolbar();
+}
+
+const LP_MS = 500, LP_SLOP = 10;    // hold time · movement tolerance (px)
+let lpTimer = null, lpStart = null; // pending recognizer state
+let lpSwallow = false;              // a long-press fired; eat the synthetic events that trail it
+function cancelLP() { clearTimeout(lpTimer); lpTimer = null; lpStart = null; }
+function fireLP() {
+  const { x, y, row } = lpStart;
+  cancelLP();
+  lpSwallow = true;
+  if (row) {
+    const idx = +row.dataset.idx, e = view[idx];
+    // Same rule as right-click: pressing outside the selection refocuses it,
+    // pressing inside keeps the multi-selection for a bulk action.
+    if (e && !selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; render(); syncToolbar(); }
+  } else { selection = new Set(); render(); syncToolbar(); }   // background press, like blank-space right-click
+  openMenu(x, y);
+}
+const lw = $('listwrap');
+lw.addEventListener('pointerdown', (ev) => {
+  if (ev.pointerType === 'mouse') return;   // mouse already has a real right-click
+  if (lpTimer) { cancelLP(); return; }      // second finger → pinch/scroll, not a press
+  lpStart = { id: ev.pointerId, x: ev.clientX, y: ev.clientY,
+              row: ev.target.closest('#rows tr, .gcard') };
+  lpTimer = setTimeout(fireLP, LP_MS);
+});
+lw.addEventListener('pointermove', (ev) => {
+  if (!lpTimer || ev.pointerId !== lpStart.id) return;
+  if (Math.hypot(ev.clientX - lpStart.x, ev.clientY - lpStart.y) > LP_SLOP) cancelLP();
+});
+lw.addEventListener('pointerup', cancelLP);
+lw.addEventListener('pointercancel', cancelLP);   // the browser took the gesture (scroll/pinch)
+// After a recognized long-press, browsers fire synthetic events on release —
+// iOS a click, Android a native contextmenu (sometimes both). Left alone they
+// would instantly close the just-opened menu (the document click handler), or
+// "tap" whatever menu item rendered under the finger. Swallow them in the
+// capture phase; any new pointerdown starts a fresh gesture and lifts the
+// guard, so the user's next real tap lands normally.
+document.addEventListener('pointerdown', () => { lpSwallow = false; }, true);
+document.addEventListener('contextmenu', (ev) => {
+  if (lpSwallow) { ev.preventDefault(); ev.stopPropagation(); return; }
+  // Android's native long-press contextmenu can beat our timer: let the
+  // normal contextmenu path open the menu, but stand down the pending timer
+  // (no double-open) and still swallow the trailing click.
+  if (lpTimer) { cancelLP(); lpSwallow = true; }
+}, true);
+document.addEventListener('click', (ev) => {
+  if (lpSwallow) { lpSwallow = false; ev.preventDefault(); ev.stopPropagation(); }
+}, true);
 
 // ---- status tab (live input) ----
 const held = new Map(), axes = new Map();
@@ -1086,6 +1177,7 @@ $('t-rename').onclick = doRename;
 $('t-cut').onclick = doCut; $('t-copy').onclick = doCopy; $('t-paste').onclick = doPaste;
 $('t-del').onclick = doDelete; $('t-refresh').onclick = () => go(cwd);
 $('v-list').onclick = () => setView('list'); $('v-grid').onclick = () => setView('grid');
+$('t-select').onclick = () => setSelectMode(!selectMode);
 $('t-hidden').onclick = () => { showHidden = !showHidden; $('t-hidden').classList.toggle('on', showHidden);
   selection = new Set(); lastIndex = null; rebuild(); syncToolbar(); };
 $('ed-save').onclick = saveEditor;
