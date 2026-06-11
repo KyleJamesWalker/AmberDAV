@@ -486,6 +486,113 @@ pub struct UploadQuery {
     overwrite: bool,
 }
 
+/// Why [`write_upload`] failed; the handler maps each variant onto an HTTP
+/// response.
+#[derive(Debug)]
+enum UploadError {
+    /// Destination name is taken and the client did not pass `overwrite`. 409.
+    Conflict(String),
+    /// The request body stream broke mid-upload (dropped connection). 400.
+    Stream(String),
+    Io(std::io::Error),
+}
+
+impl UploadError {
+    fn into_response(self) -> Response {
+        match self {
+            UploadError::Conflict(m) => conflict(m),
+            UploadError::Stream(m) => (StatusCode::BAD_REQUEST, m).into_response(),
+            UploadError::Io(e) => io_err(e),
+        }
+    }
+}
+
+/// Unique sibling temp path for an upload of `name` into `dir`: a hidden
+/// `.{name}.{pid}.{seq}.part` dotfile, same write-then-rename shape as
+/// `connection.rs`/`update.rs`. The per-process sequence number keeps two
+/// concurrent uploads of the same file from ever sharing a temp file, and the
+/// same-directory placement keeps the final rename atomic (no cross-device
+/// copy).
+fn upload_temp_path(dir: &Path, name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(".{name}.{}.{seq}.part", std::process::id()))
+}
+
+/// Stream a request body into `dir/name` without ever truncating an existing
+/// file before the bytes have safely arrived (issue #24). Writes to a unique
+/// temp file in the same directory, flushes, then renames into place; the
+/// temp is removed on every error path, so a dropped Wi-Fi connection
+/// mid-upload leaves the original untouched and no `.part` litter behind.
+///
+/// Overwrite semantics (issue #23) are preserved: without `overwrite` an
+/// existing entry — including a pre-planted symlink, hence `symlink_metadata`
+/// — is a 409 *before* any bytes stream, and the check is repeated just
+/// before the rename. The recheck-then-rename window is the same plan-then-act
+/// TOCTOU the rest of the codebase accepts (`rename`, `plan_transfer`) for a
+/// single-user LAN server. With `overwrite` the destination is only replaced
+/// at rename time — atomically, never truncated up front.
+async fn write_upload<S, B, E>(
+    dir: &Path,
+    name: &str,
+    overwrite: bool,
+    mut stream: S,
+) -> Result<(), UploadError>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let target = dir.join(name);
+    if !overwrite && tokio::fs::symlink_metadata(&target).await.is_ok() {
+        return Err(UploadError::Conflict(format!("already exists: {name}")));
+    }
+    let tmp = upload_temp_path(dir, name);
+    // `create_new` (O_EXCL) refuses to write through anything pre-planted at
+    // the temp path — the same symlink guard the old direct `create_new` on
+    // the target gave us, now moved to where the bytes actually land.
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .await
+        .map_err(UploadError::Io)?;
+    let written: Result<(), UploadError> = async {
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.map_err(|e| UploadError::Stream(e.to_string()))?;
+            file.write_all(bytes.as_ref())
+                .await
+                .map_err(UploadError::Io)?;
+        }
+        file.flush().await.map_err(UploadError::Io)
+    }
+    .await;
+    // Close before renaming (Windows cannot rename an open file).
+    drop(file);
+    let committed = match written {
+        Ok(()) => {
+            // Recheck the collision: a file that appeared while the bytes
+            // streamed must not be clobbered without consent. `rename`
+            // replaces the destination *entry* atomically (a symlink is
+            // replaced, never followed), so an existing file is swapped
+            // whole — never seen partially written.
+            if !overwrite && tokio::fs::symlink_metadata(&target).await.is_ok() {
+                Err(UploadError::Conflict(format!("already exists: {name}")))
+            } else {
+                tokio::fs::rename(&tmp, &target)
+                    .await
+                    .map_err(UploadError::Io)
+            }
+        }
+        Err(e) => Err(e),
+    };
+    if committed.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    committed
+}
+
 pub async fn upload(
     _: Session,
     State(s): State<AppState>,
@@ -502,43 +609,9 @@ pub async fn upload(
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
-    // `File::create` would silently truncate an existing file (issue #23):
-    // dropping `config.json` onto a folder that already has one must not
-    // destroy the old file without consent. Without `overwrite`, demand a
-    // brand-new entry (`create_new` = O_EXCL, which also refuses to write
-    // through a pre-planted symlink) and let the client turn the resulting
-    // 409 into an overwrite prompt.
-    let target = dir.join(name);
-    let file = if q.overwrite {
-        tokio::fs::File::create(&target).await
-    } else {
-        tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)
-            .await
-    };
-    let mut file = match file {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return conflict(format!("already exists: {name}"));
-        }
-        Err(e) => return io_err(e),
-    };
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        match chunk {
-            Ok(bytes) => {
-                if let Err(e) = file.write_all(&bytes).await {
-                    return io_err(e);
-                }
-            }
-            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        }
-    }
-    match file.flush().await {
+    match write_upload(&dir, name, q.overwrite, body.into_data_stream()).await {
         Ok(()) => ok(),
-        Err(e) => io_err(e),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -1074,6 +1147,133 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, PlanError::Io(_)));
+    }
+
+    /// Names of leftover `.part` temp files in `dir` (should always be none —
+    /// every [`write_upload`] error path removes its temp).
+    fn part_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".part"))
+            .collect()
+    }
+
+    /// A body stream that delivers `chunks` in order.
+    fn body_ok(
+        chunks: &[&[u8]],
+    ) -> impl futures_util::Stream<Item = Result<Vec<u8>, String>> + Unpin {
+        futures_util::stream::iter(chunks.iter().map(|c| Ok(c.to_vec())).collect::<Vec<_>>())
+    }
+
+    // Issue #24 happy path: the bytes land in a temp file and only a rename
+    // makes them visible under the final name — and the temp is gone after.
+    #[tokio::test]
+    async fn upload_streams_then_renames_into_place() {
+        let tree = TmpTree::new("upload-ok");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+
+        write_upload(&root, "new.txt", false, body_ok(&[b"hello ", b"world"]))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(root.join("new.txt")).unwrap(), b"hello world");
+        assert!(part_files(&root).is_empty());
+    }
+
+    // Issue #24 core scenario: Wi-Fi drops mid-upload (the body stream yields
+    // an error). The original file must survive byte-for-byte — the old code
+    // had already truncated it — and the temp must not be left behind.
+    #[tokio::test]
+    async fn upload_aborted_stream_leaves_original_intact() {
+        let tree = TmpTree::new("upload-abort");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("save.dat"), b"precious original").unwrap();
+
+        let broken = futures_util::stream::iter(vec![
+            Ok(b"half a replac".to_vec()),
+            Err("connection reset".to_string()),
+        ]);
+        let err = write_upload(&root, "save.dat", true, broken)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UploadError::Stream(ref m) if m.contains("connection reset")),
+            "want stream error, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(root.join("save.dat")).unwrap(),
+            b"precious original"
+        );
+        assert!(part_files(&root).is_empty());
+    }
+
+    // Issue #23 semantics survive the temp-file rework: without `overwrite`
+    // an existing file is a conflict *before* any bytes stream, and with it
+    // the file is replaced only at rename time.
+    #[tokio::test]
+    async fn upload_collision_requires_overwrite() {
+        let tree = TmpTree::new("upload-collision");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("x.txt"), b"old").unwrap();
+
+        let err = write_upload(&root, "x.txt", false, body_ok(&[b"new"]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UploadError::Conflict(ref m) if m.contains("x.txt")),
+            "want conflict, got {err:?}"
+        );
+        assert_eq!(std::fs::read(root.join("x.txt")).unwrap(), b"old");
+
+        write_upload(&root, "x.txt", true, body_ok(&[b"new"]))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(root.join("x.txt")).unwrap(), b"new");
+        assert!(part_files(&root).is_empty());
+    }
+
+    // The old `create_new` on the target refused to write *through* a
+    // pre-planted symlink; the rework must not regress that. Without
+    // `overwrite` the link is a conflict like any other entry; with it the
+    // rename replaces the link *entry* itself — the file it points to is
+    // never written through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn upload_never_writes_through_preplanted_symlink() {
+        let tree = TmpTree::new("upload-symlink");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("victim.txt"), b"do not touch").unwrap();
+        std::os::unix::fs::symlink(root.join("victim.txt"), root.join("up.txt")).unwrap();
+
+        let err = write_upload(&root, "up.txt", false, body_ok(&[b"payload"]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UploadError::Conflict(_)));
+
+        write_upload(&root, "up.txt", true, body_ok(&[b"payload"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("victim.txt")).unwrap(),
+            b"do not touch"
+        );
+        assert_eq!(std::fs::read(root.join("up.txt")).unwrap(), b"payload");
+        let meta = std::fs::symlink_metadata(root.join("up.txt")).unwrap();
+        assert!(!meta.file_type().is_symlink(), "link entry was replaced");
+    }
+
+    // Concurrent uploads of the same name must not share a temp file.
+    #[test]
+    fn upload_temp_paths_are_unique() {
+        let dir = Path::new("/d");
+        let a = upload_temp_path(dir, "x.txt");
+        let b = upload_temp_path(dir, "x.txt");
+        assert_ne!(a, b);
+        for p in [&a, &b] {
+            let name = p.file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with(".x.txt."), "hidden dotfile: {name}");
+            assert!(name.ends_with(".part"), "part suffix: {name}");
+        }
     }
 
     // `rename` 409s on a taken name via `same_entry`: distinct files collide,

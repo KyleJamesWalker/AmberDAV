@@ -775,7 +775,15 @@ async function uploadFiles(fileList) {
         await putFile(f, prog, true);
       }
       done++;
-    } catch (e) { hideUpload(); toast('Upload failed: ' + e.message, true); go(cwd); return; }
+    } catch (e) {
+      // A mid-batch failure aborts the rest; say how far it got — "uploaded
+      // X of N" — so the user knows which files made it (issue #24).
+      hideUpload();
+      toast('Upload failed on "' + f.name + '": ' + e.message
+            + ' — uploaded ' + done + ' of ' + files.length
+            + (skipped ? ' (skipped ' + skipped + ')' : ''), true);
+      go(cwd); return;
+    }
   }
   hideUpload();
   toast('Uploaded ' + done + ' file(s)' + (skipped ? ', skipped ' + skipped : ''));
