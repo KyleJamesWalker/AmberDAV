@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::{auth::Session, input::InputUpdate, AppState};
+use crate::{auth::Session, input::InputUpdate, state::AppState};
 
 /// Landing page: the file manager if logged in, otherwise the login page.
 pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -33,7 +33,7 @@ pub async fn login_page() -> Html<&'static str> {
 /// Connection details for the Status tab (session-gated).
 pub async fn info(_: Session, State(state): State<AppState>) -> Response {
     let info = &state.info;
-    let ip = crate::current_ip();
+    let ip = crate::state::current_ip();
     let screen = state
         .screen_status
         .lock()

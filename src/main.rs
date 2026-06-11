@@ -12,9 +12,11 @@ mod display;
 mod files;
 mod input;
 mod password;
+mod router;
 mod screen;
 #[cfg(all(target_os = "linux", feature = "sdl"))]
 mod sdl;
+mod state;
 mod ui;
 mod update;
 #[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
@@ -25,68 +27,12 @@ use std::{net::IpAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 
-use axum::{
-    extract::FromRef,
-    routing::{any, get, post, put},
-    Router,
-};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use input::InputUpdate;
+use state::{current_ip, AppState, ServerInfo, SharedSettings};
 use webdav::DavState;
-
-/// Server facts shown on the status page and startup banner.
-pub struct ServerInfo {
-    pub port: u16,
-    pub password: String,
-    /// Set when the config file existed but could not be used (parse/read
-    /// failure) — surfaced on the Status tab so a broken config is never
-    /// invisible (issue #19).
-    pub config_error: Option<String>,
-}
-
-/// Resolve the device's current LAN IP. Re-queried live (not cached at boot)
-/// so the screen/info recover once Wi-Fi connects after launch.
-pub fn current_ip() -> IpAddr {
-    local_ip_address::local_ip().unwrap_or(IpAddr::from([0, 0, 0, 0]))
-}
-
-/// Settings, loaded once at boot from the config file (file-owned, read-only
-/// at runtime — the UI only displays them).
-pub type SharedSettings = Arc<config::Settings>;
-
-/// Shared application state.
-#[derive(Clone)]
-pub struct AppState {
-    /// Canonical directory served over WebDAV and the file API.
-    pub root: Arc<PathBuf>,
-    /// Opaque per-boot session token handed out on successful login.
-    pub session: Arc<str>,
-    /// Settings loaded from the config file.
-    pub settings: SharedSettings,
-    pub dav: DavState,
-    pub info: Arc<ServerInfo>,
-    pub events: broadcast::Sender<InputUpdate>,
-    pub screen_status: screen::Status,
-    /// Fires on shutdown so long-lived SSE streams (the Status page's live
-    /// input) end and don't stall graceful shutdown.
-    pub shutdown: CancellationToken,
-}
-
-impl AppState {
-    /// Configured permission level.
-    pub fn permission(&self) -> config::Permission {
-        self.settings.permission
-    }
-}
-
-// Lets the WebDAV route extract just its slice of state.
-impl FromRef<AppState> for DavState {
-    fn from_ref(state: &AppState) -> Self {
-        state.dav.clone()
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -222,33 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown: shutdown.clone(),
     };
 
-    let app = Router::new()
-        .route("/", get(ui::index))
-        .route("/login", get(ui::login_page).post(auth::login))
-        .route("/logout", get(auth::logout))
-        .route("/events", get(ui::events))
-        .route("/api/info", get(ui::info))
-        .route("/api/list", get(files::list))
-        .route("/api/download", get(files::download))
-        .route("/api/zip", get(files::zip))
-        .route("/api/raw", get(files::raw))
-        .route("/api/thumb", get(files::thumb))
-        .route("/api/upload", put(files::upload))
-        .route("/api/mkdir", post(files::mkdir))
-        .route("/api/delete", post(files::delete))
-        .route("/api/rename", post(files::rename))
-        .route("/api/move", post(files::move_))
-        .route("/api/copy", post(files::copy))
-        .route("/api/settings", get(ui::get_settings))
-        .route("/api/update/check", get(update::check))
-        .route("/api/update/apply", post(update::apply))
-        // `any` routes every method — including WebDAV's PROPFIND/MKCOL/etc.
-        // The wildcard matches one-or-more segments, so the collection root
-        // (`/dav` and `/dav/`) needs its own routes for clients to mount it.
-        .route(webdav::MOUNT, any(webdav::route))
-        .route(&format!("{}/", webdav::MOUNT), any(webdav::route))
-        .route(&format!("{}/{{*rest}}", webdav::MOUNT), any(webdav::route))
-        .with_state(state);
+    let app = router::router(state);
 
     // Password to surface (screen + sidecar), honoring the hidden-password rule.
     let shown_password = display_password.then(|| password.clone());

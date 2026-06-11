@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::{auth::Session, AppState};
+use crate::{auth::Session, state::AppState};
 
 /// True when `seg` is a plain file name: no backslash or NUL, and it parses
 /// as exactly one `Normal` path component on this OS. The component check is

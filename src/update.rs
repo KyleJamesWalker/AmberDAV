@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 
-use crate::{auth::Session, AppState};
+use crate::{auth::Session, state::AppState};
 
 /// GitHub repo to check for releases.
 const REPO: &str = "KyleJamesWalker/AmberDAV";

@@ -12,7 +12,7 @@ use axum::{
 use base64::Engine;
 use dav_server::{fakels::FakeLs, localfs::LocalFs, DavHandler};
 
-use crate::SharedSettings;
+use crate::{config::Permission, state::SharedSettings};
 
 /// Path prefix the WebDAV tree is mounted under.
 pub const MOUNT: &str = "/dav";
@@ -50,14 +50,7 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
 
     // Enforce the permission level on WebDAV write/delete methods, matching the
     // JSON API (otherwise read-only could be bypassed via the mount).
-    let perm = state.settings.permission;
-    let method = req.method().as_str();
-    let needs_delete = method == "DELETE";
-    let needs_write = matches!(
-        method,
-        "PUT" | "DELETE" | "MKCOL" | "MOVE" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK"
-    );
-    if (needs_delete && !perm.can_delete()) || (needs_write && !perm.can_write()) {
+    if !method_allowed(req.method().as_str(), state.settings.permission) {
         return (StatusCode::FORBIDDEN, "operation not permitted\n").into_response();
     }
 
@@ -65,6 +58,20 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
     // what `handle` wants; the response body just gets re-wrapped for axum.
     let (parts, body) = state.handler.handle(req).await.into_parts();
     Response::from_parts(parts, Body::new(body))
+}
+
+/// True when `method` may proceed at permission level `perm`. This list *is*
+/// the read-only/read-write guarantee for the WebDAV mount: the write methods
+/// require `can_write`, and `DELETE` additionally requires `can_delete`.
+/// Anything else (GET, HEAD, OPTIONS, PROPFIND, …) is read-only and always
+/// passes — dav-server itself rejects methods it does not implement.
+fn method_allowed(method: &str, perm: Permission) -> bool {
+    let needs_delete = method == "DELETE";
+    let needs_write = matches!(
+        method,
+        "PUT" | "DELETE" | "MKCOL" | "MOVE" | "COPY" | "PROPPATCH" | "LOCK" | "UNLOCK"
+    );
+    (!needs_delete || perm.can_delete()) && (!needs_write || perm.can_write())
 }
 
 /// Check `Authorization: Basic ...` against the password (username ignored).
@@ -86,4 +93,52 @@ fn authorized(req: &Request, password: &str) -> bool {
     };
 
     matches!(text.split_once(':'), Some((_, pass)) if pass == password)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::method_allowed;
+    use crate::config::Permission;
+
+    // The full method × permission table. Every WebDAV write method must be
+    // listed here with `false` under read_only — a method missing from the
+    // gate in `method_allowed` would show up as an unexpected `true`.
+    #[test]
+    fn method_gate_matches_the_permission_ladder() {
+        // (method, allowed at: read_only, read_write, read_write_delete)
+        let table = [
+            // Read methods pass at every level.
+            ("GET", true, true, true),
+            ("HEAD", true, true, true),
+            ("OPTIONS", true, true, true),
+            ("PROPFIND", true, true, true),
+            // Write methods need read_write.
+            ("PUT", false, true, true),
+            ("MKCOL", false, true, true),
+            ("MOVE", false, true, true),
+            ("COPY", false, true, true),
+            ("PROPPATCH", false, true, true),
+            ("LOCK", false, true, true),
+            ("UNLOCK", false, true, true),
+            // Delete needs the full read_write_delete level.
+            ("DELETE", false, false, true),
+        ];
+        for (method, ro, rw, rwd) in table {
+            assert_eq!(
+                method_allowed(method, Permission::ReadOnly),
+                ro,
+                "{method} at read_only"
+            );
+            assert_eq!(
+                method_allowed(method, Permission::ReadWrite),
+                rw,
+                "{method} at read_write"
+            );
+            assert_eq!(
+                method_allowed(method, Permission::ReadWriteDelete),
+                rwd,
+                "{method} at read_write_delete"
+            );
+        }
+    }
 }

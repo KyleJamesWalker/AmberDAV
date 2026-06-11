@@ -28,6 +28,7 @@ dependencies = [
  "font8x8",
  "framebuffer",
  "futures-util",
+ "http-body-util",
  "httpdate",
  "image",
  "jsonc-parser",
@@ -43,6 +44,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower",
 ]
 
 [[package]]
