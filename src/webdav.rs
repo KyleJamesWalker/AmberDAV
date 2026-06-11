@@ -75,6 +75,8 @@ fn method_allowed(method: &str, perm: Permission) -> bool {
 }
 
 /// Check `Authorization: Basic ...` against the password (username ignored).
+/// The password comparison runs in constant time so a guess can't be confirmed
+/// character-by-character through response timing (issue #27).
 fn authorized(req: &Request, password: &str) -> bool {
     let Some(value) = req
         .headers()
@@ -92,13 +94,42 @@ fn authorized(req: &Request, password: &str) -> bool {
         return false;
     };
 
-    matches!(text.split_once(':'), Some((_, pass)) if pass == password)
+    matches!(
+        text.split_once(':'),
+        Some((_, pass)) if constant_time_eq::constant_time_eq(pass.as_bytes(), password.as_bytes())
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::method_allowed;
+    use super::{authorized, method_allowed};
     use crate::config::Permission;
+    use axum::{body::Body, extract::Request, http::header};
+    use base64::Engine;
+
+    fn req_with_basic(creds: Option<&str>) -> Request {
+        let mut b = Request::builder().uri("/dav/");
+        if let Some(c) = creds {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(c);
+            b = b.header(header::AUTHORIZATION, format!("Basic {encoded}"));
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    // Behavioral check of the constant-time Basic-auth compare: only the exact
+    // password passes (any username), everything else — wrong value, prefix,
+    // different length, no header — is rejected.
+    #[test]
+    fn basic_auth_accepts_only_the_exact_password() {
+        assert!(authorized(&req_with_basic(Some("user:secret")), "secret"));
+        assert!(authorized(&req_with_basic(Some(":secret")), "secret"));
+        assert!(!authorized(&req_with_basic(Some("user:secres")), "secret"));
+        assert!(!authorized(&req_with_basic(Some("user:secre")), "secret"));
+        assert!(!authorized(&req_with_basic(Some("user:secrets")), "secret"));
+        assert!(!authorized(&req_with_basic(Some("user:")), "secret"));
+        assert!(!authorized(&req_with_basic(Some("nocolon")), "secret"));
+        assert!(!authorized(&req_with_basic(None), "secret"));
+    }
 
     // The full method × permission table. Every WebDAV write method must be
     // listed here with `false` under read_only — a method missing from the
