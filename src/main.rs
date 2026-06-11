@@ -267,7 +267,36 @@ fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
 }
 
 async fn shutdown_signal(shutdown: CancellationToken) {
-    let _ = tokio::signal::ctrl_c().await;
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    // SIGTERM is the stop signal Docker/systemd/Kubernetes send on the
+    // headless server deployments; without this branch those get a hard kill
+    // with no connection draining.
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            // Installing the handler essentially never fails; if it somehow
+            // does, keep serving on the remaining branch instead of aborting.
+            Err(e) => {
+                eprintln!("shutdown: cannot install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+
     // End in-flight SSE streams so graceful shutdown can drain the connections
     // instead of waiting forever on a held-open Status page (issue #15).
     shutdown.cancel();
