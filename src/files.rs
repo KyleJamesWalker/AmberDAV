@@ -481,15 +481,25 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 pub struct UploadQuery {
     path: String,
     name: String,
+    /// Optional folder path *under* `path` (`/`-separated, relative), created
+    /// on demand — folder uploads (issue #30) send one of these per file so a
+    /// dropped directory tree lands with its structure intact. Unlike `path`,
+    /// the directories may not exist yet; [`ensure_subdir`] validates every
+    /// segment with the same single-Normal-component rule before creating
+    /// anything.
+    #[serde(default)]
+    dir: Option<String>,
     /// Replace an existing file instead of failing with 409.
     #[serde(default)]
     overwrite: bool,
 }
 
-/// Why [`write_upload`] failed; the handler maps each variant onto an HTTP
-/// response.
+/// Why [`write_upload`]/[`ensure_subdir`] failed; the handler maps each
+/// variant onto an HTTP response.
 #[derive(Debug)]
 enum UploadError {
+    /// Invalid `dir` path (traversal, absolute, drive-letter segments). 400.
+    Bad(String),
     /// Destination name is taken and the client did not pass `overwrite`. 409.
     Conflict(String),
     /// The request body stream broke mid-upload (dropped connection). 400.
@@ -500,11 +510,62 @@ enum UploadError {
 impl UploadError {
     fn into_response(self) -> Response {
         match self {
+            UploadError::Bad(m) => (StatusCode::BAD_REQUEST, m).into_response(),
             UploadError::Conflict(m) => conflict(m),
             UploadError::Stream(m) => (StatusCode::BAD_REQUEST, m).into_response(),
             UploadError::Io(e) => io_err(e),
         }
     }
+}
+
+/// Resolve `sub` — a `/`-separated folder path relative to the already
+/// confined `base` — creating missing directories one segment at a time, and
+/// return the (canonical) leaf directory. This is what lets a folder upload
+/// say `dir=GameBoy/Saves` without a mkdir round-trip per level.
+///
+/// Validation is the same single-`Normal`-component rule as [`resolve`], but
+/// *stricter*: every split segment must be a plain name, so `..`, rooted
+/// (`/etc`), backslash, drive-letter (`C:` on Windows) and empty segments are
+/// all rejected — and they are rejected up front, before any directory is
+/// created, so a half-valid path (`good/../evil`) leaves nothing behind.
+///
+/// Symlink containment matches [`confine`]'s policy elsewhere: a segment that
+/// already exists is canonicalized and must stay inside `root` (an in-tree
+/// symlinked folder is fine, an out-pointing one is refused before anything
+/// is created beyond it); a missing segment is created under the confined
+/// parent — never through a link.
+async fn ensure_subdir(root: &Path, base: PathBuf, sub: &str) -> Result<PathBuf, UploadError> {
+    let segs: Vec<&str> = sub.split('/').collect();
+    if !segs.iter().all(|s| plain_segment(s)) {
+        return Err(UploadError::Bad("invalid folder path".to_string()));
+    }
+    let mut cur = base;
+    for seg in segs {
+        let next = cur.join(seg);
+        match tokio::fs::symlink_metadata(&next).await {
+            Ok(_) => {
+                let real = confine(root, &next).await.map_err(UploadError::Io)?;
+                if !tokio::fs::metadata(&real)
+                    .await
+                    .map_err(UploadError::Io)?
+                    .is_dir()
+                {
+                    return Err(UploadError::Conflict(format!(
+                        "already exists and is not a folder: {seg}"
+                    )));
+                }
+                cur = real;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::create_dir(&next)
+                    .await
+                    .map_err(UploadError::Io)?;
+                cur = next;
+            }
+            Err(e) => return Err(UploadError::Io(e)),
+        }
+    }
+    Ok(cur)
 }
 
 /// Unique sibling temp path for an upload of `name` into `dir`: a hidden
@@ -605,10 +666,18 @@ pub async fn upload(
     let (Some(name), Some(dir)) = (safe_name(&q.name), resolve(&s.root, &q.path)) else {
         return bad("invalid name or path");
     };
-    let dir = match confine(&s.root, &dir).await {
+    let mut dir = match confine(&s.root, &dir).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
+    // Folder uploads carry the file's folder path relative to the upload
+    // destination; create it (validated per segment) before streaming.
+    if let Some(sub) = q.dir.as_deref().filter(|d| !d.is_empty()) {
+        dir = match ensure_subdir(&s.root, dir, sub).await {
+            Ok(p) => p,
+            Err(e) => return e.into_response(),
+        };
+    }
     match write_upload(&dir, name, q.overwrite, body.into_data_stream()).await {
         Ok(()) => ok(),
         Err(e) => e.into_response(),
@@ -1577,6 +1646,108 @@ mod tests {
             assert!(name.starts_with(".x.txt."), "hidden dotfile: {name}");
             assert!(name.ends_with(".part"), "part suffix: {name}");
         }
+    }
+
+    // Folder uploads (issue #30): the `dir` field is resolved one validated
+    // segment at a time, creating what is missing and returning the leaf.
+    #[tokio::test]
+    async fn ensure_subdir_creates_nested_dirs() {
+        let tree = TmpTree::new("subdir-create");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+
+        let leaf = ensure_subdir(&root, root.clone(), "GameBoy/Saves")
+            .await
+            .unwrap();
+        assert_eq!(leaf, root.join("GameBoy/Saves"));
+        assert!(root.join("GameBoy/Saves").is_dir());
+
+        // Idempotent: existing directories are reused, not errors.
+        let leaf = ensure_subdir(&root, root.clone(), "GameBoy/Saves")
+            .await
+            .unwrap();
+        assert_eq!(leaf, root.join("GameBoy/Saves"));
+    }
+
+    // Every segment of the new `dir` field goes through the same
+    // single-Normal-component validation as `resolve` — `..`, absolute,
+    // backslash and drive-letter segments are rejected *before* any directory
+    // is created, so a half-valid path leaves nothing behind.
+    #[tokio::test]
+    async fn ensure_subdir_rejects_traversal_segments() {
+        let tree = TmpTree::new("subdir-reject");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+
+        for sub in [
+            "..",
+            "../evil",
+            "a/../b",
+            "good/..",
+            "/etc",
+            "/",
+            "a//b",
+            "a/",
+            ".",
+            "a/./b",
+            "a\\b",
+            "\\etc",
+            "C:\\evil",
+            "\\\\?\\C:\\x",
+            "a\0b",
+            "",
+        ] {
+            let err = ensure_subdir(&root, root.clone(), sub).await.unwrap_err();
+            assert!(
+                matches!(err, UploadError::Bad(_)),
+                "want Bad for {sub:?}, got {err:?}"
+            );
+        }
+        // Nothing was created — not even the valid prefix of `good/..`.
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    // A file standing where a folder is needed is a conflict, not an
+    // overwrite candidate — `dir` creation never replaces existing entries.
+    #[tokio::test]
+    async fn ensure_subdir_refuses_file_in_the_way() {
+        let tree = TmpTree::new("subdir-file");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("taken"), b"a file").unwrap();
+
+        let err = ensure_subdir(&root, root.clone(), "taken/sub")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UploadError::Conflict(_)), "got {err:?}");
+        assert_eq!(std::fs::read(root.join("taken")).unwrap(), b"a file");
+    }
+
+    // Symlink containment matches `confine` everywhere else: an existing
+    // segment that points outside the root is refused before anything is
+    // created beyond it, while an in-tree symlinked folder still works.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_subdir_blocks_symlink_escape() {
+        let outside = TmpTree::new("subdir-outside");
+        let tree = TmpTree::new("subdir-root");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::os::unix::fs::symlink(&outside.0, root.join("link")).unwrap();
+
+        let err = ensure_subdir(&root, root.clone(), "link/sub")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, UploadError::Io(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "got {err:?}"
+        );
+        assert!(!outside.0.join("sub").exists(), "escaped the root");
+
+        // An in-tree symlink resolves to its canonical target and continues.
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        let leaf = ensure_subdir(&root, root.clone(), "alias/sub")
+            .await
+            .unwrap();
+        assert_eq!(leaf, root.join("real/sub"));
+        assert!(root.join("real/sub").is_dir());
     }
 
     // `rename` 409s on a taken name via `same_entry`: distinct files collide,
