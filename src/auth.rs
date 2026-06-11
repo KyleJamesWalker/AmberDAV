@@ -3,6 +3,8 @@
 //! hand back an opaque session token cookie. The `/dav` WebDAV mount keeps its
 //! own HTTP Basic auth for network-drive clients.
 
+use std::time::Instant;
+
 use axum::{
     extract::{FromRequestParts, State},
     http::{header, request::Parts, HeaderMap, StatusCode},
@@ -11,7 +13,7 @@ use axum::{
 };
 use constant_time_eq::constant_time_eq;
 
-use crate::state::AppState;
+use crate::{state::AppState, throttle, throttle::ClientIp};
 
 const COOKIE: &str = "sid";
 
@@ -55,16 +57,32 @@ pub struct LoginForm {
 }
 
 /// Handle the login form: set the session cookie on the right password.
-/// The password check runs in constant time so a guess can't be confirmed
-/// character-by-character through response timing (issue #27).
-pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
+///
+/// Brute-force defenses (issue #27): the password check runs in constant time
+/// so a guess can't be confirmed character-by-character through response
+/// timing, and repeated failures from one IP are throttled with an
+/// exponential backoff before the password is even looked at. The client IP
+/// comes from the TCP peer address ([`ClientIp`]); requests without one
+/// (router tests driving the service via `oneshot`) share a sentinel key.
+pub async fn login(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    let now = Instant::now();
+    if let Some(wait) = state.throttle.retry_after(ip, now) {
+        return throttle::too_many_attempts(wait);
+    }
+
     if constant_time_eq(form.password.as_bytes(), state.info.password.as_bytes()) {
+        state.throttle.record_success(ip);
         let cookie = format!(
             "{COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
             state.session
         );
         ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
     } else {
+        state.throttle.record_failure(ip, now);
         Redirect::to("/login?e=1").into_response()
     }
 }

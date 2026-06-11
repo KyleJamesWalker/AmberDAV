@@ -10,7 +10,7 @@ use axum::extract::FromRef;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::{config, input::InputUpdate, screen, webdav::DavState};
+use crate::{config, input::InputUpdate, screen, throttle::Throttle, webdav::DavState};
 
 /// Server facts shown on the status page and startup banner.
 pub struct ServerInfo {
@@ -43,6 +43,9 @@ pub struct AppState {
     pub settings: SharedSettings,
     pub dav: DavState,
     pub info: Arc<ServerInfo>,
+    /// Per-IP auth-failure throttle, shared with the WebDAV mount (one guess
+    /// budget per client across both password surfaces — issue #27).
+    pub throttle: Arc<Throttle>,
     pub events: broadcast::Sender<InputUpdate>,
     pub screen_status: screen::Status,
     /// Fires on shutdown so long-lived SSE streams (the Status page's live
