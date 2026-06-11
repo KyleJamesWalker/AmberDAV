@@ -321,6 +321,12 @@ burn-in on OLED/AMOLED panels during long idle periods. It draws from the
 images in `bounce_screen.folders` (PNG, JPEG, GIF, BMP, WebP). With no images
 configured it simply blanks to black, which still protects the panel.
 
+The screensaver runs on the framebuffer and SDL sinks only. The **Wayland**
+sink — what the `fb` build uses under Gamescope, i.e. Steam Deck **Game
+Mode** — does not support it: pressing X shows the info screen instead. On an
+OLED Deck, use the `-sdl` build if you want the burn-in saver in Game Mode,
+or blank the screen with A.
+
 Each control is a **list** of evdev codes, so a button can differ per device
 (the defaults above already cover the Anbernic and the Steam Deck). Retarget
 them from the config file (`exit_keys`/`blank_keys`/`bounce_keys`), the
