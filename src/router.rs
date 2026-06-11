@@ -535,6 +535,88 @@ mod tests {
         );
     }
 
+    // Folder uploads (issue #30): the `dir` query field creates the missing
+    // folder chain under the destination, the file lands at the leaf, and the
+    // per-file 409 + overwrite semantics keep working for nested paths.
+    #[tokio::test]
+    async fn upload_with_dir_creates_nested_folders() {
+        let root = TmpRoot::new("upload-dir");
+        std::fs::create_dir(root.0.join("Roms")).unwrap();
+        let app = app(&root, Permission::ReadWrite);
+
+        let put = |overwrite: bool, body: &'static str| {
+            let (k, v) = session_cookie();
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/upload?path=Roms&dir=GameBoy%2FSaves&name=zelda.sav{}",
+                    if overwrite { "&overwrite=true" } else { "" }
+                ))
+                .header(k, v)
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        let resp = send(&app, put(false, "save data")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(root.0.join("Roms/GameBoy/Saves/zelda.sav")).unwrap(),
+            b"save data"
+        );
+
+        // Same per-file collision semantics as flat uploads: 409 without
+        // consent, replaced with `overwrite=true`.
+        assert_eq!(
+            send(&app, put(false, "clobber")).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            std::fs::read(root.0.join("Roms/GameBoy/Saves/zelda.sav")).unwrap(),
+            b"save data"
+        );
+        assert_eq!(send(&app, put(true, "v2")).await.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(root.0.join("Roms/GameBoy/Saves/zelda.sav")).unwrap(),
+            b"v2"
+        );
+    }
+
+    // The `dir` field is a new path surface; traversal smuggled through it —
+    // `..`, absolute, backslash-rooted, drive-letter segments — must be 400
+    // with nothing created, exactly like `path` and `name` (issue #21 rules).
+    #[tokio::test]
+    async fn upload_dir_traversal_is_rejected() {
+        let outside = TmpRoot::new("upload-dir-outside");
+        let root = TmpRoot::new("upload-dir-root");
+        let app = app(&root, Permission::ReadWriteDelete);
+
+        let sibling = outside.0.file_name().unwrap().to_str().unwrap().to_string();
+        for dir in [
+            "%2E%2E".to_string(),                  // ..
+            format!("..%2F{sibling}"),             // ../<sibling tempdir>
+            format!("good%2F..%2F..%2F{sibling}"), // valid prefix then escape
+            "%2Fetc".to_string(),                  // absolute
+            "%5Cetc".to_string(),                  // backslash-rooted
+            "C%3A%5Cevil".to_string(),             // drive letter
+            "a%5Cb".to_string(),                   // backslash separator
+        ] {
+            let (k, v) = session_cookie();
+            let req = Request::builder()
+                .method("PUT")
+                .uri(format!("/api/upload?path=&dir={dir}&name=pwn.txt"))
+                .header(k, v)
+                .body(Body::from("data"))
+                .unwrap();
+            let resp = send(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "dir={dir}");
+        }
+        assert!(!outside.0.join("pwn.txt").exists());
+        assert!(!outside.0.join("evil").exists());
+        // Nothing was created inside the root either — not even the valid
+        // `good` prefix of the half-valid escape attempt.
+        assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    }
+
     // The landing page routes by session: file manager when logged in,
     // redirect to /login otherwise.
     #[tokio::test]
