@@ -39,13 +39,18 @@ mod screen;
 #[cfg(all(target_os = "linux", feature = "sdl"))]
 mod sdl;
 mod state;
+mod throttle;
 mod ui;
 mod update;
 #[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
 mod wayland;
 mod webdav;
 
-use std::{net::IpAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use clap::Parser;
 
@@ -103,7 +108,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "0.0.0.0".to_string());
 
-    // Effective password: fixed from config, else a fresh random one.
+    // Effective password: fixed from config, else a fresh random one. 8 chars
+    // from the 31-symbol charset is ~40 bits — combined with the per-IP login
+    // throttle this puts brute force far out of reach on a hostile LAN while
+    // staying easy to read off the device screen and type (issue #27).
     let random_password = settings
         .password
         .as_deref()
@@ -113,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .password
         .clone()
         .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| password::generate(5));
+        .unwrap_or_else(|| password::generate(8));
 
     // A random password must always be shown, or it can never be discovered.
     let display_password = random_password || settings.display_password;
@@ -171,6 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // can drain instead of hanging on a held-open Status page (issue #15).
     let shutdown = CancellationToken::new();
 
+    // One per-IP failure throttle shared by both password surfaces (the web
+    // login and the WebDAV Basic auth), so a guesser gets one budget total.
+    let auth_throttle = Arc::new(throttle::Throttle::new());
+
     let state = AppState {
         root: Arc::new(root_path),
         session: Arc::from(session.as_str()),
@@ -179,12 +191,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handler: webdav::build_handler(&root),
             password: Arc::from(password.as_str()),
             settings: settings.clone(),
+            throttle: auth_throttle.clone(),
         },
         info: Arc::new(ServerInfo {
             port,
             password: password.clone(),
             config_error: config_error.clone(),
         }),
+        throttle: auth_throttle,
         events,
         screen_status: screen_status.clone(),
         shutdown: shutdown.clone(),
@@ -218,9 +232,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown))
-        .await?;
+    // `with_connect_info` exposes the TCP peer address to the handlers — the
+    // key for per-IP login throttling (issue #27). The server is direct-serve
+    // (no reverse proxy in the normal deployment), so the socket address is
+    // authoritative; X-Forwarded-For is deliberately ignored.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown))
+    .await?;
     Ok(())
 }
 

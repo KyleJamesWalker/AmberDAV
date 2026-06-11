@@ -3,14 +3,17 @@
 //! hand back an opaque session token cookie. The `/dav` WebDAV mount keeps its
 //! own HTTP Basic auth for network-drive clients.
 
+use std::time::Instant;
+
 use axum::{
     extract::{FromRequestParts, State},
     http::{header, request::Parts, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     Form,
 };
+use constant_time_eq::constant_time_eq;
 
-use crate::state::AppState;
+use crate::{state::AppState, throttle, throttle::ClientIp};
 
 const COOKIE: &str = "sid";
 
@@ -31,9 +34,11 @@ impl FromRequestParts<AppState> for Session {
 }
 
 /// True if the request's `sid` cookie matches the live session token.
+/// Compared in constant time so the token can't be recovered byte-by-byte
+/// through response timing (issue #27).
 pub fn is_authed(headers: &HeaderMap, token: &str) -> bool {
     let header = headers.get(header::COOKIE).and_then(|v| v.to_str().ok());
-    cookie_value(header, COOKIE).is_some_and(|v| v == token)
+    cookie_value(header, COOKIE).is_some_and(|v| constant_time_eq(v.as_bytes(), token.as_bytes()))
 }
 
 fn cookie_value(header: Option<&str>, name: &str) -> Option<String> {
@@ -52,14 +57,32 @@ pub struct LoginForm {
 }
 
 /// Handle the login form: set the session cookie on the right password.
-pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
-    if form.password == state.info.password {
+///
+/// Brute-force defenses (issue #27): the password check runs in constant time
+/// so a guess can't be confirmed character-by-character through response
+/// timing, and repeated failures from one IP are throttled with an
+/// exponential backoff before the password is even looked at. The client IP
+/// comes from the TCP peer address ([`ClientIp`]); requests without one
+/// (router tests driving the service via `oneshot`) share a sentinel key.
+pub async fn login(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    let now = Instant::now();
+    if let Some(wait) = state.throttle.retry_after(ip, now) {
+        return throttle::too_many_attempts(wait);
+    }
+
+    if constant_time_eq(form.password.as_bytes(), state.info.password.as_bytes()) {
+        state.throttle.record_success(ip);
         let cookie = format!(
             "{COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
             state.session
         );
         ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
     } else {
+        state.throttle.record_failure(ip, now);
         Redirect::to("/login?e=1").into_response()
     }
 }
@@ -72,7 +95,26 @@ pub async fn logout() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::cookie_value;
+    use super::{cookie_value, is_authed};
+    use axum::http::{header, HeaderMap};
+
+    // Behavioral check of the constant-time session compare: the exact token
+    // passes, anything else (prefix, wrong value, different length, absent)
+    // does not. Timing itself isn't testable here — only correctness is.
+    #[test]
+    fn is_authed_accepts_only_the_exact_token() {
+        let with_cookie = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::COOKIE, format!("sid={v}").parse().unwrap());
+            h
+        };
+        assert!(is_authed(&with_cookie("tok-123"), "tok-123"));
+        assert!(!is_authed(&with_cookie("tok-124"), "tok-123"));
+        assert!(!is_authed(&with_cookie("tok-12"), "tok-123"));
+        assert!(!is_authed(&with_cookie("tok-1234"), "tok-123"));
+        assert!(!is_authed(&with_cookie(""), "tok-123"));
+        assert!(!is_authed(&HeaderMap::new(), "tok-123"));
+    }
 
     #[test]
     fn parses_target_cookie() {

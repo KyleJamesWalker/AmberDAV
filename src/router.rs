@@ -127,11 +127,19 @@ mod tests {
     /// Real `AppState` over `root`, exactly as `main()` wires it (canonical
     /// root, fixed session token/password) but with test-controlled settings.
     fn state_for(root: &Path, permission: Permission) -> AppState {
-        let settings = Arc::new(Settings {
-            permission,
-            ..Settings::default()
-        });
+        state_with_settings(
+            root,
+            Settings {
+                permission,
+                ..Settings::default()
+            },
+        )
+    }
+
+    fn state_with_settings(root: &Path, settings: Settings) -> AppState {
+        let settings = Arc::new(settings);
         let (events, _) = broadcast::channel(8);
+        let throttle = Arc::new(crate::throttle::Throttle::new());
         AppState {
             root: Arc::new(std::fs::canonicalize(root).unwrap()),
             session: Arc::from(SESSION),
@@ -140,12 +148,14 @@ mod tests {
                 handler: webdav::build_handler(root.to_str().unwrap()),
                 password: Arc::from(PASSWORD),
                 settings,
+                throttle: throttle.clone(),
             },
             info: Arc::new(ServerInfo {
                 port: 8080,
                 password: PASSWORD.to_string(),
                 config_error: None,
             }),
+            throttle,
             events,
             screen_status: Arc::new(std::sync::Mutex::new("test".to_string())),
             shutdown: CancellationToken::new(),
@@ -305,6 +315,131 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(resp.headers()[header::LOCATION], "/login?e=1");
         assert!(resp.headers().get(header::SET_COOKIE).is_none());
+    }
+
+    // --- brute-force throttling (issue #27) --------------------------------
+
+    /// Attach a fake TCP peer address, the same way
+    /// `into_make_service_with_connect_info` does on a real connection.
+    fn with_peer(mut req: Request<Body>, ip: [u8; 4]) -> Request<Body> {
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                ip, 49152,
+            ))));
+        req
+    }
+
+    // After the free failure budget, the login endpoint answers 429 (with
+    // Retry-After) before even looking at the password — the correct guess is
+    // refused too. Another source IP keeps its own budget.
+    #[tokio::test]
+    async fn login_throttles_repeated_failures_per_ip() {
+        let root = TmpRoot::new("login-throttle");
+        let app = app(&root, Permission::ReadWrite);
+        let form = |pw: &str, ip: [u8; 4]| {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("password={pw}")))
+                .unwrap();
+            with_peer(req, ip)
+        };
+
+        // The free attempts: normal wrong-password redirects.
+        for _ in 0..3 {
+            let resp = send(&app, form("wrong-guess", [10, 0, 0, 9])).await;
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        }
+
+        // Budget exhausted: throttled before the check — even the correct
+        // password is refused, so the throttle can't be used as an oracle.
+        let resp = send(&app, form(PASSWORD, [10, 0, 0, 9])).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().contains_key(header::RETRY_AFTER));
+
+        // A different client is unaffected and can log in.
+        let resp = send(&app, form(PASSWORD, [10, 0, 0, 10])).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/");
+    }
+
+    // The WebDAV mount shares the same per-IP budget: repeated wrong Basic
+    // credentials lead to 429, while credential-less requests (the normal
+    // 401-challenge round-trip every DAV client starts with) never count.
+    #[tokio::test]
+    async fn dav_throttles_wrong_credentials_but_not_the_challenge() {
+        let root = TmpRoot::new("dav-throttle");
+        std::fs::write(root.0.join("a.txt"), b"abc").unwrap();
+        let app = app(&root, Permission::ReadWrite);
+        let ip = [10, 0, 0, 20];
+
+        // Credential-less requests: always the 401 challenge, never throttled.
+        for _ in 0..10 {
+            let resp = send(&app, with_peer(dav("GET", "/dav/a.txt", None, ""), ip)).await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert!(resp.headers().contains_key(header::WWW_AUTHENTICATE));
+        }
+        // …and the right password still works right after.
+        let resp = send(
+            &app,
+            with_peer(dav("GET", "/dav/a.txt", Some(PASSWORD), ""), ip),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Wrong credentials burn the budget…
+        for _ in 0..3 {
+            let resp = send(
+                &app,
+                with_peer(dav("GET", "/dav/a.txt", Some("wrong"), ""), ip),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        // …then the IP is throttled, even with the correct password.
+        let resp = send(
+            &app,
+            with_peer(dav("GET", "/dav/a.txt", Some(PASSWORD), ""), ip),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different client is unaffected.
+        let resp = send(
+            &app,
+            with_peer(dav("GET", "/dav/a.txt", Some(PASSWORD), ""), [10, 0, 0, 21]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // The budget is shared across surfaces: failures on the login form also
+    // throttle the same IP's WebDAV access (one guess budget per client).
+    #[tokio::test]
+    async fn throttle_budget_is_shared_between_login_and_dav() {
+        let root = TmpRoot::new("shared-throttle");
+        std::fs::write(root.0.join("a.txt"), b"abc").unwrap();
+        let app = app(&root, Permission::ReadWrite);
+        let ip = [10, 0, 0, 30];
+
+        for _ in 0..3 {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("password=wrong-guess"))
+                .unwrap();
+            let resp = send(&app, with_peer(req, ip)).await;
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        }
+
+        let resp = send(
+            &app,
+            with_peer(dav("GET", "/dav/a.txt", Some(PASSWORD), ""), ip),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     // --- permission enforcement (JSON API) ---------------------------------
@@ -615,6 +750,42 @@ mod tests {
         // Nothing was created inside the root either — not even the valid
         // `good` prefix of the half-valid escape attempt.
         assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    }
+
+    // --- settings exposure (issue #27) ---------------------------------------
+
+    // /api/settings must never carry the password to the browser, even for a
+    // logged-in session — the login page and README promise it is never shown
+    // there. The UI only needs fixed-vs-random: a fixed password serializes as
+    // a masked placeholder (truthy), a random one as null.
+    #[tokio::test]
+    async fn settings_response_redacts_the_password() {
+        let root = TmpRoot::new("settings-redact");
+        let secret = "fixed-Sup3r-secret";
+
+        // Fixed password: redacted to a placeholder, the secret never appears
+        // anywhere in the response body.
+        let fixed = super::router(state_with_settings(
+            &root.0,
+            Settings {
+                password: Some(secret.to_string()),
+                ..Settings::default()
+            },
+        ));
+        let resp = send(&fixed, get_authed("/api/settings")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(!body.contains(secret), "password leaked: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // Still truthy so the Settings tab keeps showing "fixed code".
+        assert_eq!(json["password"], "(hidden)");
+
+        // Random (per-boot) password: stays null, so the tab shows "random".
+        let random = app(&root, Permission::ReadWrite);
+        let resp = send(&random, get_authed("/api/settings")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["password"], serde_json::Value::Null);
     }
 
     // The landing page routes by session: file manager when logged in,

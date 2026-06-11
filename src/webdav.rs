@@ -1,18 +1,20 @@
 //! WebDAV serving via `dav-server`, bridged into axum and gated behind
 //! HTTP Basic auth using the per-boot password.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::Engine;
 use dav_server::{fakels::FakeLs, localfs::LocalFs, DavHandler};
 
-use crate::{config::Permission, state::SharedSettings};
+use crate::{config::Permission, state::SharedSettings, throttle, throttle::Throttle};
 
 /// Path prefix the WebDAV tree is mounted under.
 pub const MOUNT: &str = "/dav";
@@ -24,6 +26,9 @@ pub struct DavState {
     pub handler: DavHandler,
     pub password: Arc<str>,
     pub settings: SharedSettings,
+    /// Per-IP auth-failure throttle, shared with the web login (one guess
+    /// budget per client across both password surfaces — issue #27).
+    pub throttle: Arc<Throttle>,
 }
 
 /// Build a read/write WebDAV handler serving `root`, mounted at [`MOUNT`].
@@ -38,14 +43,38 @@ pub fn build_handler(root: &str) -> DavHandler {
 }
 
 /// axum handler: authenticate, enforce permission, then hand off to dav-server.
+///
+/// Brute-force throttling (issue #27): wrong credentials count against the
+/// per-IP failure budget shared with the web login, and a throttled IP gets
+/// `429` before the password is even examined. A request with *no*
+/// credentials never counts — the 401 challenge is the normal first
+/// round-trip of every WebDAV client, not a guess.
 pub async fn route(State(state): State<DavState>, req: Request) -> Response {
-    if !authorized(&req, &state.password) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, r#"Basic realm="amber-dav""#)],
-            "Authentication required\n",
-        )
-            .into_response();
+    // The peer address comes from `into_make_service_with_connect_info`; only
+    // socket-less test harnesses lack it (they share the sentinel key).
+    let ip = throttle::client_ip(
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0),
+    );
+    let now = Instant::now();
+    if let Some(wait) = state.throttle.retry_after(ip, now) {
+        return throttle::too_many_attempts(wait);
+    }
+
+    match check_auth(&req, &state.password) {
+        BasicAuth::Ok => state.throttle.record_success(ip),
+        outcome @ (BasicAuth::Missing | BasicAuth::Wrong) => {
+            if outcome == BasicAuth::Wrong {
+                state.throttle.record_failure(ip, now);
+            }
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, r#"Basic realm="amber-dav""#)],
+                "Authentication required\n",
+            )
+                .into_response();
+        }
     }
 
     // Enforce the permission level on WebDAV write/delete methods, matching the
@@ -74,31 +103,87 @@ fn method_allowed(method: &str, perm: Permission) -> bool {
     (!needs_delete || perm.can_delete()) && (!needs_write || perm.can_write())
 }
 
+/// Outcome of the Basic-auth check, split three ways so the throttle can tell
+/// a password *guess* apart from the normal credential-less first request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BasicAuth {
+    /// Correct password (username ignored).
+    Ok,
+    /// No `Authorization` header at all — every WebDAV client starts here to
+    /// collect the 401 challenge; not a guessing attempt.
+    Missing,
+    /// Credentials were presented but are wrong (or unparseable) — a guess.
+    Wrong,
+}
+
 /// Check `Authorization: Basic ...` against the password (username ignored).
-fn authorized(req: &Request, password: &str) -> bool {
-    let Some(value) = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Basic "))
-    else {
-        return false;
+/// The password comparison runs in constant time so a guess can't be confirmed
+/// character-by-character through response timing (issue #27).
+fn check_auth(req: &Request, password: &str) -> BasicAuth {
+    let Some(value) = req.headers().get(header::AUTHORIZATION) else {
+        return BasicAuth::Missing;
     };
 
-    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(value) else {
-        return false;
+    let Some(encoded) = value.to_str().ok().and_then(|v| v.strip_prefix("Basic ")) else {
+        return BasicAuth::Wrong;
+    };
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return BasicAuth::Wrong;
     };
     let Ok(text) = String::from_utf8(decoded) else {
-        return false;
+        return BasicAuth::Wrong;
     };
 
-    matches!(text.split_once(':'), Some((_, pass)) if pass == password)
+    match text.split_once(':') {
+        Some((_, pass))
+            if constant_time_eq::constant_time_eq(pass.as_bytes(), password.as_bytes()) =>
+        {
+            BasicAuth::Ok
+        }
+        _ => BasicAuth::Wrong,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::method_allowed;
+    use super::{check_auth, method_allowed, BasicAuth};
     use crate::config::Permission;
+    use axum::{body::Body, extract::Request, http::header};
+    use base64::Engine;
+
+    fn req_with_basic(creds: Option<&str>) -> Request {
+        let mut b = Request::builder().uri("/dav/");
+        if let Some(c) = creds {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(c);
+            b = b.header(header::AUTHORIZATION, format!("Basic {encoded}"));
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    // Behavioral check of the constant-time Basic-auth compare: only the exact
+    // password passes (any username); wrong values, prefixes, and extensions
+    // are Wrong (a guess); only a missing header is Missing (the normal
+    // challenge round-trip, which must never count against the throttle).
+    #[test]
+    fn basic_auth_accepts_only_the_exact_password() {
+        let check = |creds| check_auth(&req_with_basic(creds), "secret");
+        assert_eq!(check(Some("user:secret")), BasicAuth::Ok);
+        assert_eq!(check(Some(":secret")), BasicAuth::Ok);
+        assert_eq!(check(Some("user:secres")), BasicAuth::Wrong);
+        assert_eq!(check(Some("user:secre")), BasicAuth::Wrong);
+        assert_eq!(check(Some("user:secrets")), BasicAuth::Wrong);
+        assert_eq!(check(Some("user:")), BasicAuth::Wrong);
+        assert_eq!(check(Some("nocolon")), BasicAuth::Wrong);
+        assert_eq!(check(None), BasicAuth::Missing);
+
+        // Unparseable credentials are a Wrong (counted) attempt, not Missing.
+        let garbled = Request::builder()
+            .uri("/dav/")
+            .header(header::AUTHORIZATION, "Basic not!base64@@")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(check_auth(&garbled, "secret"), BasicAuth::Wrong);
+    }
 
     // The full method × permission table. Every WebDAV write method must be
     // listed here with `false` under read_only — a method missing from the
