@@ -68,7 +68,7 @@ pub fn show(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
-    config_error: Option<String>,
+    startup_error: Option<String>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     set(&status, "sdl: starting…".to_string());
@@ -79,7 +79,7 @@ pub fn show(
             status.clone(),
             mode,
             bounce_paths,
-            config_error,
+            startup_error,
             shutdown,
         ) {
             set(&status, format!("sdl failed: {e}"));
@@ -101,7 +101,7 @@ pub fn show(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
-    config_error: Option<String>,
+    startup_error: Option<String>,
     _shutdown: tokio_util::sync::CancellationToken,
 ) {
     use crate::display::{detect, DisplayKind};
@@ -111,7 +111,7 @@ pub fn show(
             set(&status, "wayland: starting…".to_string());
             std::thread::spawn(move || {
                 if let Err(e) =
-                    crate::wayland::run(port, password, status.clone(), mode, socket, config_error)
+                    crate::wayland::run(port, password, status.clone(), mode, socket, startup_error)
                 {
                     set(&status, format!("wayland failed: {e}"));
                     eprintln!(
@@ -121,7 +121,7 @@ pub fn show(
             });
         }
         DisplayKind::Framebuffer => {
-            show_framebuffer(port, password, status, mode, bounce_paths, config_error)
+            show_framebuffer(port, password, status, mode, bounce_paths, startup_error)
         }
         DisplayKind::Headless => {
             set(&status, "disabled (no display detected)".to_string());
@@ -141,7 +141,7 @@ fn show_framebuffer(
     status: Status,
     mode: ModeHandle,
     bounce_paths: Vec<std::path::PathBuf>,
-    config_error: Option<String>,
+    startup_error: Option<String>,
 ) {
     use std::{thread, time::Duration};
 
@@ -187,7 +187,7 @@ fn show_framebuffer(
                                 ip,
                                 port,
                                 pw.as_deref(),
-                                config_error.as_deref(),
+                                startup_error.as_deref(),
                             )
                             .px
                         }
@@ -230,7 +230,7 @@ pub fn show(
     status: Status,
     _mode: ModeHandle,
     _bounce_paths: Vec<std::path::PathBuf>,
-    _config_error: Option<String>,
+    _startup_error: Option<String>,
     _shutdown: tokio_util::sync::CancellationToken,
 ) {
     set(&status, "disabled (headless build)".to_string());
