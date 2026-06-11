@@ -86,3 +86,10 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# The image decoders run hot on the handheld's A53 cores — the bounce
+# screensaver's sprite-pool fill and every /api/thumb render — and opt-level
+# "z" makes those pixel loops several times slower (issue #40). Optimize just
+# this dependency for speed; the size-first default stays for everything else.
+[profile.release.package.image]
+opt-level = 3
