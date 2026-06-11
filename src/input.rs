@@ -1,13 +1,15 @@
 //! Gamepad/button input. On device builds we read `/dev/input/event*` via
 //! evdev and publish every event to a broadcast channel for the live web view.
-//! Without either the `fb` or `sdl` feature (desktop/server builds, dev
-//! machines) this compiles to a no-op stub.
+//! Without either the `fb` or `sdl` feature (desktop/server builds), or off
+//! Linux (where evdev does not exist — macOS/Windows dev machines building the
+//! device features), this compiles to a no-op stub.
 //!
 //! Buttons/keys arrive as `EV_KEY`; the d-pad and analog sticks arrive as
 //! `EV_ABS` absolute axes (e.g. ABS_HAT0X for the d-pad, ABS_X/Y for sticks),
 //! so both kinds are forwarded.
 
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// A single input change, serialized to the browser as JSON.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -32,6 +34,7 @@ pub struct InputUpdate {
 // Fields are read only by the device (`fb`/`sdl`) `spawn`; on headless builds
 // the struct is still constructed at the call site, so allow the dead fields.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct InputKeys {
     /// Any of these quits the app.
     pub exit: Vec<u16>,
@@ -43,8 +46,51 @@ pub struct InputKeys {
     pub bounce_enabled: bool,
 }
 
-#[cfg(any(feature = "fb", feature = "sdl"))]
-pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle, keys: InputKeys) {
+/// What a configured key press does. A code may appear in more than one set;
+/// [`key_action`] resolves the overlap (exit first, then blank, then bounce).
+// Constructed by the device (`fb`/`sdl`, Linux) event loop; host builds only
+// reach it through the unit tests, so allow it to be dead there.
+#[cfg_attr(
+    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
+    allow(dead_code)
+)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyAction {
+    /// Quit the app (returning the handheld to the OS app menu).
+    Exit,
+    /// Toggle the blank screen (`Mode::Black`).
+    Blank,
+    /// Toggle the bounce screensaver (`Mode::Bounce`).
+    Bounce,
+}
+
+/// Resolve a pressed key code against the configured control sets; `None`
+/// means the code is not a control and the event is only forwarded. Pure so
+/// the exit/blank/bounce precedence is host-testable (the evdev reader that
+/// calls it only compiles on the devices).
+#[cfg_attr(
+    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
+    allow(dead_code)
+)]
+pub fn key_action(code: u16, keys: &InputKeys) -> Option<KeyAction> {
+    if keys.exit.contains(&code) {
+        Some(KeyAction::Exit)
+    } else if keys.blank.contains(&code) {
+        Some(KeyAction::Blank)
+    } else if keys.bounce_enabled && keys.bounce.contains(&code) {
+        Some(KeyAction::Bounce)
+    } else {
+        None
+    }
+}
+
+#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+pub fn spawn(
+    tx: broadcast::Sender<InputUpdate>,
+    mode: crate::screen::ModeHandle,
+    keys: InputKeys,
+    shutdown: CancellationToken,
+) {
     use evdev::EventSummary;
 
     for (path, dev) in evdev::enumerate() {
@@ -57,11 +103,10 @@ pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle
         let path = path.to_string_lossy().into_owned();
         let tx = tx.clone();
         let mode = mode.clone();
-        // One reader task per device; each needs its own copy of the key sets.
-        let exit = keys.exit.clone();
-        let blank = keys.blank.clone();
-        let bounce = keys.bounce.clone();
-        let bounce_enabled = keys.bounce_enabled;
+        // One reader task per device; each needs its own copy of the key sets
+        // and its own handle on the shutdown token.
+        let keys = keys.clone();
+        let shutdown = shutdown.clone();
 
         let mut stream = match dev.into_event_stream() {
             Ok(s) => s,
@@ -87,17 +132,20 @@ pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle
                     EventSummary::Key(_, key, value) => {
                         // Act on press (value == 1). A configured exit key quits
                         // (returning to the OS app menu); the blank/bounce keys
-                        // toggle their screen modes. A code may appear in only one
-                        // set; exit is checked first, then blank, then bounce.
+                        // toggle their screen modes (precedence in `key_action`).
                         if value == 1 {
                             use crate::screen::{self, Mode};
-                            if exit.contains(&code) {
-                                eprintln!("input: exit key ({code}) pressed; shutting down");
-                                std::process::exit(0);
-                            } else if blank.contains(&code) {
-                                screen::toggle(&mode, Mode::Black);
-                            } else if bounce_enabled && bounce.contains(&code) {
-                                screen::toggle(&mode, Mode::Bounce);
+                            match key_action(code, &keys) {
+                                Some(KeyAction::Exit) => {
+                                    // Cancel rather than exit: the server gets to
+                                    // drain in-flight uploads/WebDAV writes before
+                                    // the process ends (issue #34).
+                                    eprintln!("input: exit key ({code}) pressed; shutting down");
+                                    shutdown.cancel();
+                                }
+                                Some(KeyAction::Blank) => screen::toggle(&mode, Mode::Black),
+                                Some(KeyAction::Bounce) => screen::toggle(&mode, Mode::Bounce),
+                                None => {}
                             }
                         }
                         let state = match value {
@@ -133,11 +181,59 @@ pub fn spawn(tx: broadcast::Sender<InputUpdate>, mode: crate::screen::ModeHandle
     }
 }
 
-#[cfg(not(any(feature = "fb", feature = "sdl")))]
+#[cfg(not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))))]
 pub fn spawn(
     _tx: broadcast::Sender<InputUpdate>,
     _mode: crate::screen::ModeHandle,
     _keys: InputKeys,
+    _shutdown: CancellationToken,
 ) {
     eprintln!("input: gamepad support is a device-only feature; live input view disabled");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(bounce_enabled: bool) -> InputKeys {
+        InputKeys {
+            exit: vec![316],
+            blank: vec![304],
+            bounce: vec![307],
+            bounce_enabled,
+        }
+    }
+
+    #[test]
+    fn configured_codes_map_to_their_actions() {
+        let k = keys(true);
+        assert_eq!(key_action(316, &k), Some(KeyAction::Exit));
+        assert_eq!(key_action(304, &k), Some(KeyAction::Blank));
+        assert_eq!(key_action(307, &k), Some(KeyAction::Bounce));
+    }
+
+    #[test]
+    fn unconfigured_codes_are_only_forwarded() {
+        assert_eq!(key_action(999, &keys(true)), None);
+    }
+
+    // A code present in several sets must resolve deterministically: exit
+    // first, then blank, then bounce — quitting can never be shadowed by a
+    // screen toggle.
+    #[test]
+    fn exit_wins_when_a_code_is_in_multiple_sets() {
+        let k = InputKeys {
+            exit: vec![316],
+            blank: vec![316, 304],
+            bounce: vec![316, 304],
+            bounce_enabled: true,
+        };
+        assert_eq!(key_action(316, &k), Some(KeyAction::Exit));
+        assert_eq!(key_action(304, &k), Some(KeyAction::Blank));
+    }
+
+    #[test]
+    fn bounce_is_inert_when_the_screensaver_is_disabled() {
+        assert_eq!(key_action(307, &keys(false)), None);
+    }
 }

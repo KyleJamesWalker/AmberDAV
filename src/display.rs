@@ -9,8 +9,12 @@
 //! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
 
 // `DisplayKind` and `select` are used by the `fb` (framebuffer/Wayland) path
-// only; allow dead_code on headless and `sdl` builds (tests still exercise them).
-#[cfg_attr(not(all(feature = "fb", not(feature = "sdl"))), allow(dead_code))]
+// only, which exists on Linux alone; allow dead_code on headless and `sdl`
+// builds and on non-Linux hosts (tests still exercise them).
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "fb", not(feature = "sdl"))),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DisplayKind {
     Wayland,
@@ -21,7 +25,10 @@ pub enum DisplayKind {
 /// Pure selection logic. `wayland_display` is `$WAYLAND_DISPLAY`, `fb0_exists`
 /// is whether `/dev/fb0` is present, `override_` is `$AMBERDAV_DISPLAY`. The
 /// override is matched case-insensitively with surrounding whitespace trimmed.
-#[cfg_attr(not(all(feature = "fb", not(feature = "sdl"))), allow(dead_code))]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "fb", not(feature = "sdl"))),
+    allow(dead_code)
+)]
 pub fn select(
     wayland_display: Option<&str>,
     fb0_exists: bool,
@@ -52,7 +59,10 @@ pub fn select(
 /// Prefers a standard `wayland-N` (desktops) over a `gamescope-N` (Steam Game
 /// Mode), lowest index first. Auxiliary sockets (`.lock`, gamescope's `-ei`
 /// emulated-input, etc.) are skipped — only `<prefix>-<number>` exactly.
-#[cfg_attr(not(all(feature = "fb", not(feature = "sdl"))), allow(dead_code))]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "fb", not(feature = "sdl"))),
+    allow(dead_code)
+)]
 pub fn pick_wayland_socket(
     wayland_display: Option<&str>,
     runtime_entries: &[String],
@@ -79,7 +89,7 @@ pub fn pick_wayland_socket(
 }
 
 /// Resolve the live sink from the process environment + filesystem.
-#[cfg(all(feature = "fb", not(feature = "sdl")))]
+#[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
 pub fn detect() -> DisplayKind {
     let socket = wayland_socket();
     let override_ = std::env::var("AMBERDAV_DISPLAY").ok();
@@ -94,7 +104,7 @@ pub fn detect() -> DisplayKind {
 }
 
 /// The resolved Wayland socket (env or discovered), for the sink to connect to.
-#[cfg(all(feature = "fb", not(feature = "sdl")))]
+#[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
 pub fn wayland_socket() -> Option<String> {
     let wd = std::env::var("WAYLAND_DISPLAY").ok();
     let entries: Vec<String> = std::env::var("XDG_RUNTIME_DIR")
