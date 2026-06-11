@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -647,6 +647,120 @@ fn content_type(name: &str) -> &'static str {
     }
 }
 
+// --- cache validators (issue #28) --------------------------------------------
+
+/// (whole seconds, subsec nanos) of the file's mtime since the Unix epoch.
+/// `(0, 0)` when the filesystem cannot report one — the validators then never
+/// match, which degrades to plain uncached serving rather than wrong 304s.
+fn mtime_parts(meta: &std::fs::Metadata) -> (u64, u32) {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
+/// Whole seconds since the Unix epoch — HTTP dates carry no finer resolution,
+/// so every date comparison happens at this granularity.
+fn unix_secs(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Strong ETag derived from mtime (seconds + nanos) and size — the same
+/// identity the thumbnail disk cache is keyed on. Editing a file in place
+/// bumps the mtime, so a revalidation after a change always misses. `variant`
+/// distinguishes derived representations of the same file (the thumbnail
+/// width) so a `/api/thumb` validator can never satisfy an `/api/raw` request.
+fn etag_for(meta: &std::fs::Metadata, variant: Option<u32>) -> String {
+    let (s, n) = mtime_parts(meta);
+    match variant {
+        None => format!("\"{s:x}.{n:x}.{:x}\"", meta.len()),
+        Some(w) => format!("\"{s:x}.{n:x}.{:x}.t{w:x}\"", meta.len()),
+    }
+}
+
+/// Evaluate the conditional-request headers (RFC 9110 §13): `true` means the
+/// client's cached copy is current and the handler answers `304 Not Modified`
+/// without touching the file body. `If-None-Match` wins over
+/// `If-Modified-Since` when both are present, per the RFC's precedence rules.
+fn not_modified(headers: &HeaderMap, etag: &str, modified: Option<std::time::SystemTime>) -> bool {
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        // Weak comparison: a `W/` prefix on a listed tag is ignored, so a
+        // tag that round-tripped through a weakening proxy still matches.
+        return inm.trim() == "*"
+            || inm.split(',').any(|t| {
+                let t = t.trim();
+                t.strip_prefix("W/").unwrap_or(t) == etag
+            });
+    }
+    let (Some(ims), Some(modified)) = (
+        headers
+            .get(header::IF_MODIFIED_SINCE)
+            .and_then(|v| v.to_str().ok()),
+        modified,
+    ) else {
+        return false;
+    };
+    let Ok(since) = httpdate::parse_http_date(ims) else {
+        return false;
+    };
+    unix_secs(modified) <= unix_secs(since)
+}
+
+/// `If-Range` (RFC 9110 §13.1.5): `true` means a `Range` header may be
+/// honored. With no `If-Range` the range always applies; with one, the
+/// validator must match the file's *current* state — otherwise the file
+/// changed under the client and the full body is served instead of splicing
+/// bytes of two different versions together. Weak validators never match.
+fn if_range_matches(
+    headers: &HeaderMap,
+    etag: &str,
+    modified: Option<std::time::SystemTime>,
+) -> bool {
+    let Some(v) = headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let v = v.trim();
+    if v.starts_with('"') {
+        return v == etag;
+    }
+    if v.starts_with("W/") {
+        return false;
+    }
+    match (httpdate::parse_http_date(v), modified) {
+        (Ok(at), Some(m)) => unix_secs(m) == unix_secs(at),
+        _ => false,
+    }
+}
+
+/// Attach the cache validators to a response. `Cache-Control: private`
+/// because every `/api/*` response is session-gated — a shared cache must
+/// never store one — while the browser is free to keep it and revalidate
+/// with a conditional request (the 304 path above).
+fn with_cache_headers(
+    mut resp: Response,
+    etag: &str,
+    modified: Option<std::time::SystemTime>,
+) -> Response {
+    let h = resp.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("private"));
+    if let Ok(v) = HeaderValue::from_str(etag) {
+        h.insert(header::ETAG, v);
+    }
+    if let Some(v) = modified
+        .map(httpdate::fmt_http_date)
+        .and_then(|d| HeaderValue::from_str(&d).ok())
+    {
+        h.insert(header::LAST_MODIFIED, v);
+    }
+    resp
+}
+
 /// Parse a single-range `Range: bytes=...` header against a known total size.
 /// Returns `None` if absent/unparseable (caller serves the whole file), or
 /// `Some(Err(()))` if present but unsatisfiable (caller returns 416).
@@ -675,12 +789,16 @@ fn parse_range(h: &str, total: u64) -> Option<Result<(u64, u64), ()>> {
 }
 
 /// Serve a file inline (for thumbnails and previews), honoring Range requests
-/// so the browser can seek video/audio.
+/// so the browser can seek video/audio. Responses carry cache validators
+/// (`ETag` from mtime+size, `Last-Modified`) and a matched conditional
+/// request short-circuits to `304 Not Modified` — so revisiting a folder of
+/// already-seen images costs a handful of header exchanges instead of
+/// re-reading every file off the SD card (issue #28).
 pub async fn raw(
     _: Session,
     State(s): State<AppState>,
     Query(q): Query<PathQuery>,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> Response {
     let rel = q.path.unwrap_or_default();
     let Some(path) = resolve(&s.root, &rel) else {
@@ -703,10 +821,21 @@ pub async fn raw(
         .map(|n| content_type(&n.to_string_lossy()))
         .unwrap_or("application/octet-stream");
 
+    // Conditional GET first (RFC 9110 §13.2.2 evaluates these before Range):
+    // a matched validator answers 304 before the file is even opened.
+    let etag = etag_for(&meta, None);
+    let modified = meta.modified().ok();
+    if not_modified(&headers, &etag, modified) {
+        return with_cache_headers(StatusCode::NOT_MODIFIED.into_response(), &etag, modified);
+    }
+
+    // A Range only applies when its If-Range validator (if any) still matches
+    // the file — otherwise fall back to the full body, never mixed versions.
     let range = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|h| parse_range(h, total));
+        .and_then(|h| parse_range(h, total))
+        .filter(|_| if_range_matches(&headers, &etag, modified));
 
     let mut file = match tokio::fs::File::open(&path).await {
         Ok(f) => f,
@@ -720,7 +849,7 @@ pub async fn raw(
             }
             let len = end - start + 1;
             let body = Body::from_stream(tokio_util::io::ReaderStream::new(file.take(len)));
-            (
+            let resp = (
                 StatusCode::PARTIAL_CONTENT,
                 [
                     (header::CONTENT_TYPE, ct.to_string()),
@@ -733,7 +862,8 @@ pub async fn raw(
                 ],
                 body,
             )
-                .into_response()
+                .into_response();
+            with_cache_headers(resp, &etag, modified)
         }
         Some(Err(())) => (
             StatusCode::RANGE_NOT_SATISFIABLE,
@@ -742,7 +872,7 @@ pub async fn raw(
             .into_response(),
         None => {
             let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
-            (
+            let resp = (
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, ct.to_string()),
@@ -751,9 +881,182 @@ pub async fn raw(
                 ],
                 body,
             )
-                .into_response()
+                .into_response();
+            with_cache_headers(resp, &etag, modified)
         }
     }
+}
+
+// --- thumbnails (issue #28) ---------------------------------------------------
+
+/// Default and hard bounds for the `w` query parameter. The frontend asks
+/// for 256 (largest grid cell at 2x DPR); the clamp keeps a hand-crafted
+/// request from turning the endpoint into a free image-resizing service.
+const THUMB_DEFAULT_W: u32 = 128;
+const THUMB_MIN_W: u32 = 16;
+const THUMB_MAX_W: u32 = 512;
+
+#[derive(Deserialize)]
+pub struct ThumbQuery {
+    path: Option<String>,
+    w: Option<u32>,
+}
+
+/// Directory for the on-disk thumbnail cache. Lives under the OS temp dir:
+/// on the handhelds `/tmp` is tmpfs, so cached thumbnails cost zero SD-card
+/// wear and the cache clears itself on reboot. Entries are keyed by content
+/// identity ([`thumb_cache_key`]), so a stale entry is never *served* — a
+/// changed file simply misses and leaves the old entry behind to die with
+/// the temp dir.
+fn thumb_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("amber-dav-thumbs")
+}
+
+/// Cache file stem for one rendered thumbnail: a hash of the canonical source
+/// path (hex, so never a path separator) plus the same mtime+size identity
+/// the ETag uses, plus the requested width. Any change to the source flips
+/// the key, so lookups can trust a hit without re-checking the source.
+fn thumb_cache_key(path: &Path, meta: &std::fs::Metadata, w: u32) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let hash = Sha256::digest(path.as_os_str().as_encoded_bytes());
+    let mut hex = String::with_capacity(32);
+    for b in &hash[..16] {
+        let _ = write!(hex, "{b:02x}");
+    }
+    let (s, n) = mtime_parts(meta);
+    format!("{hex}-{s:x}.{n:x}.{:x}.{w}", meta.len())
+}
+
+/// The two encodings a thumbnail is stored and served as, with their cache
+/// file extension and MIME type. JPEG for opaque images (a 256 px photo cell
+/// is ~5–15 KB instead of ~50 KB as PNG), PNG when the source has an alpha
+/// channel worth keeping.
+const THUMB_FORMATS: [(&str, &str); 2] = [("jpg", "image/jpeg"), ("png", "image/png")];
+
+/// Decode `path` and downscale it to fit in `w`×`w` (aspect ratio preserved,
+/// never upscaled). Runs on a blocking thread — decoding a 12 MP JPEG takes
+/// hundreds of ms on the A53. `thumbnail()` is the image crate's fast path
+/// (integer box-sample, then a triangle filter), the right trade for this
+/// CPU. Returns the encoded bytes and the cache extension from
+/// [`THUMB_FORMATS`]. Decode memory is capped so one absurd PNG cannot eat
+/// the device's ~1 GB of RAM.
+fn render_thumb(path: &Path, w: u32) -> Result<(Vec<u8>, &'static str), image::ImageError> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(image::ImageError::IoError)?
+        .with_guessed_format()
+        .map_err(image::ImageError::IoError)?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode()?;
+    let thumb = if img.width() <= w && img.height() <= w {
+        img // already small enough: re-encode as-is, never upscale
+    } else {
+        img.thumbnail(w, w)
+    };
+    let mut out = Vec::new();
+    if thumb.color().has_alpha() {
+        thumb.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+        Ok((out, "png"))
+    } else {
+        let mut cursor = std::io::Cursor::new(&mut out);
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 80);
+        thumb.to_rgb8().write_with_encoder(enc)?;
+        Ok((out, "jpg"))
+    }
+}
+
+/// Best-effort cache write: temp file in the cache dir, then an atomic rename
+/// (the same write-then-rename shape as uploads), so a concurrent request for
+/// the same thumbnail never reads a half-written file. Failures are swallowed
+/// — a broken cache only costs a re-render, never the response.
+async fn store_thumb(dir: &Path, name: &str, bytes: &[u8]) {
+    if tokio::fs::create_dir_all(dir).await.is_err() {
+        return;
+    }
+    let tmp = dir.join(format!(".{name}.{}.part", std::process::id()));
+    if tokio::fs::write(&tmp, bytes).await.is_ok()
+        && tokio::fs::rename(&tmp, dir.join(name)).await.is_ok()
+    {
+        return;
+    }
+    let _ = tokio::fs::remove_file(&tmp).await;
+}
+
+/// `GET /api/thumb?path=…&w=128`: serve a server-side downscaled thumbnail
+/// instead of the full original — the grid no longer pulls 2 MB per 128 px
+/// cell off the SD card (issue #28). Same auth gate and path hardening as
+/// every other handler, same cache validators as [`raw`] (the ETag carries
+/// the width so the two endpoints' validators can never cross-match):
+///
+/// 1. conditional hit → 304, nothing read;
+/// 2. disk-cache hit → serve the cached encoding;
+/// 3. miss → decode + downscale off the runtime, cache, serve.
+///
+/// Non-image files (and formats the pure-Rust decoders don't know, e.g. SVG)
+/// answer 415 — the frontend falls back to `/api/raw` for those.
+pub async fn thumb(
+    _: Session,
+    State(s): State<AppState>,
+    Query(q): Query<ThumbQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let rel = q.path.unwrap_or_default();
+    let Some(path) = resolve(&s.root, &rel) else {
+        return bad("invalid path");
+    };
+    let path = match confine(&s.root, &path).await {
+        Ok(p) => p,
+        Err(e) => return io_err(e),
+    };
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) => m,
+        Err(e) => return io_err(e),
+    };
+    if meta.is_dir() {
+        return bad("not a file");
+    }
+    let w =
+        q.w.unwrap_or(THUMB_DEFAULT_W)
+            .clamp(THUMB_MIN_W, THUMB_MAX_W);
+
+    let etag = etag_for(&meta, Some(w));
+    let modified = meta.modified().ok();
+    if not_modified(&headers, &etag, modified) {
+        return with_cache_headers(StatusCode::NOT_MODIFIED.into_response(), &etag, modified);
+    }
+
+    let dir = thumb_cache_dir();
+    let key = thumb_cache_key(&path, &meta, w);
+    for (ext, mime) in THUMB_FORMATS {
+        if let Ok(bytes) = tokio::fs::read(dir.join(format!("{key}.{ext}"))).await {
+            let resp = ([(header::CONTENT_TYPE, mime)], bytes).into_response();
+            return with_cache_headers(resp, &etag, modified);
+        }
+    }
+
+    let src = path.clone();
+    let (bytes, ext) = match tokio::task::spawn_blocking(move || render_thumb(&src, w)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(image::ImageError::IoError(e))) => return io_err(e),
+        Ok(Err(e)) => {
+            return (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("cannot thumbnail: {e}"),
+            )
+                .into_response()
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    store_thumb(&dir, &format!("{key}.{ext}"), &bytes).await;
+    let mime = if ext == "png" {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+    let resp = ([(header::CONTENT_TYPE, mime)], bytes).into_response();
+    with_cache_headers(resp, &etag, modified)
 }
 
 // --- zip (download multiple items / folders) -------------------------------
@@ -1292,5 +1595,270 @@ mod tests {
         // Nonexistent destination: not the same entry (and not a collision —
         // the metadata probe in `rename` fails first).
         assert!(!same_entry(&root.join("a.txt"), &root.join("missing")).await);
+    }
+
+    /// Build a HeaderMap from (name, value) pairs for the conditional tests.
+    fn hdrs(pairs: &[(header::HeaderName, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(k.clone(), HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    // Issue #28 §1: the ETag is a quoted strong validator that tracks the
+    // file's content identity — same bytes, same tag; touched or rewritten
+    // file, different tag.
+    #[test]
+    fn etag_tracks_mtime_and_size() {
+        let tree = TmpTree::new("etag");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("a.txt"), b"hello").unwrap();
+        let m1 = std::fs::metadata(root.join("a.txt")).unwrap();
+
+        let tag = etag_for(&m1, None);
+        assert!(tag.starts_with('"') && tag.ends_with('"'), "quoted: {tag}");
+        assert_eq!(tag, etag_for(&m1, None), "stable for unchanged metadata");
+
+        // Same mtime cannot be guaranteed cheaply, but a size change alone
+        // must already flip the tag.
+        std::fs::write(root.join("a.txt"), b"hello world").unwrap();
+        let m2 = std::fs::metadata(root.join("a.txt")).unwrap();
+        assert_ne!(tag, etag_for(&m2, None));
+
+        // A thumbnail variant of the same file is a different representation
+        // and must carry a different tag (per width, too).
+        assert_ne!(etag_for(&m1, None), etag_for(&m1, Some(128)));
+        assert_ne!(etag_for(&m1, Some(128)), etag_for(&m1, Some(256)));
+    }
+
+    // The revalidation round-trip the browser performs: send back the ETag in
+    // If-None-Match, get a 304. Covers the RFC's weak-compare and precedence
+    // corners so a proxy-mangled tag still revalidates.
+    #[test]
+    fn conditional_if_none_match() {
+        let etag = "\"abc.def.10\"";
+        let now = std::time::SystemTime::now();
+
+        // Round-trip: the tag we handed out comes back and matches.
+        assert!(not_modified(
+            &hdrs(&[(header::IF_NONE_MATCH, etag)]),
+            etag,
+            Some(now)
+        ));
+        // Weak form and tag lists still match; a different tag does not.
+        assert!(not_modified(
+            &hdrs(&[(header::IF_NONE_MATCH, "W/\"abc.def.10\"")]),
+            etag,
+            Some(now)
+        ));
+        assert!(not_modified(
+            &hdrs(&[(header::IF_NONE_MATCH, "\"other\", \"abc.def.10\"")]),
+            etag,
+            Some(now)
+        ));
+        assert!(not_modified(
+            &hdrs(&[(header::IF_NONE_MATCH, "*")]),
+            etag,
+            Some(now)
+        ));
+        assert!(!not_modified(
+            &hdrs(&[(header::IF_NONE_MATCH, "\"stale\"")]),
+            etag,
+            Some(now)
+        ));
+        // No conditional headers at all: serve the body.
+        assert!(!not_modified(&HeaderMap::new(), etag, Some(now)));
+    }
+
+    #[test]
+    fn conditional_if_modified_since() {
+        let etag = "\"abc.def.10\"";
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 500_000_000);
+        let date = |t: std::time::SystemTime| httpdate::fmt_http_date(t);
+
+        // The exact Last-Modified we handed out comes back: not modified,
+        // even though the real mtime carries sub-second precision the HTTP
+        // date lost.
+        assert!(not_modified(
+            &hdrs(&[(header::IF_MODIFIED_SINCE, &date(mtime))]),
+            etag,
+            Some(mtime)
+        ));
+        // Client's copy predates the file: modified.
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(!not_modified(
+            &hdrs(&[(header::IF_MODIFIED_SINCE, &date(mtime - hour))]),
+            etag,
+            Some(mtime)
+        ));
+        assert!(not_modified(
+            &hdrs(&[(header::IF_MODIFIED_SINCE, &date(mtime + hour))]),
+            etag,
+            Some(mtime)
+        ));
+        // Garbage date: ignore the header, serve the body.
+        assert!(!not_modified(
+            &hdrs(&[(header::IF_MODIFIED_SINCE, "not a date")]),
+            etag,
+            Some(mtime)
+        ));
+        // If-None-Match present and failing wins over a matching date
+        // (RFC 9110 §13.1.3: a recipient MUST ignore If-Modified-Since when
+        // the request contains an If-None-Match).
+        assert!(!not_modified(
+            &hdrs(&[
+                (header::IF_NONE_MATCH, "\"stale\""),
+                (header::IF_MODIFIED_SINCE, &date(mtime + hour)),
+            ]),
+            etag,
+            Some(mtime)
+        ));
+    }
+
+    // Range requests must keep working (video seeking) and must not splice
+    // bytes of a changed file: a stale If-Range validator downgrades to the
+    // full body.
+    #[test]
+    fn if_range_gates_partial_content() {
+        let etag = "\"abc.def.10\"";
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+
+        // No If-Range: the Range header applies as before.
+        assert!(if_range_matches(&HeaderMap::new(), etag, Some(mtime)));
+        // Current validator: still applies.
+        assert!(if_range_matches(
+            &hdrs(&[(header::IF_RANGE, etag)]),
+            etag,
+            Some(mtime)
+        ));
+        assert!(if_range_matches(
+            &hdrs(&[(header::IF_RANGE, &httpdate::fmt_http_date(mtime))]),
+            etag,
+            Some(mtime)
+        ));
+        // Stale tag, weak tag, or stale date: serve the full body instead.
+        assert!(!if_range_matches(
+            &hdrs(&[(header::IF_RANGE, "\"stale\"")]),
+            etag,
+            Some(mtime)
+        ));
+        assert!(!if_range_matches(
+            &hdrs(&[(header::IF_RANGE, "W/\"abc.def.10\"")]),
+            etag,
+            Some(mtime)
+        ));
+        let earlier = mtime - std::time::Duration::from_secs(3600);
+        assert!(!if_range_matches(
+            &hdrs(&[(header::IF_RANGE, &httpdate::fmt_http_date(earlier))]),
+            etag,
+            Some(mtime)
+        ));
+    }
+
+    // Issue #28 §2: the rendered thumbnail fits the requested box with the
+    // aspect ratio preserved, and the encoding follows the alpha channel —
+    // JPEG for opaque sources, PNG when transparency must survive.
+    #[test]
+    fn thumb_downscales_and_picks_format() {
+        let tree = TmpTree::new("thumb-render");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+
+        let opaque = root.join("opaque.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            64,
+            48,
+            image::Rgb([200, 60, 60]),
+        ))
+        .save(&opaque)
+        .unwrap();
+        let (bytes, ext) = render_thumb(&opaque, 16).unwrap();
+        assert_eq!(ext, "jpg");
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((out.width(), out.height()), (16, 12), "fits 16x16 box");
+
+        let alpha = root.join("alpha.png");
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            48,
+            64,
+            image::Rgba([0, 120, 0, 128]),
+        ))
+        .save(&alpha)
+        .unwrap();
+        let (bytes, ext) = render_thumb(&alpha, 16).unwrap();
+        assert_eq!(ext, "png", "alpha source keeps transparency via PNG");
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((out.width(), out.height()), (12, 16));
+    }
+
+    // A source already smaller than the box ships at its own size — blowing
+    // an 8 px icon up to 256 px would only waste bytes and blur.
+    #[test]
+    fn thumb_never_upscales() {
+        let tree = TmpTree::new("thumb-small");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        let small = root.join("small.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 6))
+            .save(&small)
+            .unwrap();
+        let (bytes, _) = render_thumb(&small, 256).unwrap();
+        let out = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((out.width(), out.height()), (8, 6));
+    }
+
+    // The 415-vs-IO split the handler relies on: bytes that don't decode
+    // (e.g. a macOS "._" AppleDouble file named .png) are a decode error the
+    // frontend turns into a /api/raw fallback, while a missing file stays an
+    // IO error mapped through io_err (404).
+    #[test]
+    fn thumb_separates_decode_errors_from_io() {
+        let tree = TmpTree::new("thumb-errors");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("fake.png"), b"this is not an image").unwrap();
+
+        let err = render_thumb(&root.join("fake.png"), 128).unwrap_err();
+        assert!(
+            !matches!(err, image::ImageError::IoError(_)),
+            "decode failure, not IO: {err}"
+        );
+        let err = render_thumb(&root.join("missing.png"), 128).unwrap_err();
+        assert!(matches!(err, image::ImageError::IoError(_)));
+    }
+
+    // The disk-cache key is the thumbnail's full identity: any change to the
+    // source path, its content (mtime/size), or the requested width must miss
+    // — and the key must be a single plain file name, never a path.
+    #[test]
+    fn thumb_cache_key_tracks_identity() {
+        let tree = TmpTree::new("thumb-key");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        std::fs::write(root.join("a.png"), b"aaaa").unwrap();
+        std::fs::write(root.join("b.png"), b"aaaa").unwrap();
+        let ma = std::fs::metadata(root.join("a.png")).unwrap();
+        let mb = std::fs::metadata(root.join("b.png")).unwrap();
+
+        let key = thumb_cache_key(&root.join("a.png"), &ma, 128);
+        assert!(safe_name(&key).is_some(), "plain file name: {key}");
+        assert_eq!(key, thumb_cache_key(&root.join("a.png"), &ma, 128));
+        assert_ne!(key, thumb_cache_key(&root.join("b.png"), &mb, 128));
+        assert_ne!(key, thumb_cache_key(&root.join("a.png"), &ma, 256));
+
+        std::fs::write(root.join("a.png"), b"aaaa-changed").unwrap();
+        let ma2 = std::fs::metadata(root.join("a.png")).unwrap();
+        assert_ne!(key, thumb_cache_key(&root.join("a.png"), &ma2, 128));
+    }
+
+    // store_thumb commits atomically (no .part litter) and a second write of
+    // the same key — two concurrent first requests — lands cleanly.
+    #[tokio::test]
+    async fn thumb_cache_store_roundtrip() {
+        let tree = TmpTree::new("thumb-store");
+        let dir = std::fs::canonicalize(&tree.0).unwrap().join("cache");
+
+        store_thumb(&dir, "k.jpg", b"payload").await;
+        assert_eq!(std::fs::read(dir.join("k.jpg")).unwrap(), b"payload");
+        store_thumb(&dir, "k.jpg", b"payload2").await;
+        assert_eq!(std::fs::read(dir.join("k.jpg")).unwrap(), b"payload2");
+        assert!(part_files(&dir).is_empty(), "no temp litter");
     }
 }

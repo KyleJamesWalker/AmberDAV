@@ -404,14 +404,26 @@ function typeOf(name, dir) {
 // ---- icons ----
 const ICON_DIR = '<svg class="ic dir" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>';
 const ICON_FILE = '<svg class="ic file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
-const thumbUrl = (e) => '/api/raw?path=' + enc(join(cwd, e.name));
+const rawUrl = (e) => '/api/raw?path=' + enc(join(cwd, e.name));
+// Server-side downscaled thumbnail (issue #28): the grid no longer pulls the
+// full original per 128 px cell. One fixed width — the largest cell at 2x
+// DPR — so the list and grid views share a single browser-cache entry per
+// file instead of re-fetching per size.
+const thumbUrl = (e) => '/api/thumb?path=' + enc(join(cwd, e.name)) + '&w=256';
 // Build the generic file icon as a DOM node, used as a thumbnail fallback.
 function fileIcon() { const d = document.createElement('div'); d.innerHTML = ICON_FILE; return d.firstChild; }
-// A thumbnail failed to decode (e.g. a non-image with an image extension, like
-// a macOS "._" AppleDouble file): swap in the file icon. Done in JS rather than
-// an inline onerror that embeds the SVG — quoting an SVG (which contains ")
-// inside an HTML attribute broke the row markup and leaked a stray '"> as text.
-function thumbFail(img) { img.replaceWith(fileIcon()); }
+// A thumbnail failed: first retry once with the original via /api/raw —
+// /api/thumb 415s on formats its decoders don't know (SVG renders natively
+// in the browser) — then, if the original doesn't decode either (e.g. a
+// macOS "._" AppleDouble file named .png), swap in the file icon. Done in JS
+// rather than an inline onerror that embeds the SVG — quoting an SVG (which
+// contains ") inside an HTML attribute broke the row markup and leaked a
+// stray '"> as text.
+function thumbFail(img) {
+  const raw = img.dataset.raw;
+  if (raw) { img.removeAttribute('data-raw'); img.src = raw; return; }
+  img.replaceWith(fileIcon());
+}
 
 // ---- helpers ----
 function toast(msg, isErr) {
@@ -503,7 +515,7 @@ function renderList() {
     const tr = document.createElement('tr');
     if (selection.has(e.name)) tr.classList.add('sel');
     const icon = e.dir ? ICON_DIR : (isImg(e)
-      ? `<img class="thumb" loading="lazy" src="${thumbUrl(e)}" onerror="thumbFail(this)">`
+      ? `<img class="thumb" loading="lazy" src="${thumbUrl(e)}" data-raw="${rawUrl(e)}" onerror="thumbFail(this)">`
       : ICON_FILE);
     tr.innerHTML =
       `<td class="name">${icon}<span class="nm">${escapeHtml(e.name)}</span></td>` +
@@ -522,7 +534,7 @@ function renderGrid() {
   view.forEach((e, idx) => {
     const card = document.createElement('div'); card.className = 'gcard' + (selection.has(e.name) ? ' sel' : '');
     const inner = e.dir ? ICON_DIR : (isImg(e)
-      ? `<img loading="lazy" src="${thumbUrl(e)}" onerror="thumbFail(this)">`
+      ? `<img loading="lazy" src="${thumbUrl(e)}" data-raw="${rawUrl(e)}" onerror="thumbFail(this)">`
       : ICON_FILE);
     card.innerHTML = `<div class="gthumb">${inner}</div><div class="gname">${escapeHtml(e.name)}</div>`;
     attachRowEvents(card, e, idx);
