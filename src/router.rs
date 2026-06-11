@@ -127,10 +127,17 @@ mod tests {
     /// Real `AppState` over `root`, exactly as `main()` wires it (canonical
     /// root, fixed session token/password) but with test-controlled settings.
     fn state_for(root: &Path, permission: Permission) -> AppState {
-        let settings = Arc::new(Settings {
-            permission,
-            ..Settings::default()
-        });
+        state_with_settings(
+            root,
+            Settings {
+                permission,
+                ..Settings::default()
+            },
+        )
+    }
+
+    fn state_with_settings(root: &Path, settings: Settings) -> AppState {
+        let settings = Arc::new(settings);
         let (events, _) = broadcast::channel(8);
         let throttle = Arc::new(crate::throttle::Throttle::new());
         AppState {
@@ -743,6 +750,42 @@ mod tests {
         // Nothing was created inside the root either — not even the valid
         // `good` prefix of the half-valid escape attempt.
         assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    }
+
+    // --- settings exposure (issue #27) ---------------------------------------
+
+    // /api/settings must never carry the password to the browser, even for a
+    // logged-in session — the login page and README promise it is never shown
+    // there. The UI only needs fixed-vs-random: a fixed password serializes as
+    // a masked placeholder (truthy), a random one as null.
+    #[tokio::test]
+    async fn settings_response_redacts_the_password() {
+        let root = TmpRoot::new("settings-redact");
+        let secret = "fixed-Sup3r-secret";
+
+        // Fixed password: redacted to a placeholder, the secret never appears
+        // anywhere in the response body.
+        let fixed = super::router(state_with_settings(
+            &root.0,
+            Settings {
+                password: Some(secret.to_string()),
+                ..Settings::default()
+            },
+        ));
+        let resp = send(&fixed, get_authed("/api/settings")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(!body.contains(secret), "password leaked: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // Still truthy so the Settings tab keeps showing "fixed code".
+        assert_eq!(json["password"], "(hidden)");
+
+        // Random (per-boot) password: stays null, so the tab shows "random".
+        let random = app(&root, Permission::ReadWrite);
+        let resp = send(&random, get_authed("/api/settings")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["password"], serde_json::Value::Null);
     }
 
     // The landing page routes by session: file manager when logged in,

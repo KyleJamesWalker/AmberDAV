@@ -58,8 +58,30 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
 
 /// Current settings (session-gated), read-only — for display in the UI.
 /// Settings are owned by the config file; the UI never writes them.
+///
+/// The `password` value is redacted server-side: the login page and README
+/// promise the password is never shown in the browser, and the Settings tab
+/// only needs fixed-vs-random — so a fixed password is replaced with a masked
+/// placeholder (still truthy for the UI) and a random one stays `null`
+/// (issue #27 / review §2.21).
 pub async fn get_settings(_: Session, State(state): State<AppState>) -> Response {
-    Json(&*state.settings).into_response()
+    let mut value = serde_json::to_value(&*state.settings).expect("settings serialize");
+    if let Some(obj) = value.as_object_mut() {
+        let fixed = state
+            .settings
+            .password
+            .as_deref()
+            .is_some_and(|p| !p.is_empty());
+        obj.insert(
+            "password".to_string(),
+            if fixed {
+                serde_json::Value::from("(hidden)")
+            } else {
+                serde_json::Value::Null
+            },
+        );
+    }
+    Json(value).into_response()
 }
 
 /// Build the live-input SSE stream. The stream ends as soon as `shutdown`
