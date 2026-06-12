@@ -24,7 +24,7 @@
 //! `state::AppState`, hand it to `router::router()`, serve.
 
 mod auth;
-#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+#[cfg(all(target_os = "linux", device))]
 mod bounce;
 mod canvas;
 mod cli;
@@ -312,7 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             // Give a handheld user time to read the panel before the process
             // (and with it the screen) is gone; headless builds exit at once.
-            #[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+            #[cfg(all(target_os = "linux", device))]
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             std::process::exit(1);
         }
@@ -353,7 +353,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// full SD card, stderr is invisible from the OS menu, so the caller threads
 /// the message into the `config_error` machinery that the device screen and
 /// the web Status tab already display (issue #35).
-#[cfg(any(feature = "fb", feature = "sdl"))]
+#[cfg(device)]
 fn ensure_default_config(path: &std::path::Path) -> Option<String> {
     if path.exists() {
         return None;
@@ -373,7 +373,7 @@ fn ensure_default_config(path: &std::path::Path) -> Option<String> {
 
 /// Desktop/server builds never write a config implicitly (`--save` opts in),
 /// so there is nothing to attempt and nothing to report.
-#[cfg(not(any(feature = "fb", feature = "sdl")))]
+#[cfg(not(device))]
 fn ensure_default_config(_path: &std::path::Path) -> Option<String> {
     None
 }
@@ -633,7 +633,7 @@ mod tests {
     // First-run config handling on device builds: a failed write must be
     // *returned* (not just logged) so it reaches the device screen and the
     // Status tab via the config_error machinery (issue #35).
-    #[cfg(any(feature = "fb", feature = "sdl"))]
+    #[cfg(device)]
     mod ensure_default_config {
         use crate::ensure_default_config;
 

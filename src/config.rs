@@ -170,7 +170,7 @@ pub fn config_path() -> PathBuf {
         }
     }
 
-    #[cfg(any(feature = "fb", feature = "sdl"))]
+    #[cfg(device)]
     {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
@@ -180,7 +180,7 @@ pub fn config_path() -> PathBuf {
         PathBuf::from("config.json")
     }
 
-    #[cfg(not(any(feature = "fb", feature = "sdl")))]
+    #[cfg(not(device))]
     {
         if let Some(proj) = directories::ProjectDirs::from("", "", "amber-dav") {
             return proj.config_dir().join("config.json");

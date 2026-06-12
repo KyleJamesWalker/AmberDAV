@@ -57,10 +57,7 @@ pub struct InputKeys {
 /// [`key_action`] resolves the overlap (exit first, then blank, then bounce).
 // Constructed by the device (`fb`/`sdl`, Linux) event loop; host builds only
 // reach it through the unit tests, so allow it to be dead there.
-#[cfg_attr(
-    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
-    allow(dead_code)
-)]
+#[cfg_attr(not(all(target_os = "linux", device)), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeyAction {
     /// Quit the app (returning the handheld to the OS app menu).
@@ -75,10 +72,7 @@ pub enum KeyAction {
 /// means the code is not a control and the event is only forwarded. Pure so
 /// the exit/blank/bounce precedence is host-testable (the evdev reader that
 /// calls it only compiles on the devices).
-#[cfg_attr(
-    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
-    allow(dead_code)
-)]
+#[cfg_attr(not(all(target_os = "linux", device)), allow(dead_code))]
 pub fn key_action(code: u16, keys: &InputKeys) -> Option<KeyAction> {
     if keys.exit.contains(&code) {
         Some(KeyAction::Exit)
@@ -99,10 +93,7 @@ pub fn key_action(code: u16, keys: &InputKeys) -> Option<KeyAction> {
 /// its device goes away, after which a node reappearing at the same path is
 /// claimed again on a later scan (issue #49). Pure so the gate is
 /// host-testable (the evdev scan that calls it only compiles on the devices).
-#[cfg_attr(
-    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
-    allow(dead_code)
-)]
+#[cfg_attr(not(all(target_os = "linux", device)), allow(dead_code))]
 pub fn should_spawn_reader(
     path: &str,
     has_keys: bool,
@@ -119,10 +110,10 @@ pub fn should_spawn_reader(
 /// once-per-few-seconds directory scan is negligible next to the device
 /// screen's repaint cadence. Latency of up to one interval before a
 /// just-paired pad responds is fine for this use.
-#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+#[cfg(all(target_os = "linux", device))]
 const RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 
-#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+#[cfg(all(target_os = "linux", device))]
 pub fn spawn(
     tx: broadcast::Sender<InputUpdate>,
     mode: crate::screen::ModeHandle,
@@ -157,7 +148,7 @@ pub fn spawn(
 /// node that doesn't already have one. Re-runs cheaply — nodes with an active
 /// reader are skipped via `should_spawn_reader`, so repeated scans only ever
 /// add readers for newly appeared devices.
-#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+#[cfg(all(target_os = "linux", device))]
 fn scan(
     tx: &broadcast::Sender<InputUpdate>,
     mode: &crate::screen::ModeHandle,
@@ -293,7 +284,7 @@ fn scan(
     }
 }
 
-#[cfg(not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))))]
+#[cfg(not(all(target_os = "linux", device)))]
 pub fn spawn(
     _tx: broadcast::Sender<InputUpdate>,
     _mode: crate::screen::ModeHandle,
