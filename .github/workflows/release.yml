@@ -1,8 +1,13 @@
 name: Release
 
-# Triggered when a GitHub Release is published (created via the Releases UI or
-# `gh release create`). The release tag drives the version; this workflow builds
-# a binary per platform and attaches each to the release.
+# Triggered when a GitHub Release is published — via the Releases UI or, the
+# recommended invocation (issue #51):
+#
+#   gh release create vX.Y.Z --generate-notes
+#
+# (--generate-notes drafts the release body from the merged PRs since the
+# last tag.) The release tag drives the version; this workflow builds a
+# binary per platform and attaches each to the release.
 #
 #   amber-dav-aarch64-linux-fb        static musl build for the Anbernic device
 #   amber-dav-aarch64-linux           static musl build for ARM servers/Pi/NAS (headless)
