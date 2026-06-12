@@ -1282,6 +1282,9 @@ function refreshDisk() { api('GET', '/api/info').then(renderDisk).catch(() => {}
 
 async function loadConn() {
   try { const i = await api('GET', '/api/info');
+    // Browser tab title: use the configured device name as the subtitle so
+    // multiple open instances can be told apart at a glance (issue #101).
+    document.title = 'AmberDAV · ' + (i.name || 'web access');
     // A broken config.json boots with defaults; make that loud here since
     // stderr is invisible on a handheld (issue #19).
     const warn = $('conn-warn');

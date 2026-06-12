@@ -84,6 +84,11 @@ pub struct Cli {
     #[arg(long)]
     pub save: bool,
 
+    /// Human-readable device name shown in the browser tab title.
+    /// [env: AMBERDAV_NAME] [default: (none — subtitle is "web access")]
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+
     /// Verbose (debug-level) logging. [env: AMBERDAV_LOG=error|warn|info|debug|trace]
     #[arg(short, long)]
     pub verbose: bool,
@@ -210,6 +215,9 @@ impl Cli {
             .or_else(|| env_u16_list("AMBERDAV_BOUNCE_KEYS"))
         {
             s.bounce_keys = v;
+        }
+        if let Some(v) = self.name.clone().or_else(|| env_str("AMBERDAV_NAME")) {
+            s.name = Some(v);
         }
         s
     }
@@ -389,6 +397,32 @@ mod tests {
         let env = [("AMBERDAV_PERMISSION", "rwx")];
         let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
         assert_eq!(s.permission, Permission::ReadWrite);
+    }
+
+    // Device name follows the same CLI > env > file > default precedence.
+    #[test]
+    fn name_resolves_through_the_layers() {
+        let file = Settings {
+            name: Some("file-name".to_string()),
+            ..Settings::default()
+        };
+        let env = [("AMBERDAV_NAME", "env-name")];
+
+        // CLI beats env.
+        let s = cli(&["--name", "cli-name"]).resolve_with(file.clone(), env_of(&env));
+        assert_eq!(s.name.as_deref(), Some("cli-name"));
+
+        // Env beats file.
+        let s = cli(&[]).resolve_with(file.clone(), env_of(&env));
+        assert_eq!(s.name.as_deref(), Some("env-name"));
+
+        // File survives when neither CLI nor env supplies a value.
+        let s = cli(&[]).resolve_with(file, env_of(&[]));
+        assert_eq!(s.name.as_deref(), Some("file-name"));
+
+        // Nothing set → None (falls back to "web access" in the UI).
+        let s = cli(&[]).resolve_with(Settings::default(), env_of(&[]));
+        assert_eq!(s.name, None);
     }
 
     // Key-code lists: the plural var wins, the legacy singular AMBERDAV_EXIT_KEY
