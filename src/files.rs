@@ -105,6 +105,11 @@ async fn confine(root: &Path, path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+/// Zip-download pipe depth: how far the archive writer may run ahead of the
+/// client before it backpressures. 64 KiB keeps memory bounded per download
+/// while comfortably covering a typical TCP send window on the device.
+const ZIP_PIPE_BUFFER: usize = 64 * 1024;
+
 fn ok() -> Response {
     Json(serde_json::json!({ "ok": true })).into_response()
 }
@@ -201,12 +206,12 @@ pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQue
         });
     }
 
-    // Folders first, then case-insensitive by name.
-    entries.sort_by(|a, b| {
-        b.dir
-            .cmp(&a.dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    // Deliberately unsorted (issue #58): ordering is the client's job — the
+    // web UI's sortView() re-sorts every listing by the user's chosen column
+    // anyway (and is this endpoint's only consumer), so a server-side sort
+    // was pure waste; the old comparator allocated two lowercase Strings per
+    // comparison (~120k transient allocations for a 5,000-entry folder on
+    // the A53). Entries arrive in readdir order — assume nothing about it.
     Json(entries).into_response()
 }
 
@@ -1308,7 +1313,7 @@ pub async fn zip(_: Session, State(s): State<AppState>, Query(q): Query<ZipQuery
 
     // Stream the archive: a writer task fills one end of a pipe, the response
     // reads the other. Memory stays bounded to the pipe buffer.
-    let (writer, reader) = tokio::io::duplex(64 * 1024);
+    let (writer, reader) = tokio::io::duplex(ZIP_PIPE_BUFFER);
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<std::io::Result<()>>();
     tokio::spawn(async move {
         let res = build_zip(writer, roots).await;

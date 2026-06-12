@@ -16,8 +16,25 @@
 //!
 //! The result is exposed as `AMBERDAV_VERSION`; `src/version.rs` falls back
 //! to `CARGO_PKG_VERSION` if the variable is ever absent.
+//!
+//! Also emits the `device` cfg (issue #52): `fb` and `sdl` are two sinks for
+//! the same on-device screen/input code, and "either is enabled" was spelled
+//! `any(feature = "fb", feature = "sdl")` at ~20 sites. `#[cfg(device)]`
+//! is that condition; sink-specific gates (`fb` without `sdl`, `sdl` alone)
+//! keep naming their features.
 
 fn main() {
+    // Registered unconditionally so check-cfg knows the name in every build;
+    // set only when a device feature is on. Cargo re-runs this script when
+    // the feature set changes (CARGO_FEATURE_* is part of its fingerprint),
+    // so the cfg can never go stale.
+    println!("cargo:rustc-check-cfg=cfg(device)");
+    if std::env::var_os("CARGO_FEATURE_FB").is_some()
+        || std::env::var_os("CARGO_FEATURE_SDL").is_some()
+    {
+        println!("cargo:rustc-cfg=device");
+    }
+
     // Printing any rerun-if directive replaces cargo's default "rerun on any
     // file change", so list build.rs itself plus the cheap, best-effort git
     // state markers: HEAD moves on checkout/branch switch, the index is

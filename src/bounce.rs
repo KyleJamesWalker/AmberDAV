@@ -227,14 +227,18 @@ fn is_image(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Image-scan ceiling: stop collecting once this many images are found, so
+/// pointing the screensaver at a giant ROM/media tree can't stall startup or
+/// hold thousands of paths for a feature that shows one image at a time.
+const SCAN_IMAGE_CAP: usize = 5000;
+
 /// Expand the configured files/folders into a flat list of image files.
 /// Folders are walked recursively (bounded, to stay responsive).
 fn scan_images(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack: Vec<PathBuf> = roots.to_vec();
-    let cap = 5000;
     while let Some(p) = stack.pop() {
-        if out.len() >= cap {
+        if out.len() >= SCAN_IMAGE_CAP {
             break;
         }
         if p.is_dir() {

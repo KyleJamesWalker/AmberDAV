@@ -309,11 +309,18 @@ mod tests {
         let resp = send(&app, get_authed("/api/list")).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let entries: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
-        // Folders sort first, then files.
-        assert_eq!(entries[0]["name"], "sub");
-        assert_eq!(entries[0]["dir"], true);
-        assert_eq!(entries[1]["name"], "a.txt");
-        assert_eq!(entries[1]["size"], 3);
+        // Order-independent on purpose: listings are deliberately unsorted
+        // (readdir order) — the web UI re-sorts client-side (issue #58).
+        let entries = entries.as_array().expect("listing is an array");
+        assert_eq!(entries.len(), 2);
+        let sub = entries.iter().find(|e| e["name"] == "sub").expect("sub");
+        assert_eq!(sub["dir"], true);
+        let file = entries
+            .iter()
+            .find(|e| e["name"] == "a.txt")
+            .expect("a.txt");
+        assert_eq!(file["dir"], false);
+        assert_eq!(file["size"], 3);
     }
 
     // /api/info carries the disk gauge fields for the served root: numbers on
@@ -342,6 +349,61 @@ mod tests {
             cfg.ends_with("config.json"),
             "unexpected config_path: {cfg}"
         );
+    }
+
+    // The embedded SPA and login page are immutable per build, so they carry
+    // a strong ETag and answer a matching If-None-Match with 304 (issue #58).
+    // Auth still comes first: an unauthenticated / redirects even with a
+    // matching tag.
+    #[tokio::test]
+    async fn embedded_pages_serve_etags_and_304() {
+        let root = TmpRoot::new("etag");
+        let app = app(&root, Permission::ReadOnly);
+
+        // First visit: 200 with a quoted ETag and the real page body.
+        let resp = send(&app, get_authed("/")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp.headers()[header::ETAG].to_str().unwrap().to_string();
+        assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+        assert!(body_string(resp).await.contains("AmberDAV"));
+
+        // Revisit with the tag: 304 with the tag, no body re-sent.
+        let resp = send(
+            &app,
+            get_authed_with("/", &[(header::IF_NONE_MATCH, &etag)]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(resp.headers()[header::ETAG].to_str().unwrap(), etag);
+        assert!(body_string(resp).await.is_empty());
+
+        // A stale tag (e.g. from a previous build) re-serves the full page.
+        let resp = send(
+            &app,
+            get_authed_with("/", &[(header::IF_NONE_MATCH, "\"stale\"")]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The public login page gets the same treatment, with its own tag.
+        let resp = send(&app, get("/login")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let login_etag = resp.headers()[header::ETAG].to_str().unwrap().to_string();
+        assert_ne!(login_etag, etag, "distinct content, distinct tags");
+        let req = Request::builder()
+            .uri("/login")
+            .header(header::IF_NONE_MATCH, &login_etag)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&app, req).await.status(), StatusCode::NOT_MODIFIED);
+
+        // Auth outranks caching: no session means redirect, never 304.
+        let req = Request::builder()
+            .uri("/")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(send(&app, req).await.status(), StatusCode::SEE_OTHER);
     }
 
     // --- zip downloads ----------------------------------------------------

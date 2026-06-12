@@ -12,10 +12,7 @@
 // it are only compiled with the `fb`/`sdl` features on Linux). Suppress
 // dead-code lints so that `cargo clippy -- -D warnings` stays clean on every
 // host without hiding real dead code on device builds.
-#![cfg_attr(
-    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
-    allow(dead_code)
-)]
+#![cfg_attr(not(all(target_os = "linux", device)), allow(dead_code))]
 
 use std::net::IpAddr;
 

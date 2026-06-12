@@ -24,7 +24,7 @@
 //! `state::AppState`, hand it to `router::router()`, serve.
 
 mod auth;
-#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+#[cfg(all(target_os = "linux", device))]
 mod bounce;
 mod canvas;
 mod cli;
@@ -64,6 +64,98 @@ use input::InputUpdate;
 use state::{current_ip, AppState, ServerInfo, SharedSettings};
 use webdav::DavState;
 
+/// Random-password length: 8 chars from the 31-symbol charset is ~40 bits —
+/// combined with the per-IP login throttle this puts brute force far out of
+/// reach on a hostile LAN while staying easy to read off the device screen
+/// and type (issue #27).
+const PASSWORD_LEN: usize = 8;
+
+/// Session-token length: never displayed or typed, so it can be long enough
+/// (~160 bits) that guessing the cookie is hopeless.
+const SESSION_TOKEN_LEN: usize = 32;
+
+/// Input-event broadcast depth. A slow SSE consumer that falls more than
+/// this many events behind starts losing the oldest ones (the live viewer
+/// is diagnostic; freshness beats completeness).
+const INPUT_EVENT_BUFFER: usize = 256;
+
+/// Effective boot values: what the server actually runs with after the
+/// settings ladder (CLI > env > file > default, [`cli::Cli::resolve`]) is
+/// topped with the compiled fallbacks and per-boot derivations.
+struct Effective {
+    root: String,
+    port: u16,
+    bind: String,
+    password: String,
+    /// Forced true for a random password — it must be shown somewhere, or it
+    /// could never be discovered.
+    display_password: bool,
+    bounce_enabled: bool,
+    /// Screensaver sources with relative entries resolved against the served
+    /// root; empty when the screensaver is disabled.
+    bounce_paths: Vec<PathBuf>,
+}
+
+/// The second resolution layer (issue #54): derive the effective boot values
+/// from resolved settings. Pure — the random password is injected via
+/// `generate`, called only when no fixed password is configured — so the
+/// fallback rules are unit-testable.
+fn effective(settings: &config::Settings, generate: impl FnOnce() -> String) -> Effective {
+    let root = settings
+        .root
+        .clone()
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| ".".to_string());
+    let port = settings.port.unwrap_or(8080);
+    let bind = settings
+        .bind
+        .clone()
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+
+    // Fixed from config when non-empty, else a fresh random one per boot.
+    let random_password = settings
+        .password
+        .as_deref()
+        .map(str::is_empty)
+        .unwrap_or(true);
+    let password = settings
+        .password
+        .clone()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(generate);
+
+    let bounce_enabled = settings.bounce_screen.enabled;
+    let bounce_paths: Vec<PathBuf> = if bounce_enabled {
+        settings
+            .bounce_screen
+            .folders
+            .iter()
+            .filter(|f| !f.is_empty())
+            .map(|f| {
+                let p = PathBuf::from(f);
+                if p.is_absolute() {
+                    p
+                } else {
+                    PathBuf::from(&root).join(f)
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Effective {
+        root,
+        port,
+        bind,
+        password,
+        display_password: random_password || settings.display_password,
+        bounce_enabled,
+        bounce_paths,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = cli::Cli::parse();
@@ -98,18 +190,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Effective root/port/bind, falling back to the compiled defaults.
-    let root = settings
-        .root
-        .clone()
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| ".".to_string());
-    let port = settings.port.unwrap_or(8080);
-    let bind = settings
-        .bind
-        .clone()
-        .filter(|b| !b.is_empty())
-        .unwrap_or_else(|| "0.0.0.0".to_string());
+    // Second resolution layer: settings -> effective boot values. Pure and
+    // unit-tested (issue #54); the randomness is injected.
+    let Effective {
+        root,
+        port,
+        bind,
+        password,
+        display_password,
+        bounce_enabled,
+        bounce_paths,
+    } = effective(&settings, || password::generate(PASSWORD_LEN));
 
     // A specific bind address (not 0.0.0.0/::) is the only address that
     // accepts connections — pin it now so every user-facing surface (banner +
@@ -117,48 +208,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a detected LAN IP that would refuse to connect (issue #59).
     state::pin_advertised_ip(&bind);
 
-    // Effective password: fixed from config, else a fresh random one. 8 chars
-    // from the 31-symbol charset is ~40 bits — combined with the per-IP login
-    // throttle this puts brute force far out of reach on a hostile LAN while
-    // staying easy to read off the device screen and type (issue #27).
-    let random_password = settings
-        .password
-        .as_deref()
-        .map(str::is_empty)
-        .unwrap_or(true);
-    let password = settings
-        .password
-        .clone()
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| password::generate(8));
-
-    // A random password must always be shown, or it can never be discovered.
-    let display_password = random_password || settings.display_password;
-
-    // Resolve the bounce-screensaver source paths up front (relative entries
-    // are taken against the served root); only when the feature is enabled.
-    let bounce_enabled = settings.bounce_screen.enabled;
-    let bounce_paths: Vec<PathBuf> = if bounce_enabled {
-        settings
-            .bounce_screen
-            .folders
-            .iter()
-            .filter(|f| !f.is_empty())
-            .map(|f| {
-                let p = PathBuf::from(f);
-                if p.is_absolute() {
-                    p
-                } else {
-                    PathBuf::from(&root).join(f)
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     // Long, unguessable session token (never shown; lives only in the cookie).
-    let session = password::generate(32);
+    let session = password::generate(SESSION_TOKEN_LEN);
     let ip = current_ip();
 
     // Canonicalize the served root so path-safety checks have a stable base.
@@ -176,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown = CancellationToken::new();
 
     // Broadcast channel carrying input events to all connected SSE clients.
-    let (events, _) = broadcast::channel::<InputUpdate>(256);
+    let (events, _) = broadcast::channel::<InputUpdate>(INPUT_EVENT_BUFFER);
     input::spawn(
         events.clone(),
         screen_mode.clone(),
@@ -261,7 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             // Give a handheld user time to read the panel before the process
             // (and with it the screen) is gone; headless builds exit at once.
-            #[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+            #[cfg(all(target_os = "linux", device))]
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             std::process::exit(1);
         }
@@ -302,7 +353,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// full SD card, stderr is invisible from the OS menu, so the caller threads
 /// the message into the `config_error` machinery that the device screen and
 /// the web Status tab already display (issue #35).
-#[cfg(any(feature = "fb", feature = "sdl"))]
+#[cfg(device)]
 fn ensure_default_config(path: &std::path::Path) -> Option<String> {
     if path.exists() {
         return None;
@@ -322,7 +373,7 @@ fn ensure_default_config(path: &std::path::Path) -> Option<String> {
 
 /// Desktop/server builds never write a config implicitly (`--save` opts in),
 /// so there is nothing to attempt and nothing to report.
-#[cfg(not(any(feature = "fb", feature = "sdl")))]
+#[cfg(not(device))]
 fn ensure_default_config(_path: &std::path::Path) -> Option<String> {
     None
 }
@@ -436,6 +487,83 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn no_gen() -> String {
+        panic!("generate must not be called when a fixed password is set")
+    }
+
+    // Empty/absent settings fall back to the compiled defaults, and an
+    // absent password triggers exactly one generation, which forces
+    // display_password on (a never-shown random password is undiscoverable).
+    #[test]
+    fn effective_defaults_and_random_password() {
+        let e = effective(&config::Settings::default(), || "gen-pw".to_string());
+        assert_eq!(e.root, ".");
+        assert_eq!(e.port, 8080);
+        assert_eq!(e.bind, "0.0.0.0");
+        assert_eq!(e.password, "gen-pw");
+        assert!(e.display_password, "random password must be displayable");
+        assert!(!e.bounce_enabled);
+        assert!(e.bounce_paths.is_empty());
+
+        // Empty strings count as unset, same as None (a blanked config line).
+        let s = config::Settings {
+            root: Some(String::new()),
+            bind: Some(String::new()),
+            password: Some(String::new()),
+            ..config::Settings::default()
+        };
+        let e = effective(&s, || "gen2".to_string());
+        assert_eq!((e.root.as_str(), e.bind.as_str()), (".", "0.0.0.0"));
+        assert_eq!(e.password, "gen2");
+    }
+
+    // A configured password is used verbatim, never regenerated, and
+    // display_password stays whatever the config says.
+    #[test]
+    fn effective_fixed_password_respects_display_flag() {
+        let s = config::Settings {
+            password: Some("fixed".to_string()),
+            display_password: false,
+            root: Some("/srv/files".to_string()),
+            port: Some(9000),
+            bind: Some("127.0.0.1".to_string()),
+            ..config::Settings::default()
+        };
+        let e = effective(&s, no_gen);
+        assert_eq!(e.password, "fixed");
+        assert!(!e.display_password, "fixed password may stay hidden");
+        assert_eq!(e.root, "/srv/files");
+        assert_eq!(e.port, 9000);
+        assert_eq!(e.bind, "127.0.0.1");
+    }
+
+    // Bounce paths resolve only when enabled: relative entries against the
+    // served root, absolute ones verbatim, empties dropped; disabled means
+    // no paths at all even if folders are configured.
+    #[test]
+    fn effective_bounce_path_resolution() {
+        let mut s = config::Settings {
+            root: Some("/srv/files".to_string()),
+            ..config::Settings::default()
+        };
+        s.bounce_screen.enabled = true;
+        s.bounce_screen.folders = vec!["covers".to_string(), "/abs/art".to_string(), String::new()];
+        let e = effective(&s, || "x".to_string());
+        assert!(e.bounce_enabled);
+        assert_eq!(
+            e.bounce_paths,
+            vec![
+                PathBuf::from("/srv/files/covers"),
+                PathBuf::from("/abs/art")
+            ]
+        );
+
+        s.bounce_screen.enabled = false;
+        let e = effective(&s, || "x".to_string());
+        assert!(!e.bounce_enabled);
+        assert!(e.bounce_paths.is_empty(), "disabled resolves nothing");
+    }
+
     // The device exit paths (gamepad exit key, SDL window close) cancel the
     // shared token instead of calling std::process::exit; the serve loop's
     // shutdown future must resolve from that alone, no OS signal involved
@@ -505,7 +633,7 @@ mod tests {
     // First-run config handling on device builds: a failed write must be
     // *returned* (not just logged) so it reaches the device screen and the
     // Status tab via the config_error machinery (issue #35).
-    #[cfg(any(feature = "fb", feature = "sdl"))]
+    #[cfg(device)]
     mod ensure_default_config {
         use crate::ensure_default_config;
 

@@ -213,7 +213,7 @@ fn show_framebuffer(
     });
 }
 
-#[cfg(not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))))]
+#[cfg(not(all(target_os = "linux", device)))]
 pub fn show(
     _port: u16,
     _password: Option<String>,

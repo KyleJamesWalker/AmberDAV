@@ -20,10 +20,7 @@
 
 // On non-device builds only the unit tests exercise this module (same
 // pattern as canvas.rs).
-#![cfg_attr(
-    not(all(target_os = "linux", any(feature = "fb", feature = "sdl"))),
-    allow(dead_code)
-)]
+#![cfg_attr(not(all(target_os = "linux", device)), allow(dead_code))]
 
 use std::net::IpAddr;
 
@@ -94,7 +91,7 @@ impl StaticCache {
 /// Per-sink frame producer: owns the static inputs (port / password /
 /// startup error), the bounce engine when the sink supports one, and the
 /// render cache.
-#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+#[cfg(all(target_os = "linux", device))]
 pub struct FrameSource {
     port: u16,
     password: Option<String>,
@@ -104,7 +101,7 @@ pub struct FrameSource {
     cache: StaticCache,
 }
 
-#[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+#[cfg(all(target_os = "linux", device))]
 impl FrameSource {
     pub fn new(
         port: u16,
@@ -242,7 +239,7 @@ mod tests {
 
     // Device builds: the full FrameSource over the real canvases. Static
     // frames render once and then hit the cache; bounce always updates.
-    #[cfg(all(target_os = "linux", any(feature = "fb", feature = "sdl")))]
+    #[cfg(all(target_os = "linux", device))]
     mod device {
         use super::*;
 

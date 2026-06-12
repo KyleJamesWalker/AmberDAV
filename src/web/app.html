@@ -915,6 +915,9 @@ async function moveDragged(dest) {
 
 // ---- preview modal (navigable gallery) ----
 let previewList = [], previewIdx = -1, previewToken = 0;
+// Largest text file the preview pane will fetch whole; bigger ones say
+// "download instead" rather than stalling the tab on a phone.
+const TEXT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 
 function openPreview(e) {
   // Gallery = all previewable items currently shown, in display order.
@@ -946,7 +949,7 @@ async function showPreviewAt(i) {
   else if (isVid(e)) body.innerHTML = `<video src="${url}" controls autoplay></video>`;
   else if (isAud(e)) body.innerHTML = `<audio src="${url}" controls autoplay></audio>`;
   else if (isTxt(e)) {
-    if (e.size > 2 * 1024 * 1024) { body.innerHTML = '<div class="note">File too large to preview — download instead.</div>'; return; }
+    if (e.size > TEXT_PREVIEW_MAX_BYTES) { body.innerHTML = '<div class="note">File too large to preview — download instead.</div>'; return; }
     try { const r = await fetch(url); const t = await r.text();
       if (token !== previewToken) return;        // user navigated away while loading
       const pre = document.createElement('pre'); pre.textContent = t; body.innerHTML = ''; body.appendChild(pre); }
