@@ -53,6 +53,12 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         // Non-null when the config file was unusable and defaults are in
         // effect — the Status tab shows this loudly (issue #19).
         "config_error": info.config_error,
+        // Where the config file actually lives on this build/platform — the
+        // Settings help used to hardcode the device location ("next to the
+        // binary"), wrong for desktop builds since the platform-dirs change
+        // (issue #60). The same resolution main() loaded from: it consults
+        // only the environment and platform dirs, neither changes at runtime.
+        "config_path": crate::config::config_path().to_string_lossy(),
         "version": crate::version::VERSION,
         // Gamepad input is only read on device builds; elsewhere the live-input
         // stream never emits, so the UI hides that card (issue #15).

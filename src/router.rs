@@ -335,6 +335,13 @@ mod tests {
             let total = info["disk_total"].as_u64().expect("disk_total is a number");
             assert!(total > 0 && free <= total, "free={free} total={total}");
         }
+        // The Settings help renders this instead of a hardcoded device path
+        // (issue #60); it must always be a non-empty path string.
+        let cfg = info["config_path"].as_str().expect("config_path string");
+        assert!(
+            cfg.ends_with("config.json"),
+            "unexpected config_path: {cfg}"
+        );
     }
 
     // --- zip downloads ----------------------------------------------------
