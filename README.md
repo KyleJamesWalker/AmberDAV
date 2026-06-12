@@ -15,7 +15,8 @@ the system `libSDL2` (present on SteamOS and the Anbernic stock OS).
 ## Features
 
 - **File-manager web UI** — a single-page app served at `http://<device-ip>:8080/`:
-  list/grid views, image thumbnails, a hidden-files (dotfiles) toggle, in-browser
+  list/grid views, image thumbnails, a hidden-files toggle (dotfiles only — the
+  Windows hidden attribute and macOS `UF_HIDDEN` flag are not consulted), in-browser
   preview (images, video, audio, text) with arrow-key gallery navigation, an
   in-browser text editor to edit files in place (e.g. `config.json`), breadcrumbs,
   sortable columns, shift-click range select, right-click context menu (new
@@ -187,6 +188,28 @@ On startup the device screen and `log.txt` show the connection details:
 By default the password is a fresh random 8-character code each launch. Set a
 fixed `password` in `config.json` (below) so you don't have to re-read it every
 time.
+
+### WebDAV client notes
+
+- **Windows Explorer / "Map network drive" does not work out of the box.** The
+  built-in WebClient service refuses Basic auth over plain HTTP (amber-dav has
+  no TLS) and caps downloads at ~50 MB. To use it anyway, set two values under
+  `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters`:
+  - `BasicAuthLevel` (DWORD) = `2` — allow Basic auth over HTTP
+  - `FileSizeLimitInBytes` (DWORD) — default `50000000` (~50 MB); raise it up
+    to `4294967295` (~4 GB)
+
+  then restart the service (`net stop webclient && net start webclient`, as
+  administrator). The simpler path on Windows is a real WebDAV client —
+  [rclone](https://rclone.org/webdav/), WinSCP, or Cyberduck — all of which
+  connect without registry changes.
+- **macOS Finder** (Go ▸ Connect to Server, `http://<device-ip>:8080/dav`)
+  works, but Finder issues a flood of PROPFIND requests and can be slow on
+  large folders. `rclone` or Cyberduck are faster.
+- **Locks are advisory.** The server answers `LOCK`/`UNLOCK` (some clients,
+  e.g. the Windows mini-redirector and Office, insist on them) but does not
+  enforce them — fine for a single-user LAN tool, just don't expect two
+  writers to be protected from each other.
 
 ## Configuration
 

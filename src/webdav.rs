@@ -32,9 +32,22 @@ pub struct DavState {
 }
 
 /// Build a read/write WebDAV handler serving `root`, mounted at [`MOUNT`].
+///
+/// The `LocalFs` platform flags are compile-time: on Windows hosts
+/// `case_insensitive` enables dav-server's cached case-insensitive lookups
+/// (the WebClient mini-redirector case-normalizes paths, which would
+/// otherwise miss on exact-case filesystems), and on macOS hosts `macos`
+/// enables its Finder optimizations (`._*` PROPSTAT caching and friends).
+/// Both are `false` elsewhere — notably on the Linux device builds, which
+/// keep the zero-overhead exact-match path.
 pub fn build_handler(root: &str) -> DavHandler {
     DavHandler::builder()
-        .filesystem(LocalFs::new(root, false, false, false))
+        .filesystem(LocalFs::new(
+            root,
+            false,
+            cfg!(windows),
+            cfg!(target_os = "macos"),
+        ))
         .locksystem(FakeLs::new())
         .strip_prefix(MOUNT)
         // Render directory listings in a browser, so `/dav` is browsable too.
