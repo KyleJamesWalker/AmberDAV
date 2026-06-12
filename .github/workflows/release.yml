@@ -36,6 +36,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # MATRIX SYNC (issue #51): this include list must stay identical to the
+      # one in ci.yml (CI's matrix-sync job enforces that), and is mirrored by
+      # src/update.rs::asset_for and the README's asset table — change one,
+      # change all four.
       matrix:
         include:
           # Device build: fully static aarch64 musl, cross-linked with Zig.
