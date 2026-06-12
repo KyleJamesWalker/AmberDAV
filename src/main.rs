@@ -111,6 +111,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "0.0.0.0".to_string());
 
+    // A specific bind address (not 0.0.0.0/::) is the only address that
+    // accepts connections — pin it now so every user-facing surface (banner +
+    // QR, device screen, /api/info, connection.json) advertises it instead of
+    // a detected LAN IP that would refuse to connect (issue #59).
+    state::pin_advertised_ip(&bind);
+
     // Effective password: fixed from config, else a fresh random one. 8 chars
     // from the 31-symbol charset is ~40 bits — combined with the per-IP login
     // throttle this puts brute force far out of reach on a hostile LAN while
@@ -341,7 +347,13 @@ fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
     println!("  serving:  {root}");
     println!("  status:   {status_url}");
     println!("  webdav:   http://{ip}:{port}{}", webdav::MOUNT);
-    println!("  password: {password}   (user: anything)\n");
+    println!("  password: {password}   (user: anything)");
+    // A loopback address only ever shows up here when the server is bound to
+    // one (issue #59) — say so, or the URLs look broken from another device.
+    if ip.is_loopback() {
+        println!("  note:     bound to {ip} — only this machine can connect");
+    }
+    println!();
 
     // A scannable QR to the status page.
     match qrcode::QrCode::new(status_url.as_bytes()) {
