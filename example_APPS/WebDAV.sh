@@ -13,7 +13,7 @@
 #   Roms/APPS/webdav/config.json    <- settings (written on first launch)
 #   Roms/APPS/webdav/log.txt        <- created on launch (IP, password, QR)
 
-. /mnt/mod/ctrl/configs/functions &>/dev/null 2>&1
+. /mnt/mod/ctrl/configs/functions &>/dev/null
 export HOME=/root
 
 progdir="$(cd "$(dirname "$0")" || exit; pwd)"
