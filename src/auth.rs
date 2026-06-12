@@ -17,6 +17,12 @@ use crate::{state::AppState, throttle, throttle::ClientIp};
 
 const COOKIE: &str = "sid";
 
+/// How long a login lasts: 24 hours. The token itself is per-boot, so a
+/// restart logs everyone out regardless; within one boot, a browser that
+/// logged in stays logged in this long — worth knowing on long-running
+/// fixed-password deployments, where the server may not restart for weeks.
+const SESSION_COOKIE_MAX_AGE_SECS: u32 = 86_400;
+
 /// Extracted only when the request carries a valid session cookie; otherwise
 /// rejects with 401 (for `/api/*` fetch calls).
 pub struct Session;
@@ -77,7 +83,7 @@ pub async fn login(
     if constant_time_eq(form.password.as_bytes(), state.info.password.as_bytes()) {
         state.throttle.record_success(ip);
         let cookie = format!(
-            "{COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+            "{COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}",
             state.session
         );
         ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
