@@ -94,12 +94,10 @@
     <!-- Must stay accurate for all three setups (issue #56): a random
          per-boot code on a handheld (device screen), random on a
          desktop/server (startup banner in the terminal), and a fixed
-         configured password. The "never shown in the browser" promise is
-         kept by /api/settings redacting the password server-side. -->
+         configured password. -->
     <div class="hint">The code appears where the app runs — on the device
       screen, or in the startup banner on desktops and servers. Unless a
-      fixed password is configured it changes with every restart, and it is
-      never shown in the browser.</div>
+      fixed password is configured it changes with every restart.</div>
   </form>
 <script>
   if (new URLSearchParams(location.search).has('e')) {
