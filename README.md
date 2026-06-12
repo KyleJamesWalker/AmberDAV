@@ -184,8 +184,7 @@ On startup the device screen and `log.txt` show the connection details:
 ```
 
 - **Web UI:** open `http://<device-ip>:8080/` (or scan the QR), log in with the
-  password shown on the device. The password is shown **on the device only** —
-  never in the browser.
+  password shown on the device.
 - **WebDAV:** point a client at `http://<device-ip>:8080/dav`. The username is
   ignored; the password is the one on screen.
 
