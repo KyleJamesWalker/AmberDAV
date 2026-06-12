@@ -17,17 +17,61 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{auth::Session, input::InputUpdate, state::AppState};
 
+const APP_HTML: &str = include_str!("web/app.html");
+const LOGIN_HTML: &str = include_str!("web/login.html");
+
+/// Strong ETags for the embedded pages (issue #58): a content hash rather
+/// than the version string, because a dev rebuild can change app.html
+/// without changing the git-describe version (same dirty hash) — a
+/// version-derived ETag would then serve a stale 304 during local dev.
+/// Hashed once on first use; zero per-request cost.
+static APP_ETAG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| content_etag(APP_HTML));
+static LOGIN_ETAG: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| content_etag(LOGIN_HTML));
+
+fn content_etag(body: &str) -> String {
+    use sha2::Digest;
+    format!("\"{:x}\"", sha2::Sha256::digest(body.as_bytes()))
+}
+
+/// Whether an `If-None-Match` header matches `etag`. Ours are strong, but
+/// clients may echo a `W/` prefix and may send a list or `*` — If-None-Match
+/// uses the weak comparison (RFC 9110), so the prefix is ignored. Pure for
+/// unit testing.
+fn none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .map(str::trim)
+                .any(|t| t == "*" || t.strip_prefix("W/").unwrap_or(t) == etag)
+        })
+}
+
+/// Serve an embedded page with its ETag, answering a matching
+/// `If-None-Match` with 304 — the pages are immutable per build, so a
+/// revisit skips re-downloading the SPA over the device's slow link.
+fn cached_page(headers: &HeaderMap, etag: &'static str, body: &'static str) -> Response {
+    let tag = [(axum::http::header::ETAG, etag)];
+    if none_match(headers, etag) {
+        (axum::http::StatusCode::NOT_MODIFIED, tag).into_response()
+    } else {
+        (tag, Html(body)).into_response()
+    }
+}
+
 /// Landing page: the file manager if logged in, otherwise the login page.
 pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if crate::auth::is_authed(&headers, &state.session) {
-        Html(include_str!("web/app.html")).into_response()
+        cached_page(&headers, &APP_ETAG, APP_HTML)
     } else {
         Redirect::to("/login").into_response()
     }
 }
 
-pub async fn login_page() -> Html<&'static str> {
-    Html(include_str!("web/login.html"))
+pub async fn login_page(headers: HeaderMap) -> Response {
+    cached_page(&headers, &LOGIN_ETAG, LOGIN_HTML)
 }
 
 /// Connection details for the Status tab (session-gated).
@@ -154,6 +198,33 @@ pub async fn events(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn h(v: &str) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        m.insert(axum::http::header::IF_NONE_MATCH, v.parse().unwrap());
+        m
+    }
+
+    // If-None-Match matching (issue #58): exact tag, weak-prefixed echo,
+    // lists, and `*` all match; other tags and a missing header don't.
+    #[test]
+    fn if_none_match_comparison() {
+        let etag = "\"abc123\"";
+        assert!(none_match(&h("\"abc123\""), etag));
+        assert!(none_match(&h("W/\"abc123\""), etag), "weak echo matches");
+        assert!(none_match(&h("\"zzz\", \"abc123\""), etag), "list matches");
+        assert!(none_match(&h("*"), etag));
+        assert!(!none_match(&h("\"other\""), etag));
+        assert!(!none_match(&HeaderMap::new(), etag), "no header, no match");
+    }
+
+    // The embedded pages hash to distinct, quoted, stable tags.
+    #[test]
+    fn embedded_etags_are_quoted_and_distinct() {
+        assert!(APP_ETAG.starts_with('"') && APP_ETAG.ends_with('"'));
+        assert_ne!(*APP_ETAG, *LOGIN_ETAG);
+        assert_eq!(*APP_ETAG, content_etag(APP_HTML), "stable across calls");
+    }
 
     // The shim's invariants on a real filesystem: positive total, free never
     // exceeding it. (Runs on every unix host; non-unix returns None and is
