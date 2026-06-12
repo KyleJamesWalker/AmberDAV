@@ -154,9 +154,12 @@ pub struct CheckResult {
     pub current: String,
     pub latest: String,
     pub up_to_date: bool,
-    /// True for a from-source build (unstamped `0.0.0[+describe]`). The UI
-    /// labels these instead of advertising an "update" that would replace a
-    /// custom build with the latest release (issue #46).
+    /// True for a from-source build (unstamped `0.0.0[+describe]`). Dev
+    /// builds are pre-release test builds and deliberately replaceable — "this
+    /// is the point of the 0.0.0 builds" (issue #46): sideload one to test,
+    /// then one-click replace it with the published release. The UI uses this
+    /// flag only to label the update offer ("dev build vX → vY"), never to
+    /// warn about or gate it.
     pub dev_build: bool,
     /// Download URL for the matching asset, if one exists for this platform.
     /// Informational only — `apply` re-resolves the asset itself rather than
@@ -164,12 +167,15 @@ pub struct CheckResult {
     pub asset_url: Option<String>,
 }
 
-/// The up-to-date verdict (issue #46): release builds compare numerically —
-/// equal or *newer* than the latest release is up to date, so a local build
-/// of an unreleased version is never offered a downgrade (the old `latest ==
-/// current` string equality flagged it). Dev builds are never "up to date"
-/// (there is nothing meaningful to compare), but the paired `dev_build` flag
-/// tells the UI to present that as "development build", not "update now".
+/// The up-to-date verdict (issue #46): *stamped* release builds compare
+/// numerically — equal or *newer* than the latest release is up to date, so a
+/// local build of an unreleased version is never offered a downgrade (the old
+/// `latest == current` string equality flagged it). Dev builds are never
+/// "up to date" — deliberately: they are pre-release test builds that get
+/// sideloaded onto a device and then one-click replaced by the published
+/// release, so a release must always count as an available update. The paired
+/// `dev_build` flag is purely informational (the UI labels the offer
+/// "dev build").
 fn verdict(current: &str, latest: &str) -> (bool, bool) {
     let dev = crate::version::is_dev(current);
     let up_to_date =
@@ -518,7 +524,8 @@ mod tests {
 
     // The update verdict (issue #46): behind → update; equal and *ahead* →
     // up to date (no downgrade offer, the old string-equality bug); any
-    // unstamped 0.0.0 build → flagged dev and never silently updatable.
+    // unstamped 0.0.0 build → flagged dev and always offered the latest
+    // release, so pre-release test builds stay one-click replaceable.
     #[test]
     fn verdict_handles_release_dev_and_newer_builds() {
         assert_eq!(verdict("1.2.3", "1.3.0"), (false, false)); // behind

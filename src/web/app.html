@@ -1300,15 +1300,16 @@ async function checkUpdate() {
     updCheckResult = await api('GET', '/api/update/check');
     if (updCheckResult.up_to_date) {
       status.textContent = 'Already up to date (v' + updCheckResult.current + ').';
-    } else if (updCheckResult.dev_build) {
-      // From-source build (issue #46): don't advertise an "update" — applying
-      // would replace the custom build. It stays possible, behind a confirm.
-      status.innerHTML = 'Development build (<b>v' + escapeHtml(updCheckResult.current) + '</b>). '
-        + 'Latest release is <b>v' + escapeHtml(updCheckResult.latest) + '</b> — applying it would '
-        + 'replace this custom build.';
-      if (updCheckResult.asset_url) $('upd-apply').style.display = '';
     } else if (!updCheckResult.asset_url) {
       status.textContent = 'Update available (v' + updCheckResult.latest + ') but no binary for this platform.';
+    } else if (updCheckResult.dev_build) {
+      // Dev builds (unstamped 0.0.0) are pre-release test builds, deliberately
+      // replaceable by the published release in one click — that's the point
+      // of the 0.0.0 builds (issue #46). Same offer as a regular update, with
+      // an informational dev-build label only.
+      status.innerHTML = 'Update available: dev build <b>v' + escapeHtml(updCheckResult.current)
+        + '</b> → <b>v' + escapeHtml(updCheckResult.latest) + '</b>';
+      $('upd-apply').style.display = '';
     } else {
       status.innerHTML = 'Update available: <b>v' + updCheckResult.current + '</b> → <b>v' + updCheckResult.latest + '</b>';
       $('upd-apply').style.display = '';
@@ -1323,12 +1324,9 @@ async function checkUpdate() {
 
 async function applyUpdate() {
   if (!updCheckResult || !updCheckResult.asset_url) return;
-  // Replacing a from-source build with a release discards local changes —
-  // make that an explicit, informed choice (issue #46).
-  if (updCheckResult.dev_build &&
-      !confirm('This is a development build (v' + updCheckResult.current + ').\n\n'
-               + 'Applying the update replaces it with release v' + updCheckResult.latest
-               + ' and any local changes in this binary are lost.\n\nReplace it?')) return;
+  // No confirm gate for dev builds: they are pre-release test builds meant to
+  // be one-click replaced by the published release, exactly like release
+  // builds (issue #46).
   const btn = $('upd-apply');
   const status = $('upd-status');
   btn.disabled = true;
