@@ -109,6 +109,15 @@
   .seg-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .seg-toggle button { background: var(--panel); color: var(--muted); border: 0; padding: .42rem .6rem; cursor: pointer; font-size: .85rem; }
   .seg-toggle button.on { background: var(--amber-soft); color: var(--amber); }
+  .tfilter {
+    font-family: var(--mono); font-size: .76rem; letter-spacing: .03em;
+    color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: .42rem .7rem; width: 10rem; min-width: 0;
+    -webkit-appearance: none; appearance: none; transition: border-color .12s;
+  }
+  .tfilter:focus { outline: none; border-color: var(--amber-hair); }
+  .tfilter::placeholder { color: var(--dim); }
+  .tcount { color: var(--dim); font-family: var(--mono); font-size: .72rem; white-space: nowrap; }
 
   .listwrap { flex: 1; min-height: 0; overflow: auto; }
 
@@ -317,6 +326,10 @@
         <button class="tbtn danger" id="t-del" disabled>🗑 Delete</button>
         <button class="tbtn" id="t-refresh">↻</button>
         <span class="spacer"></span>
+        <input class="tfilter" id="t-filter" type="search" placeholder="Filter ( / )"
+               title="Filter this folder by name — press / to focus, Esc to clear"
+               autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+        <span class="tcount" id="t-count"></span>
         <button class="tbtn" id="t-select" title="Select mode: tap rows to toggle them (multi-select without Ctrl/Shift)">☑ Select</button>
         <button class="tbtn" id="t-hidden" title="Show hidden files (dotfiles)">⊘ Hidden</button>
         <span class="seg-toggle">
@@ -402,6 +415,7 @@ let cwd = '';
 let entries = [];                 // raw listing from the API
 let view = [];                    // entries actually shown (hidden filtered + sorted)
 let showHidden = false;           // include dotfiles (e.g. macOS "._" sidecars)
+let filterText = '';              // toolbar filter (client-side name match)
 let selection = new Set();        // selected names in cwd
 let selectMode = false;           // touch multi-select: taps toggle, checkboxes shown
 let clipboard = null;             // { mode:'cut'|'copy', paths:[fullpath...] }
@@ -491,13 +505,31 @@ async function api(method, url, body) {
   return ct.includes('json') ? r.json() : r.text();
 }
 
-// ---- visible set (hidden filter) + sorting ----
+// ---- visible set (hidden filter + name filter) + sorting ----
 // Recompute `view` from the raw `entries`: drop dotfiles unless showHidden,
-// then sort. Call after a new listing, a sort change, or a hidden toggle.
+// apply the toolbar name filter (case-insensitive substring), then sort.
+// Call after a new listing, a filter/hidden change — sort-only changes go
+// straight to sortView(), which keeps operating on the already-narrowed view.
 function rebuild() {
-  view = showHidden ? entries.slice() : entries.filter(e => !e.name.startsWith('.'));
+  const base = showHidden ? entries.slice() : entries.filter(e => !e.name.startsWith('.'));
+  const q = filterText.trim().toLowerCase();
+  view = q ? base.filter(e => e.name.toLowerCase().includes(q)) : base;
+  // "N of M" while filtering (M = what the folder would show unfiltered).
+  $('t-count').textContent = q ? view.length + ' of ' + base.length : '';
   sortView();
   render();
+}
+
+// Set the filter text, keeping the input in sync (used by navigation resets
+// and Esc; user typing flows through the input's own oninput instead).
+function setFilter(text) { filterText = text; $('t-filter').value = text; }
+
+// Filter and hidden-toggle changes reshuffle `view` indices and can hide
+// selected rows, so they drop the selection (same policy as t-hidden).
+function applyFilter(text) {
+  filterText = text;
+  selection = new Set(); lastIndex = null;
+  rebuild(); syncToolbar();
 }
 function sortView() {
   view.sort((a, b) => {
@@ -541,6 +573,11 @@ function attachRowEvents(el, e, idx) {
 
 function render() { rowEls.clear(); viewMode === 'grid' ? renderGrid() : renderList(); }
 
+// Empty-state text: distinguish "this folder is empty" from "the filter
+// matched nothing" so an active filter can't read as an empty folder.
+const emptyHtml = () =>
+  `<div class="empty">${filterText.trim() ? '— no matches —' : '— empty —'}</div>`;
+
 // Selection-only repaint (issue #41): toggle the `sel` class on the existing
 // rows/cards instead of rebuilding the whole DOM — in a 3,000-entry folder a
 // full render() per click is hundreds of ms of layout jank on a phone. Full
@@ -560,7 +597,7 @@ function renderList() {
       <th class="type sortable" data-k="type">Type${arrow('type')}</th>
       <th class="date sortable" data-k="date">Modified${arrow('date')}</th>
     </tr></thead><tbody id="rows"></tbody></table>` +
-    (view.length ? '' : '<div class="empty">— empty —</div>');
+    (view.length ? '' : emptyHtml());
   wrap.querySelectorAll('th.sortable').forEach(th => th.onclick = () => setSort(th.dataset.k));
   const tb = $('rows');
   view.forEach((e, idx) => {
@@ -582,7 +619,7 @@ function renderList() {
 
 function renderGrid() {
   const wrap = $('listwrap');
-  if (!view.length) { wrap.innerHTML = '<div class="empty">— empty —</div>'; return; }
+  if (!view.length) { wrap.innerHTML = emptyHtml(); return; }
   const grid = document.createElement('div'); grid.className = 'grid';
   view.forEach((e, idx) => {
     const card = document.createElement('div'); card.className = 'gcard' + (selection.has(e.name) ? ' sel' : '');
@@ -639,6 +676,9 @@ function syncToolbar() {
 let navToken = 0;
 async function go(path) {
   const token = ++navToken;
+  // Entering a different folder clears the filter; a refresh of the same
+  // folder (t-refresh, post-mutation reloads) keeps it active.
+  if (path !== cwd) setFilter('');
   cwd = path; selection = new Set(); lastIndex = null;
   try {
     const list = await api('GET', '/api/list?path=' + enc(cwd));
@@ -1199,6 +1239,17 @@ $('v-list').onclick = () => setView('list'); $('v-grid').onclick = () => setView
 $('t-select').onclick = () => setSelectMode(!selectMode);
 $('t-hidden').onclick = () => { showHidden = !showHidden; $('t-hidden').classList.toggle('on', showHidden);
   selection = new Set(); lastIndex = null; rebuild(); syncToolbar(); };
+$('t-filter').oninput = () => applyFilter($('t-filter').value);
+$('t-filter').onkeydown = (e) => {
+  // Esc: clear the filter and hand focus back to the list. Stop it here so
+  // the document-level Esc (close preview/menu) doesn't also fire, and
+  // preventDefault so type=search's native clear doesn't race our state.
+  if (e.key === 'Escape') {
+    e.preventDefault(); e.stopPropagation();
+    if (filterText) { setFilter(''); applyFilter(''); }
+    $('t-filter').blur();
+  } else if (e.key === 'Enter') { e.preventDefault(); $('t-filter').blur(); }
+};
 $('ed-save').onclick = saveEditor;
 $('ed-close').onclick = requestCloseEditor;
 $('upd-check').onclick = checkUpdate;
@@ -1229,6 +1280,17 @@ document.addEventListener('keydown', (e) => {
   if ($('modal').classList.contains('show')) {
     if (e.key === 'ArrowRight') { e.preventDefault(); navigatePreview(1); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); navigatePreview(-1); }
+    return;
+  }
+  // "/" focuses the filter — but never while typing somewhere else (an
+  // input/textarea or contenteditable), and never with modifiers held
+  // (browser shortcuts like Cmd+/ stay intact). The editor and preview
+  // branches above already returned. focus() is a no-op when the files
+  // view is hidden, so Status/Settings are unaffected.
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (!typing) { e.preventDefault(); $('t-filter').focus(); $('t-filter').select(); }
   }
 });
 
