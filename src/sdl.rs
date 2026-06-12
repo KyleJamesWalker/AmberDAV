@@ -70,7 +70,7 @@ pub fn run(
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = format!("{driver}: {e}");
-                eprintln!("sdl: driver {driver} unavailable ({e}); trying next");
+                tracing::info!("driver {driver} unavailable ({e}); trying next");
             }
         }
     }
@@ -112,7 +112,7 @@ fn run_with_driver(
         .map_err(|e| e.to_string())?;
 
     let mut pump = sdl.event_pump().map_err(|e| e.to_string())?;
-    eprintln!("sdl: using driver {driver} at {w}x{h}");
+    tracing::info!("using driver {driver} at {w}x{h}");
 
     let (wu, hu) = (w as usize, h as usize);
     let mut source = crate::render::FrameSource::new(
@@ -137,7 +137,7 @@ fn run_with_driver(
                 // Window closed (e.g. Steam stopped the game) — request app
                 // shutdown, mirroring the input thread's exit-key behaviour.
                 // Cancelling (not exiting) lets in-flight uploads drain.
-                eprintln!("sdl: quit event; shutting down");
+                tracing::info!("quit event; shutting down");
                 shutdown.cancel();
             }
         }

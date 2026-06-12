@@ -239,6 +239,7 @@ one place, the highest layer wins:
 | Bounce-toggle key codes | `--bounce-keys <a,b,…>` | `AMBERDAV_BOUNCE_KEYS` | `bounce_keys` |
 | Display sink | — | `AMBERDAV_DISPLAY` | — |
 | Screen rotation (fb builds) | — | `AMBERDAV_FB_ROTATE` | — |
+| Log level | `--verbose` (debug) | `AMBERDAV_LOG` (or `RUST_LOG`): `off`/`error`/`warn`/`info`/`debug`/`trace` | — |
 
 ### Config file location
 

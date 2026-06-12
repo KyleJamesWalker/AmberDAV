@@ -68,7 +68,7 @@ pub fn run(
         }
         None => Connection::connect_to_env().map_err(|e| format!("wayland connect: {e}"))?,
     };
-    eprintln!("wayland: connected (socket={socket:?})");
+    tracing::info!("connected (socket={socket:?})");
     let (globals, mut event_queue) =
         registry_queue_init(&conn).map_err(|e| format!("wayland registry: {e}"))?;
     let qh: QueueHandle<App> = event_queue.handle();
@@ -77,7 +77,7 @@ pub fn run(
         CompositorState::bind(&globals, &qh).map_err(|e| format!("wl_compositor: {e}"))?;
     let xdg_shell = XdgShell::bind(&globals, &qh).map_err(|e| format!("xdg_shell: {e}"))?;
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm: {e}"))?;
-    eprintln!("wayland: globals bound; creating fullscreen surface");
+    tracing::debug!("globals bound; creating fullscreen surface");
 
     let surface = compositor.create_surface(&qh);
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
@@ -327,9 +327,10 @@ impl WindowHandler for App {
         let first = !self.configured;
         self.configured = true;
         if first {
-            eprintln!(
-                "wayland: surface configured {}x{}; painting connection info",
-                self.width, self.height
+            tracing::info!(
+                "surface configured {}x{}; painting connection info",
+                self.width,
+                self.height
             );
             self.draw(qh);
         }

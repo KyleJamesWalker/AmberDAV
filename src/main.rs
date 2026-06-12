@@ -33,6 +33,7 @@ mod connection;
 mod display;
 mod files;
 mod input;
+mod logging;
 mod password;
 mod render;
 mod router;
@@ -66,6 +67,9 @@ use webdav::DavState;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = cli::Cli::parse();
+    // First thing, so the config-load diagnostics below already go through
+    // the subscriber. The banner/QR stay plain println! (user-facing output).
+    logging::init(cli.verbose);
     let config_path = config::config_path();
 
     // Handheld: keep auto-creating a default config on first run — the device
@@ -232,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(l) => l,
         Err(e) => {
             let msg = bind_error_message(&bind, port, &e);
-            eprintln!("{msg}");
+            tracing::error!("{msg}");
             screen::show(
                 port,
                 None,
@@ -292,12 +296,12 @@ fn ensure_default_config(path: &std::path::Path) -> Option<String> {
     }
     match config::save(path, &config::Settings::default()) {
         Ok(()) => {
-            eprintln!("config: wrote default {}", path.display());
+            tracing::info!("wrote default config {}", path.display());
             None
         }
         Err(e) => {
             let msg = format!("cannot write default config {}: {e}", path.display());
-            eprintln!("config: {msg}");
+            tracing::warn!("{msg}");
             Some(msg)
         }
     }
@@ -341,7 +345,7 @@ fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
                 .build();
             println!("{art}\n");
         }
-        Err(e) => eprintln!("  (qr unavailable: {e})\n"),
+        Err(e) => tracing::warn!("qr unavailable: {e}"),
     }
 }
 
@@ -365,7 +369,7 @@ async fn shutdown_signal(shutdown: CancellationToken) {
     // exit key must actually exit (issue #34).
     tokio::spawn(async {
         tokio::time::sleep(DRAIN_GRACE).await;
-        eprintln!("shutdown: connections did not drain within {DRAIN_GRACE:?}; exiting now");
+        tracing::warn!("connections did not drain within {DRAIN_GRACE:?}; exiting now");
         std::process::exit(0);
     });
 }
@@ -393,7 +397,7 @@ async fn shutdown_requested(shutdown: &CancellationToken) {
             // Installing the handler essentially never fails; if it somehow
             // does, keep serving on the remaining branch instead of aborting.
             Err(e) => {
-                eprintln!("shutdown: cannot install SIGTERM handler: {e}");
+                tracing::warn!("cannot install SIGTERM handler: {e}");
                 std::future::pending::<()>().await;
             }
         }

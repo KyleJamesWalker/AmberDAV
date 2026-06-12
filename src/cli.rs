@@ -83,6 +83,10 @@ pub struct Cli {
     /// Write the fully-resolved configuration to the config file, then exit.
     #[arg(long)]
     pub save: bool,
+
+    /// Verbose (debug-level) logging. [env: AMBERDAV_LOG=error|warn|info|debug|trace]
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 impl Cli {

@@ -247,7 +247,7 @@ fn scan_images(roots: &[PathBuf]) -> Vec<PathBuf> {
             out.push(p);
         }
     }
-    eprintln!("screen: bounce screensaver found {} image(s)", out.len());
+    tracing::info!("bounce screensaver found {} image(s)", out.len());
     out
 }
 

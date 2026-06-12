@@ -43,6 +43,14 @@ jsonc-parser = { version = "0.32.4", features = ["serde"] }
 # only, so the static musl builds keep working.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
+# Structured logging: timestamps + levels + the one-line request log
+# (issue #47). Trimmed for the static device builds: no env-filter (its
+# regex machinery is most of the usual size cost — verbosity here is a plain
+# level word) and no ANSI color (device logs land in log.txt). Measured cost
+# on the aarch64-musl fb release binary: +92 KiB.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
 # Test-only: drive the full router through `tower::ServiceExt::oneshot` (no
 # socket, no process) and collect response bodies. Both are already in the
 # dependency graph via axum, so this adds no new code to vendor.

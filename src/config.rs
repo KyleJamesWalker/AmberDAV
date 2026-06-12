@@ -203,7 +203,7 @@ pub fn load(path: &Path) -> (Settings, Option<String>) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), None),
         Err(e) => {
             let msg = format!("cannot read {}: {e}; using defaults", path.display());
-            eprintln!("config: {msg}");
+            tracing::warn!("{msg}");
             return (Settings::default(), Some(msg));
         }
     };
@@ -211,7 +211,7 @@ pub fn load(path: &Path) -> (Settings, Option<String>) {
         Ok(s) => (s, None),
         Err(e) => {
             let msg = format!("{} is invalid ({e}); using defaults", path.display());
-            eprintln!("config: {msg}");
+            tracing::warn!("{msg}");
             (Settings::default(), Some(msg))
         }
     }

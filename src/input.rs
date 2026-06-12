@@ -111,18 +111,18 @@ pub fn spawn(
         let mut stream = match dev.into_event_stream() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("input: cannot open {name} ({path}): {e}");
+                tracing::warn!("cannot open {name} ({path}): {e}");
                 continue;
             }
         };
 
-        eprintln!("input: streaming from {name} ({path})");
+        tracing::info!("streaming from {name} ({path})");
         tokio::spawn(async move {
             loop {
                 let ev = match stream.next_event().await {
                     Ok(ev) => ev,
                     Err(e) => {
-                        eprintln!("input: {name} ({path}) read error: {e}");
+                        tracing::warn!("{name} ({path}) read error: {e}");
                         break;
                     }
                 };
@@ -140,7 +140,7 @@ pub fn spawn(
                                     // Cancel rather than exit: the server gets to
                                     // drain in-flight uploads/WebDAV writes before
                                     // the process ends (issue #34).
-                                    eprintln!("input: exit key ({code}) pressed; shutting down");
+                                    tracing::info!("exit key ({code}) pressed; shutting down");
                                     shutdown.cancel();
                                 }
                                 Some(KeyAction::Blank) => screen::toggle(&mode, Mode::Black),
@@ -188,7 +188,7 @@ pub fn spawn(
     _keys: InputKeys,
     _shutdown: CancellationToken,
 ) {
-    eprintln!("input: gamepad support is a device-only feature; live input view disabled");
+    tracing::info!("gamepad support is a device-only feature; live input view disabled");
 }
 
 #[cfg(test)]
