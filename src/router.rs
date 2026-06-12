@@ -298,6 +298,98 @@ mod tests {
         }
     }
 
+    // --- zip downloads ----------------------------------------------------
+
+    // /api/zip names the archive after the selection (issue #45) and streams
+    // a complete zip — the end-of-central-directory record is present, which
+    // is exactly what a truncated stream lacks.
+    #[tokio::test]
+    async fn zip_download_is_named_after_the_selection() {
+        let root = TmpRoot::new("zip-name");
+        std::fs::create_dir(root.0.join("GB")).unwrap();
+        std::fs::write(root.0.join("GB/a.gb"), b"rom bytes").unwrap();
+        let app = app(&root, Permission::ReadOnly);
+
+        let p = base64::engine::general_purpose::STANDARD.encode(r#"["GB"]"#);
+        let resp = send(&app, get_authed(&format!("/api/zip?p={p}"))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"GB.zip\""
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..4], b"PK\x03\x04", "zip local-file header");
+        assert!(
+            bytes.windows(4).any(|w| w == b"PK\x05\x06"),
+            "end-of-central-directory record missing — stream did not finish"
+        );
+    }
+
+    // A file that fails to open mid-walk must not yield a silently
+    // "complete" truncated zip (review §1.12): the body stream ends with an
+    // error, which hyper turns into a dropped connection without the final
+    // chunk in real serving.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn zip_mid_stream_failure_surfaces_as_a_body_error() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root ignores file modes; the failure can't be staged there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = TmpRoot::new("zip-abort");
+        std::fs::create_dir(root.0.join("d")).unwrap();
+        std::fs::write(root.0.join("d/ok.txt"), b"fine").unwrap();
+        std::fs::write(root.0.join("d/locked.txt"), b"nope").unwrap();
+        std::fs::set_permissions(
+            root.0.join("d/locked.txt"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        let app = app(&root, Permission::ReadOnly);
+
+        let p = base64::engine::general_purpose::STANDARD.encode(r#"["d"]"#);
+        let resp = send(&app, get_authed(&format!("/api/zip?p={p}"))).await;
+        // The headers were already committed; only the body can signal.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let collected = resp.into_body().collect().await;
+        assert!(
+            collected.is_err(),
+            "a truncated zip must end in a body error, not a clean EOF"
+        );
+        let _ = std::fs::set_permissions(
+            root.0.join("d/locked.txt"),
+            std::fs::Permissions::from_mode(0o644),
+        );
+    }
+
+    // An unreadable *directory* in the selection is caught by the pre-flight
+    // and rejected before any byte (or the irrevocable 200) is sent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn zip_unreadable_dir_is_rejected_before_streaming() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = TmpRoot::new("zip-preflight");
+        std::fs::create_dir(root.0.join("sealed")).unwrap();
+        std::fs::set_permissions(
+            root.0.join("sealed"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        let app = app(&root, Permission::ReadOnly);
+
+        let p = base64::engine::general_purpose::STANDARD.encode(r#"["sealed"]"#);
+        let resp = send(&app, get_authed(&format!("/api/zip?p={p}"))).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let _ = std::fs::set_permissions(
+            root.0.join("sealed"),
+            std::fs::Permissions::from_mode(0o755),
+        );
+    }
+
     // --- login ------------------------------------------------------------
 
     // auth::login must set the session cookie only on the right password; a
