@@ -334,6 +334,7 @@
         <button class="tbtn primary" id="t-up">⬆ Upload</button>
         <button class="tbtn" id="t-updir" title="Upload a folder (structure preserved)">⬆ Folder</button>
         <button class="tbtn" id="t-mkdir">＋ New Folder</button>
+        <button class="tbtn" id="t-newfile">＋ New File</button>
         <button class="tbtn" id="t-open" disabled>↗ Open</button>
         <button class="tbtn" id="t-dl" disabled>⬇ Download</button>
         <button class="tbtn" id="t-rename" disabled>✎ Rename</button>
@@ -698,6 +699,7 @@ function syncToolbar() {
   $('t-up').disabled = !w;
   $('t-updir').disabled = !w;
   $('t-mkdir').disabled = !w;
+  $('t-newfile').disabled = !w;
   $('t-open').disabled = n !== 1;
   $('t-dl').disabled = n < 1;   // download (read) always allowed
   $('t-rename').disabled = n !== 1 || !w;
@@ -780,6 +782,40 @@ async function doMkdir() {
   const name = prompt('New folder name:'); if (!name) return;
   try { await api('POST', '/api/mkdir', { path: cwd, name }); toast('Folder created'); go(cwd); }
   catch (e) { toast(e.message, true); }
+}
+// Create an empty file and drop straight into the editor — the editor is the
+// way to maintain config.json in place, but it could only open files that
+// already existed (issue #57).
+async function doNewFile() {
+  const name = prompt('New file name:'); if (!name) return;
+  // Refuse an existing name outright: an empty PUT over a file would
+  // truncate it, and "new file" can only ever mean create — so no overwrite
+  // offer, unlike uploads. The server still 409s as the backstop (no
+  // &overwrite), e.g. when another client created the name after our listing.
+  if (entries.some(e => e.name === name)) {
+    toast('"' + name + '" already exists' + (entries.find(e => e.name === name).dir ? ' (folder)' : ''), true);
+    return;
+  }
+  try {
+    // fetch, not api(): the upload endpoint takes query params + raw body.
+    // Empty body = create empty file; safe_name validates server-side.
+    const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name), { method: 'PUT', body: '' });
+    if (r.status === 401) { location.href = '/login'; return; }
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  } catch (e) { toast(e.message, true); return; }
+  toast('Created ' + name);
+  // Make the new file visible and selected: drop a filter that would hide
+  // it, then refresh (go() clears the selection, so select after the await).
+  const q = filterText.trim().toLowerCase();
+  if (q && !name.toLowerCase().includes(q)) setFilter('');
+  await go(cwd);
+  selection = new Set([name]);
+  const idx = view.findIndex(e => e.name === name);
+  lastIndex = idx >= 0 ? idx : null;       // -1 = dotfile hidden by the toggle
+  syncSelection(); syncToolbar();
+  // openEditor guards unsaved changes in an already-open buffer; the file is
+  // created either way, so declining just leaves it in the listing.
+  openEditor({ name });
 }
 async function doRename() {
   const cur = [...selection][0]; if (!cur) return;
@@ -1108,6 +1144,7 @@ function openMenu(x, y) {
   const canEdit = !!(selEntry && isTxt(selEntry) && w);
   const items = [
     { label: '＋ New Folder', fn: doMkdir, off: !w },
+    { label: '＋ New File', fn: doNewFile, off: !w },
     { label: '⬆ Upload Files', fn: () => $('filepick').click(), off: !w },
     { label: '⬆ Upload Folder', fn: () => $('dirpick').click(), off: !w },
     { label: '⬇ Download Selected', fn: doDownload, off: n < 1 },
@@ -1384,6 +1421,7 @@ function showView(v) {
 $('t-up').onclick = () => $('filepick').click();
 $('t-updir').onclick = () => $('dirpick').click();
 $('t-mkdir').onclick = doMkdir;
+$('t-newfile').onclick = doNewFile;
 $('t-open').onclick = doOpen;
 $('t-dl').onclick = doDownload;
 $('t-rename').onclick = doRename;
