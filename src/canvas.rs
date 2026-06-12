@@ -179,7 +179,8 @@ fn fill_rect(c: &mut Canvas, x: usize, y: usize, rw: usize, rh: usize, val: [u8;
 
 /// Crate version flush against the bottom-right corner, inset by `margin`.
 fn draw_version(c: &mut Canvas, margin: usize, scale: usize) {
-    let text = concat!("v", env!("CARGO_PKG_VERSION"));
+    let text = format!("v{}", crate::version::VERSION);
+    let text = text.as_str();
     let text_w = text.chars().count() * 8 * scale;
     let text_h = 8 * scale;
     let x = c.w.saturating_sub(text_w + margin);

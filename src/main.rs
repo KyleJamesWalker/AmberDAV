@@ -43,6 +43,7 @@ mod state;
 mod throttle;
 mod ui;
 mod update;
+mod version;
 #[cfg(all(target_os = "linux", feature = "fb", not(feature = "sdl")))]
 mod wayland;
 mod webdav;
