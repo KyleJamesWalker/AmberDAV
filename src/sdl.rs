@@ -54,10 +54,20 @@ pub fn run(
     let candidates = driver_candidates(forced.as_deref());
     let mut last_err = String::from("no candidates");
     for driver in &candidates {
-        // SDL selects the driver from this env var; set it per attempt. (Done in
-        // this sink thread at startup; the brief window before the input thread
-        // reads env is acceptable.)
-        std::env::set_var("SDL_VIDEODRIVER", driver);
+        // Select the driver through SDL's hint store, not std::env::set_var:
+        // mutating the process environment from this sink thread while the
+        // tokio runtime and input threads can call getenv concurrently is UB,
+        // and set_var becomes `unsafe` in Rust 2024 (issue #50). The name is
+        // SDL_HINT_VIDEODRIVER's string value, read during SDL_VideoInit —
+        // i.e. inside run_with_driver's `sdl.video()`, after this set.
+        // Override priority so the per-attempt choice also wins over a
+        // process-level $SDL_VIDEODRIVER (already honored above by making it
+        // the sole candidate). Runtimes older than SDL 2.0.22 don't consult
+        // the hint and auto-select from their compiled-in drivers instead;
+        // the status string always reports the driver actually chosen.
+        if !sdl2::hint::set_with_priority("SDL_VIDEODRIVER", driver, &sdl2::hint::Hint::Override) {
+            tracing::warn!("SDL rejected the {driver} video-driver hint; SDL will auto-select");
+        }
         match run_with_driver(
             port,
             password.clone(),
