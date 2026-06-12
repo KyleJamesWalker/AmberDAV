@@ -333,8 +333,8 @@ never silently ignored.
 | `read_write_delete` | ✅ | ✅ | ✅ |
 
 `permission`, `default_folder`, and `favorites` take effect per request. `password`,
-`display_password`, `root`, `bounce_screen`, and the `*_keys` lists are bound at
-boot — relaunch to apply.
+`display_password`, `root`, `port`, `bind`, `bounce_screen`, and the `*_keys`
+lists are bound at boot — relaunch to apply.
 
 ## Device controls
 
