@@ -78,6 +78,12 @@
   .side-foot { margin-top: auto; padding: 0 1.2rem; }
   .side-foot a { font-family: var(--mono); font-size: .74rem; color: var(--dim); text-decoration: none; }
   .side-foot a:hover { color: var(--amber); }
+  .disk { margin-bottom: .7rem; }
+  .disk-bar { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; margin-bottom: .35rem; }
+  .disk-fill { height: 100%; background: var(--amber); }
+  .disk-fill.low { background: var(--danger); }
+  .disk-text { font-family: var(--mono); font-size: .72rem; color: var(--dim); }
+  .disk-text.low { color: var(--danger); }
 
   /* main */
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; background: var(--bg); }
@@ -301,7 +307,13 @@
       <a id="nav-settings" data-view="settings">Settings</a>
     </nav>
     <nav class="favs" id="favs"></nav>
-    <div class="side-foot"><a href="/logout">› log out</a></div>
+    <div class="side-foot">
+      <div class="disk" id="disk" style="display:none;" title="Free space on the served disk">
+        <div class="disk-bar"><div class="disk-fill" id="disk-fill"></div></div>
+        <div class="disk-text" id="disk-text"></div>
+      </div>
+      <a href="/logout">› log out</a>
+    </div>
   </aside>
 
   <main>
@@ -751,7 +763,7 @@ async function doRename() {
 async function doDelete() {
   const paths = selectedPaths(); if (!paths.length) return;
   if (!confirm('Delete ' + paths.length + ' item(s)? This cannot be undone.')) return;
-  try { await api('POST', '/api/delete', { paths }); toast('Deleted'); go(cwd); }
+  try { await api('POST', '/api/delete', { paths }); toast('Deleted'); go(cwd); refreshDisk(); }
   catch (e) { toast(e.message, true); }
 }
 function doCut() { clipboard = { mode: 'cut', paths: selectedPaths() }; toast('Cut ' + clipboard.paths.length + ' item(s)'); syncToolbar(); }
@@ -942,7 +954,7 @@ async function uploadItems(items, emptyDirs = []) {
       toast('Upload failed on "' + label + '": ' + e.message
             + ' — uploaded ' + done + ' of ' + items.length
             + (skipped ? ' (skipped ' + skipped + ')' : ''), true);
-      go(cwd); return;
+      go(cwd); refreshDisk(); return;     // partial batches still wrote bytes
     }
   }
   hideUpload();
@@ -950,7 +962,7 @@ async function uploadItems(items, emptyDirs = []) {
   if (skipped) bits.push('skipped ' + skipped);
   if (emptyDirs.length) bits.push('created ' + emptyDirs.length + ' empty folder(s)');
   toast(bits.join(', '));
-  go(cwd);
+  go(cwd); refreshDisk();
 }
 // Flat upload (file picker, non-folder drops): everything lands in cwd.
 function uploadFiles(fileList) {
@@ -1117,6 +1129,29 @@ function startInput() {
     else if (e.name.indexOf('HAT') !== -1) { e.value === 0 ? held.delete(id) : held.set(id, e.name+' '+(e.value>0?'+':'-')); renderHeld(); ilog(e.name+' = '+e.value); }
     else { axes.set(e.name, e.value); renderAxes(); } };
 }
+// ---- disk gauge (issue #43) ----
+// Sidebar footer gauge from /api/info's disk_free/disk_total. The fields are
+// null when the server can't report them (e.g. non-unix hosts) — then the
+// gauge stays hidden and the Status line says "unknown". "Low" (red) means
+// under 5% or under 1 GiB free, whichever is larger.
+function diskText(i) {
+  return i.disk_total ? humanSize(i.disk_free) + ' free of ' + humanSize(i.disk_total) : 'unknown';
+}
+function renderDisk(i) {
+  const box = $('disk');
+  if (!i || !i.disk_total) { box.style.display = 'none'; return; }
+  const usedPct = Math.min(100, Math.max(0, (1 - i.disk_free / i.disk_total) * 100));
+  const low = i.disk_free < Math.max(i.disk_total * 0.05, 1 << 30);
+  $('disk-fill').style.width = usedPct.toFixed(1) + '%';
+  $('disk-fill').classList.toggle('low', low);
+  $('disk-text').textContent = (low ? '⚠ ' : '') + diskText(i);
+  $('disk-text').classList.toggle('low', low);
+  box.style.display = '';
+}
+// Refresh the gauge after anything that changes disk usage (upload batches,
+// deletes) and once at startup. Failures keep the last shown value.
+function refreshDisk() { api('GET', '/api/info').then(renderDisk).catch(() => {}); }
+
 async function loadConn() {
   try { const i = await api('GET', '/api/info');
     // A broken config.json boots with defaults; make that loud here since
@@ -1126,10 +1161,12 @@ async function loadConn() {
       warn.textContent = '⚠ config.json not applied — ' + i.config_error;
       warn.style.display = '';
     } else { warn.style.display = 'none'; }
+    renderDisk(i);
     $('conn').innerHTML =
       'Device IP: <b>' + i.ip + ':' + i.port + '</b><br>' +
       'WebDAV mount: <a href="' + i.dav + '">' + i.dav + '</a><br>' +
       'Serving: ' + escapeHtml(i.root) + '<br>' +
+      'Disk: <b>' + diskText(i) + '</b><br>' +
       'Screen: ' + escapeHtml(i.screen);
     // Gamepad input only streams on device (fb/sdl) builds; elsewhere the card
     // would sit empty, so only reveal it and open the stream when supported.
@@ -1363,6 +1400,7 @@ function renderFavorites(favs) {
   }
   catch (e) { /* fall back to defaults */ }
   go(defaultFolder);
+  refreshDisk();                    // populate the sidebar gauge on first paint
 })();
 </script>
 </body>
