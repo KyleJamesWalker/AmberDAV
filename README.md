@@ -238,6 +238,7 @@ one place, the highest layer wins:
 | Blank-screen key codes | `--blank-keys <a,b,…>` | `AMBERDAV_BLANK_KEYS` | `blank_keys` |
 | Bounce-toggle key codes | `--bounce-keys <a,b,…>` | `AMBERDAV_BOUNCE_KEYS` | `bounce_keys` |
 | Display sink | — | `AMBERDAV_DISPLAY` | — |
+| Screen rotation (fb builds) | — | `AMBERDAV_FB_ROTATE` | — |
 
 ### Config file location
 
@@ -402,9 +403,11 @@ requires `permission` to be `read_write` or `read_write_delete`.
 
 ## Troubleshooting
 
-- **Screen looks rotated / sideways.** The on-screen info is authored landscape.
-  Set `AMBERDAV_FB_ROTATE` to `90`, `180`, or `270` (there's a commented line in
-  `WebDAV.sh`).
+- **Screen looks rotated / sideways.** The on-screen info is authored
+  landscape, and portrait-mounted panels (e.g. the RG34XXSP) are auto-rotated
+  90° — the Status tab shows `rot=90(auto)` when that kicked in. If a panel
+  still comes out wrong, set `AMBERDAV_FB_ROTATE` to `0`, `90`, `180`, or
+  `270` to override (there's a commented line in `WebDAV.sh`).
 - **Blank screen / frozen on the loading splash.** Some Allwinner framebuffer
   drivers only present a frame on an `FBIOPAN_DISPLAY` ioctl and use multiple
   buffer pages; amber-dav handles both. Check `log.txt` and the Status tab —

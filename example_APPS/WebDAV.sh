@@ -29,8 +29,10 @@ root="$(cd "$progdir/../.." || exit; pwd)"
 # Listen port (change if 8080 is taken).
 port=8080
 
-# If the on-screen QR/info appears rotated, uncomment and set to 90/180/270.
-# export AMBERDAV_FB_ROTATE=90
+# Screen rotation is auto-detected: portrait-mounted panels (e.g. the
+# RG34XXSP) get the landscape info screen turned 90 automatically. If a panel
+# still comes out rotated, uncomment and set to 0/90/180/270 to override.
+# export AMBERDAV_FB_ROTATE=270
 
 chmod +x "$bin" 2>/dev/null
 
