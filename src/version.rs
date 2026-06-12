@@ -15,9 +15,10 @@ pub const VERSION: &str = match option_env!("AMBERDAV_VERSION") {
 };
 
 /// True for from-source development builds: the unstamped `0.0.0`
-/// placeholder, with or without describe metadata. Dev builds get special
-/// update-check handling — semver-wise 0.0.0 is older than every release,
-/// so a plain comparison would always offer to overwrite the custom build.
+/// placeholder, with or without describe metadata. Dev builds are pre-release
+/// test builds, deliberately replaceable (issue #46): the update check always
+/// reports them out of date when a release exists, and this flag only lets
+/// the UI label the offer as "dev build" — it never gates the update.
 pub fn is_dev(version: &str) -> bool {
     version == "0.0.0" || version.starts_with("0.0.0+") || version.starts_with("0.0.0-")
 }
