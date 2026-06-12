@@ -149,6 +149,11 @@
     -webkit-touch-callout: none; touch-action: manipulation; }
   tbody tr:hover { background: rgba(255,180,84,.05); }
   tbody tr.sel { background: var(--amber-soft); box-shadow: inset 2px 0 0 var(--amber); }
+  /* drag-to-move affordances (issue #44) */
+  tbody tr.dragging, .gcard.dragging { opacity: .45; }
+  tbody tr.droptgt { background: var(--amber-soft); box-shadow: inset 0 0 0 1px var(--amber); }
+  .gcard.droptgt { background: var(--amber-soft); border-color: var(--amber); }
+  .crumbs .seg.droptgt { background: var(--amber-soft); color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber-hair); }
   td.name { display: flex; align-items: center; gap: .6rem; min-width: 0; }
   td.name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.size, td.type, td.date { font-family: var(--mono); font-size: .82rem; }
@@ -561,7 +566,17 @@ function renderCrumbs() {
   const segs = cwd ? cwd.split('/') : [];
   const mk = (label, path, last) => {
     const s = document.createElement('span'); s.className = 'seg' + (last ? ' last' : '');
-    s.textContent = label; if (!last) s.onclick = () => go(path); c.appendChild(s);
+    s.textContent = label; if (!last) s.onclick = () => go(path);
+    // Non-last crumbs double as move targets: dropping rows on an ancestor
+    // moves them up the tree (the last crumb is cwd — a no-op, not a target).
+    if (!last) {
+      s.ondragover = (ev) => { if (!dragNames) return; ev.preventDefault(); ev.stopPropagation();
+        ev.dataTransfer.dropEffect = 'move'; s.classList.add('droptgt'); };
+      s.ondragleave = () => s.classList.remove('droptgt');
+      s.ondrop = (ev) => { if (!dragNames) return; ev.preventDefault(); ev.stopPropagation();
+        s.classList.remove('droptgt'); moveDragged(path); };
+    }
+    c.appendChild(s);
   };
   mk('Home', '', segs.length === 0);
   let acc = '';
@@ -581,6 +596,15 @@ function attachRowEvents(el, e, idx) {
   el.oncontextmenu = (ev) => { ev.preventDefault();
     if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; syncSelection(); syncToolbar(); }
     openMenu(ev.clientX, ev.clientY); };
+  // Drag-to-move (issue #44): every row drags; folder rows accept drops.
+  el.draggable = canWrite();
+  el.ondragstart = (ev) => dragStart(ev, e, el);
+  el.ondragend = () => dragEnd(el);
+  if (e.dir) {
+    el.ondragover = (ev) => dragOverFolder(ev, e, el);
+    el.ondragleave = () => el.classList.remove('droptgt');
+    el.ondrop = (ev) => dropOnFolder(ev, e, el);
+  }
 }
 
 function render() { rowEls.clear(); viewMode === 'grid' ? renderGrid() : renderList(); }
@@ -787,6 +811,67 @@ async function doPaste() {
   toast(clipboard.mode === 'cut' ? 'Moved' : 'Copied');
   if (clipboard.mode === 'cut') clipboard = null;
   syncToolbar(); go(cwd);
+}
+
+// ---- drag-and-drop move (issue #44) ----
+// Rows drag within the list; folder rows and breadcrumb segments accept
+// drops and run the same /api/move + overwrite-confirm flow as Cut/Paste.
+// Internal drags carry a custom DataTransfer type and never 'Files', so the
+// OS-file upload overlay (which keys on 'Files') stays out of the way; the
+// reverse holds too — OS-file drags leave `dragNames` null, so rows ignore
+// them and the drop falls through to the upload path. HTML5 DnD never fires
+// from touch, so phones keep Cut/Paste + long-press unchanged.
+const DRAG_TYPE = 'application/x-amberdav-move';
+let dragNames = null;               // names being dragged; null = not our drag
+
+function dragStart(ev, e, el) {
+  if (!canWrite()) { ev.preventDefault(); return; }
+  // Dragging a selected row carries the whole selection; dragging an
+  // unselected row moves just that row (the selection is left alone).
+  dragNames = selection.has(e.name) ? [...selection] : [e.name];
+  ev.dataTransfer.setData(DRAG_TYPE, JSON.stringify(dragNames));
+  ev.dataTransfer.effectAllowed = 'move';
+  el.classList.add('dragging');
+}
+function dragEnd(el) { dragNames = null; el.classList.remove('dragging'); }
+
+// A folder row is a valid target unless it is itself being dragged (folder
+// into itself). Deeper cases (same-location no-ops, symlinked aliases) are
+// validated server-side by plan_transfer before anything is touched.
+function validRowTarget(e) { return !!dragNames && e.dir && !dragNames.includes(e.name); }
+
+function dragOverFolder(ev, e, el) {
+  if (!validRowTarget(e)) return;   // no preventDefault → browser shows "no drop"
+  ev.preventDefault(); ev.stopPropagation();
+  ev.dataTransfer.dropEffect = 'move';
+  el.classList.add('droptgt');
+}
+function dropOnFolder(ev, e, el) {
+  if (!validRowTarget(e)) return;
+  ev.preventDefault(); ev.stopPropagation();
+  el.classList.remove('droptgt');
+  moveDragged(join(cwd, e.name));
+}
+
+async function moveDragged(dest) {
+  const names = dragNames; dragNames = null;
+  if (!names || !names.length) return;
+  const body = { srcs: names.map(n => join(cwd, n)), dest };
+  try {
+    try { await api('POST', '/api/move', body); }
+    catch (e) {
+      // Same collision contract as Cut/Paste (issue #23): 409 names every
+      // conflict and nothing has moved, so one confirm retries the whole
+      // batch with overwrite; 400s (folder into itself, …) fall through to
+      // the outer catch as a toast.
+      if (e.status !== 409) throw e;
+      if (!confirm(e.message + '\n\nOverwrite?')) return;
+      await api('POST', '/api/move', { ...body, overwrite: true });
+    }
+  } catch (e) { toast(e.message, true); return; }
+  toast('Moved ' + names.length + ' item(s)');
+  selection = new Set(); lastIndex = null;    // the moved rows left this folder
+  go(cwd); refreshDisk();
 }
 
 // ---- preview modal (navigable gallery) ----
