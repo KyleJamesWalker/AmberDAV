@@ -154,10 +154,27 @@ pub struct CheckResult {
     pub current: String,
     pub latest: String,
     pub up_to_date: bool,
+    /// True for a from-source build (unstamped `0.0.0[+describe]`). The UI
+    /// labels these instead of advertising an "update" that would replace a
+    /// custom build with the latest release (issue #46).
+    pub dev_build: bool,
     /// Download URL for the matching asset, if one exists for this platform.
     /// Informational only — `apply` re-resolves the asset itself rather than
     /// trusting a URL from the client.
     pub asset_url: Option<String>,
+}
+
+/// The up-to-date verdict (issue #46): release builds compare numerically —
+/// equal or *newer* than the latest release is up to date, so a local build
+/// of an unreleased version is never offered a downgrade (the old `latest ==
+/// current` string equality flagged it). Dev builds are never "up to date"
+/// (there is nothing meaningful to compare), but the paired `dev_build` flag
+/// tells the UI to present that as "development build", not "update now".
+fn verdict(current: &str, latest: &str) -> (bool, bool) {
+    let dev = crate::version::is_dev(current);
+    let up_to_date =
+        !dev && crate::version::cmp_versions(current, latest) != std::cmp::Ordering::Less;
+    (up_to_date, dev)
 }
 
 #[derive(Serialize)]
@@ -204,7 +221,7 @@ fn friendly_reqwest_error(e: &reqwest::Error) -> String {
 
 /// GET /api/update/check — compares current version against the latest GitHub release.
 pub async fn check(_: Session, _: State<AppState>) -> Response {
-    let current = env!("CARGO_PKG_VERSION").to_string();
+    let current = crate::version::VERSION.to_string();
 
     match fetch_latest_release().await {
         Err(e) => (
@@ -222,8 +239,10 @@ pub async fn check(_: Session, _: State<AppState>) -> Response {
                     .find(|a| a.name == name)
                     .map(|a| a.browser_download_url.clone())
             });
+            let (up_to_date, dev_build) = verdict(&current, &latest);
             Json(CheckResult {
-                up_to_date: latest == current,
+                up_to_date,
+                dev_build,
                 current,
                 latest,
                 asset_url,
@@ -488,11 +507,29 @@ mod tests {
             current: "1.0.0".into(),
             latest: "1.1.0".into(),
             up_to_date: false,
+            dev_build: false,
             asset_url: Some("https://example.com/asset".into()),
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("up_to_date"));
+        assert!(json.contains("dev_build"));
         assert!(json.contains("asset_url"));
+    }
+
+    // The update verdict (issue #46): behind → update; equal and *ahead* →
+    // up to date (no downgrade offer, the old string-equality bug); any
+    // unstamped 0.0.0 build → flagged dev and never silently updatable.
+    #[test]
+    fn verdict_handles_release_dev_and_newer_builds() {
+        assert_eq!(verdict("1.2.3", "1.3.0"), (false, false)); // behind
+        assert_eq!(verdict("1.3.0", "1.3.0"), (true, false)); // current
+        assert_eq!(verdict("1.4.0", "1.3.0"), (true, false)); // ahead: no downgrade
+        assert_eq!(verdict("1.10.0", "1.9.0"), (true, false)); // numeric compare
+        assert_eq!(verdict("0.0.0", "1.3.0"), (false, true)); // tarball dev build
+        assert_eq!(
+            verdict("0.0.0+v1.3.0-12-gabc-dirty", "1.3.0"),
+            (false, true)
+        );
     }
 
     #[test]
