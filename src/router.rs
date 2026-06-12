@@ -61,6 +61,7 @@ async fn access_log(req: Request, next: Next) -> Response {
 /// POST /login             -   checks the password, sets the `sid` cookie
 /// GET  /logout            -   clears the session cookie
 /// GET  /events            S   live-input SSE stream (Status tab)
+/// GET  /api/name          -   device name for the browser tab title (public)
 /// GET  /api/info          S   connection info for the Status tab
 /// GET  /api/list          S   read
 /// GET  /api/download      S   read
@@ -91,6 +92,7 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", get(auth::logout))
         .route("/events", get(ui::events))
         .route("/api/info", get(ui::info))
+        .route("/api/name", get(ui::public_name))
         .route("/api/list", get(files::list))
         .route("/api/download", get(files::download))
         .route("/api/zip", get(files::zip))

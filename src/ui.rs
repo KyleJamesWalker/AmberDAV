@@ -107,6 +107,9 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         // Gamepad input is only read on device builds; elsewhere the live-input
         // stream never emits, so the UI hides that card (issue #15).
         "live_input": cfg!(device),
+        // Device name for the browser tab title (issue #101). null = fall back
+        // to the default subtitle "web access".
+        "name": state.settings.name,
     }))
     .into_response()
 }
@@ -140,6 +143,13 @@ fn disk_space(path: &std::path::Path) -> Option<(u64, u64)> {
 #[cfg(not(unix))]
 fn disk_space(_path: &std::path::Path) -> Option<(u64, u64)> {
     None
+}
+
+/// Public device-name endpoint — no auth required so the login page can set its
+/// tab title before the user logs in (issue #101). Returns only `{"name": ...}`;
+/// nothing sensitive is exposed.
+pub async fn public_name(State(state): State<AppState>) -> Response {
+    Json(serde_json::json!({ "name": state.settings.name })).into_response()
 }
 
 /// Current settings (session-gated), read-only — for display in the UI.

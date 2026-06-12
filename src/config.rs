@@ -86,6 +86,10 @@ pub struct BounceScreen {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
+    /// Human-readable device name shown in the browser tab title.
+    /// `None`/absent → the subtitle falls back to `"web access"`.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Fixed login password. `None`/absent → a random one is generated each boot.
     #[serde(default)]
     pub password: Option<String>,
@@ -135,6 +139,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            name: None,
             password: None,
             display_password: true,
             root: None,
@@ -274,6 +279,11 @@ fn to_jsonc_pretty(s: &Settings) -> String {
 
     format!(
         r#"{{
+  // Human-readable device name shown in the browser tab title.
+  // null = the subtitle falls back to "web access". Example: "Stream Deck".
+  // [env: AMBERDAV_NAME]  [CLI: --name]
+  "name": {name},
+
   // Fixed login password. null = a fresh random code is generated each boot.
   "password": {password},
 
@@ -326,6 +336,7 @@ fn to_jsonc_pretty(s: &Settings) -> String {
   "bounce_keys": {bounce_keys}
 }}
 "#,
+        name = json(&s.name),
         password = json(&s.password),
         display_password = json(&s.display_password),
         root = json(&s.root),
@@ -394,6 +405,7 @@ mod tests {
         }
         // Every config key is present so users edit rather than guess names.
         for key in [
+            "name",
             "password",
             "display_password",
             "root",
@@ -430,6 +442,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trips_custom_values() {
         let custom = Settings {
+            name: Some("Retro Flippy".to_string()),
             password: Some("li\"ttle\\Secr3t".to_string()),
             display_password: false,
             root: Some("/mnt/mmc".to_string()),

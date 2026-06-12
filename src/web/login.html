@@ -100,6 +100,15 @@
       fixed password is configured it changes with every restart.</div>
   </form>
 <script>
+  // Set the tab title and the ".tag" subtitle to the configured device name so
+  // multiple instances can be told apart from the login page too (issue #101).
+  fetch('/api/name').then(function(r) { return r.json(); }).then(function(d) {
+    if (d.name) {
+      document.title = 'AmberDAV · ' + d.name;
+      var tag = document.querySelector('.tag');
+      if (tag) tag.textContent = d.name;
+    }
+  }).catch(function() {});
   if (new URLSearchParams(location.search).has('e')) {
     document.getElementById('err').textContent = 'Incorrect code — check the device screen or startup banner.';
     document.getElementById('pw').focus();
