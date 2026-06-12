@@ -61,7 +61,7 @@
     <div class="brand">Amber<b>DAV</b></div>
     <div class="tag">web access</div>
 
-    <div class="prompt">Enter the access code shown on your device:</div>
+    <div class="prompt">Enter the access code:</div>
     <label class="field">
       <span class="caret">&gt;</span>
       <input type="password" name="password" id="pw" inputmode="text"
@@ -70,12 +70,19 @@
     <div class="err" id="err"></div>
     <button type="submit">Continue</button>
 
-    <div class="hint">The code appears on the handheld's screen and changes
-      every time the app restarts. It is never displayed here.</div>
+    <!-- Must stay accurate for all three setups (issue #56): a random
+         per-boot code on a handheld (device screen), random on a
+         desktop/server (startup banner in the terminal), and a fixed
+         configured password. The "never shown in the browser" promise is
+         kept by /api/settings redacting the password server-side. -->
+    <div class="hint">The code appears where the app runs — on the device
+      screen, or in the startup banner on desktops and servers. Unless a
+      fixed password is configured it changes with every restart, and it is
+      never shown in the browser.</div>
   </form>
 <script>
   if (new URLSearchParams(location.search).has('e')) {
-    document.getElementById('err').textContent = 'Incorrect code — check your device screen.';
+    document.getElementById('err').textContent = 'Incorrect code — check the device screen or startup banner.';
     document.getElementById('pw').focus();
   }
 </script>
