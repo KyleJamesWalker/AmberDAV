@@ -390,10 +390,13 @@
       <div class="card">
         <h3>How to change them</h3>
         <p class="muted" style="font-family:var(--mono);font-size:.82rem;line-height:1.7;">
-          Settings are read from <code>config.json</code> in the app folder
-          (next to the binary, e.g. <code>Roms/APPS/webdav/config.json</code>).
-          Edit that file — directly on the card or over WebDAV — and relaunch
-          the app to apply changes.
+          <!-- The path is filled in from /api/info: device builds keep it
+               next to the binary, desktop builds use the platform config
+               dir, and $AMBERDAV_CONFIG overrides both — hardcoding the
+               device layout here was wrong everywhere else (issue #60). -->
+          Settings are read from <code id="cfg-path">config.json</code>.
+          Edit that file — directly or over WebDAV — and relaunch the app
+          to apply changes.
         </p>
       </div>
     </section>
@@ -1298,6 +1301,9 @@ async function loadVersion() {
   try {
     const info = await api('GET', '/api/info');
     $('upd-version').innerHTML = 'Installed version: <b>' + escapeHtml(info.version || '0.0.0') + '</b>';
+    // Same fetch fills the help card's real config location (issue #60) —
+    // device builds keep it next to the binary, desktop builds don't.
+    if (info.config_path) $('cfg-path').textContent = info.config_path;
   } catch (e) {
     $('upd-version').textContent = 'Version unknown';
   }
