@@ -4,7 +4,11 @@
 //! their state from here instead of the binary root, and so the router can be
 //! built — and driven in tests — without going through `main()`.
 
-use std::{net::IpAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::IpAddr,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use axum::extract::FromRef;
 use tokio::sync::broadcast;
@@ -22,10 +26,43 @@ pub struct ServerInfo {
     pub config_error: Option<String>,
 }
 
-/// Resolve the device's current LAN IP. Re-queried live (not cached at boot)
-/// so the screen/info recover once Wi-Fi connects after launch.
+/// Fixed advertised address, set once at startup when `--bind` names a
+/// specific address (issue #59). Unset = advertise the detected LAN IP.
+static FIXED_IP: OnceLock<IpAddr> = OnceLock::new();
+
+/// Parse the configured bind address into the address user-facing surfaces
+/// must advertise. `Some` when it names a specific address (including
+/// loopback): that is the only address accepting connections, so showing the
+/// detected LAN IP would hand out a URL that refuses to connect (issue #59).
+/// `None` for the unspecified addresses (`0.0.0.0`, `::`) — the server
+/// listens everywhere, so the detected LAN IP is right — and for anything
+/// unparseable (e.g. a hostname), where live detection is the safest
+/// fallback.
+pub fn advertised_ip(bind: &str) -> Option<IpAddr> {
+    bind.trim()
+        .parse::<IpAddr>()
+        .ok()
+        .filter(|ip| !ip.is_unspecified())
+}
+
+/// Record the bind address for [`current_ip`]. Called once from `main`, after
+/// the bind address is resolved and before any surface renders an address.
+pub fn pin_advertised_ip(bind: &str) {
+    if let Some(ip) = advertised_ip(bind) {
+        let _ = FIXED_IP.set(ip);
+    }
+}
+
+/// The address every user-facing surface advertises (stdout banner + QR, the
+/// device screen, `/api/info`, the `connection.json` sidecar). Bound to a
+/// specific address → always that address (issue #59). Bound to all
+/// interfaces → the detected LAN IP, re-queried live (not cached at boot) so
+/// the screen/info recover once Wi-Fi connects after launch.
 pub fn current_ip() -> IpAddr {
-    local_ip_address::local_ip().unwrap_or(IpAddr::from([0, 0, 0, 0]))
+    match FIXED_IP.get() {
+        Some(ip) => *ip,
+        None => local_ip_address::local_ip().unwrap_or(IpAddr::from([0, 0, 0, 0])),
+    }
 }
 
 /// Settings, loaded once at boot from the config file (file-owned, read-only
@@ -64,5 +101,50 @@ impl AppState {
 impl FromRef<AppState> for DavState {
     fn from_ref(state: &AppState) -> Self {
         state.dav.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // A specific bind address — loopback included — is the only address that
+    // accepts connections, so it is what every surface must advertise
+    // (issue #59). Loopback is the motivating case: `--bind 127.0.0.1` used
+    // to print a QR pointing at the LAN IP, which refuses connections.
+    #[test]
+    fn specific_bind_addresses_are_advertised() {
+        assert_eq!(
+            advertised_ip("192.168.1.5"),
+            Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)))
+        );
+        assert_eq!(
+            advertised_ip("127.0.0.1"),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(advertised_ip("::1"), Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert_eq!(
+            advertised_ip("fe80::1"),
+            Some(IpAddr::V6("fe80::1".parse().unwrap()))
+        );
+        // Whitespace from a hand-edited config must not disable the pinning.
+        assert_eq!(
+            advertised_ip(" 127.0.0.1 "),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+    }
+
+    // Unspecified binds listen on every interface, so the live-detected LAN
+    // IP stays correct; unparseable values (hostnames, garbage) also fall
+    // back to detection — the pre-existing behavior is the safest guess.
+    #[test]
+    fn unspecified_and_unparseable_binds_fall_back_to_detection() {
+        assert_eq!(advertised_ip("0.0.0.0"), None);
+        assert_eq!(advertised_ip("::"), None);
+        assert_eq!(advertised_ip("0:0:0:0:0:0:0:0"), None);
+        assert_eq!(advertised_ip("localhost"), None);
+        assert_eq!(advertised_ip(""), None);
+        assert_eq!(advertised_ip("not-an-ip"), None);
     }
 }

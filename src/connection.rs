@@ -75,6 +75,10 @@ const REFRESH_EVERY: Duration = Duration::from_secs(3);
 /// the late-Wi-Fi fix for `"ip": "0.0.0.0"` persisting forever (issue #48).
 /// The port and password can't change at runtime, so the IP is the only live
 /// field. The task ends when `shutdown` fires.
+///
+/// When the server is bound to a specific address, `current_ip()` is pinned
+/// to it (issue #59): the file is written once with that address and the
+/// loop never sees a change, so it never rewrites.
 pub fn spawn_refresher(
     path: PathBuf,
     port: u16,
