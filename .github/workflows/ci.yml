@@ -2,8 +2,15 @@ name: CI
 
 on:
   pull_request:
+  # Direct-to-main commits must pass the same gates as PRs — untested pushes
+  # otherwise feed the release workflow (issue #51, review §2.20).
+  push:
+    branches: [main]
 
-# Cancel superseded runs on the same ref to save CI minutes.
+# Cancel superseded runs on the same ref to save CI minutes. PR runs and main
+# pushes live in different groups (refs/pull/N/merge vs refs/heads/main), so a
+# merge doesn't cancel anything mid-flight; rapid successive merges to main
+# supersede each other, which is the dedup we want.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -58,11 +65,28 @@ jobs:
       - name: Test (sdl)
         run: cargo test --all-targets --features sdl
 
+  # The two workflow matrices are line-for-line duplicates by design; the
+  # matrix-sync job below fails the PR if they drift (issue #51, review §3.10).
+  matrix-sync:
+    name: matrix sync (ci ↔ release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compare the ci.yml and release.yml build matrices
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 .github/scripts/check_matrix_sync.py
+
   # Compile every shipped release target (and feature set) so target-specific
   # breakage — a cross-compile, a feature-gated dep, the ring/musl/ARM-Windows
   # toolchains — surfaces on the PR instead of at release time. This mirrors the
   # release matrix exactly; it is build-only (debug, no upload) since the test
   # job above already runs fmt/clippy/tests for all feature sets.
+  #
+  # MATRIX SYNC (issue #51): this include list must stay identical to the one
+  # in release.yml (the matrix-sync job enforces that), and is mirrored by
+  # src/update.rs::asset_for and the README's asset table — change one,
+  # change all four.
   build:
     name: build · ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
@@ -143,9 +167,13 @@ jobs:
         with:
           version: "0.16.0"
 
+      # Prebuilt binary via install-action — `cargo install` compiled
+      # cargo-zigbuild from source on every cache-cold run (issue #51).
       - name: Install cargo-zigbuild
         if: matrix.zig
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - name: Install libSDL2 (sdl builds)
         if: matrix.sdl

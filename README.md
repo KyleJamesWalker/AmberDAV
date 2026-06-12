@@ -86,6 +86,10 @@ standard headless build, the `-fb` suffix marks the static build with the
 on-device framebuffer/Wayland UI compiled in, and `-sdl` is the dynamic
 on-screen build (links the system libSDL2).
 
+<!-- MATRIX SYNC (issue #51): this table mirrors the build matrices in
+     .github/workflows/ci.yml + release.yml (kept identical to each other by
+     CI's matrix-sync job) and src/update.rs::asset_for — change one, change
+     all four. -->
 | Asset | Platform | Build |
 | --- | --- | --- |
 | `amber-dav-aarch64-linux` | ARM Linux servers/Raspberry Pi/NAS/Graviton (static musl) | headless |

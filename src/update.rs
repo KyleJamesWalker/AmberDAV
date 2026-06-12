@@ -32,6 +32,11 @@ static UPDATE_IN_PROGRESS: std::sync::atomic::AtomicBool =
 /// Precedence is **sdl > fb > headless**. The `fb` and `sdl` features are
 /// independent; if a build somehow enables both, `sdl` is matched first so it
 /// wins — mirroring the sink selection, where `sdl` overrides the framebuffer.
+///
+/// MATRIX SYNC (issue #51): the asset names here mirror the build matrices in
+/// `.github/workflows/ci.yml` + `release.yml` (kept identical to each other
+/// by CI's matrix-sync job) and the README's asset table — change one,
+/// change all four.
 fn asset_for(arch: &str, os: &str, sdl: bool, fb: bool) -> Option<&'static str> {
     match (arch, os) {
         ("aarch64", "linux") if sdl => Some("amber-dav-aarch64-linux-sdl"),
