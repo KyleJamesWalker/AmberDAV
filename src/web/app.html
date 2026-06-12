@@ -1247,12 +1247,24 @@ async function loadConn() {
       warn.style.display = '';
     } else { warn.style.display = 'none'; }
     renderDisk(i);
-    $('conn').innerHTML =
-      'Device IP: <b>' + i.ip + ':' + i.port + '</b><br>' +
-      'WebDAV mount: <a href="' + i.dav + '">' + i.dav + '</a><br>' +
-      'Serving: ' + escapeHtml(i.root) + '<br>' +
-      'Disk: <b>' + diskText(i) + '</b><br>' +
-      'Screen: ' + escapeHtml(i.screen);
+    // Built with DOM nodes, not an HTML string (issue #55): the values come
+    // from the server's own config, but they must still render as text, and
+    // escapeHtml is not attribute-safe for the href.
+    const conn = $('conn');
+    conn.textContent = '';
+    const bold = (t) => { const b = document.createElement('b'); b.textContent = t; return b; };
+    const dav = document.createElement('a');
+    dav.setAttribute('href', i.dav);
+    dav.textContent = i.dav;
+    [['Device IP: ', bold(i.ip + ':' + i.port)],
+     ['WebDAV mount: ', dav],
+     ['Serving: ', i.root],
+     ['Disk: ', bold(diskText(i))],
+     ['Screen: ', i.screen],
+    ].forEach(([label, value], idx) => {
+      if (idx) conn.appendChild(document.createElement('br'));
+      conn.append(label, value); // strings become text nodes, never markup
+    });
     // Gamepad input only streams on device (fb/sdl) builds; elsewhere the card
     // would sit empty, so only reveal it and open the stream when supported.
     if (i.live_input) { $('card-live-input').style.display = ''; startInput(); }
@@ -1263,7 +1275,9 @@ async function loadConn() {
 async function loadSettings() {
   try {
     const s = await api('GET', '/api/settings');
-    const row = (k, v) => k + ': <b>' + v + '</b>';
+    // Values are text context only, so escapeHtml suffices (issue #55) — a
+    // favorite named "<b>roms" must render literally, like filenames do.
+    const row = (k, v) => k + ': <b>' + escapeHtml(v) + '</b>';
     $('set-view').innerHTML = [
       row('Password', s.password ? 'fixed code' : 'random (new each launch)'),
       row('Show code on screen', s.display_password ? 'yes' : 'no'),
@@ -1283,7 +1297,7 @@ let updCheckResult = null;
 async function loadVersion() {
   try {
     const info = await api('GET', '/api/info');
-    $('upd-version').innerHTML = 'Installed version: <b>' + (info.version || '0.0.0') + '</b>';
+    $('upd-version').innerHTML = 'Installed version: <b>' + escapeHtml(info.version || '0.0.0') + '</b>';
   } catch (e) {
     $('upd-version').textContent = 'Version unknown';
   }
@@ -1311,7 +1325,8 @@ async function checkUpdate() {
         + '</b> → <b>v' + escapeHtml(updCheckResult.latest) + '</b>';
       $('upd-apply').style.display = '';
     } else {
-      status.innerHTML = 'Update available: <b>v' + updCheckResult.current + '</b> → <b>v' + updCheckResult.latest + '</b>';
+      status.innerHTML = 'Update available: <b>v' + escapeHtml(updCheckResult.current)
+        + '</b> → <b>v' + escapeHtml(updCheckResult.latest) + '</b>';
       $('upd-apply').style.display = '';
     }
   } catch (e) {
