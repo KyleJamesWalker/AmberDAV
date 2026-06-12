@@ -5,11 +5,49 @@
 //! tests through `tower::ServiceExt::oneshot` without binding a socket.
 
 use axum::{
+    extract::Request,
+    middleware::Next,
+    response::Response,
     routing::{any, get, post, put},
     Router,
 };
 
 use crate::{auth, files, state::AppState, ui, update, webdav};
+
+/// One-line access log per request: `METHOD /path -> status (ms)` (issue
+/// #47). Levels are chosen so the default (info) log shows what *changed*
+/// without drowning in browsing noise:
+///
+/// - server errors (5xx) → warn;
+/// - mutations (anything but GET/HEAD/OPTIONS/PROPFIND) → info, including
+///   their 4xx rejections (a denied write is worth seeing);
+/// - reads → debug. This also keeps the WebDAV mount's routine 401
+///   challenge round-trips (every client starts credential-less) and
+///   per-thumbnail GETs out of the default view.
+///
+/// The duration is handler time: `next.run` resolves when the response —
+/// headers plus body *stream* — is produced, so long-lived bodies (the
+/// `/events` SSE stream, a large download) log their startup latency, not a
+/// misleading connection lifetime.
+async fn access_log(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    // Path only: query strings (file paths) stay out so the log shape is
+    // predictable; request bodies and credentials are never logged.
+    let path = req.uri().path().to_string();
+    let start = std::time::Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16();
+    let ms = start.elapsed().as_millis();
+    let read = matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS" | "PROPFIND");
+    if status >= 500 {
+        tracing::warn!("{method} {path} -> {status} ({ms}ms)");
+    } else if read {
+        tracing::debug!("{method} {path} -> {status} ({ms}ms)");
+    } else {
+        tracing::info!("{method} {path} -> {status} ({ms}ms)");
+    }
+    resp
+}
 
 /// Build the complete application router over `state`.
 ///
@@ -73,6 +111,7 @@ pub fn router(state: AppState) -> Router {
         .route(webdav::MOUNT, any(webdav::route))
         .route(&format!("{}/", webdav::MOUNT), any(webdav::route))
         .route(&format!("{}/{{*rest}}", webdav::MOUNT), any(webdav::route))
+        .layer(axum::middleware::from_fn(access_log))
         .with_state(state)
 }
 
