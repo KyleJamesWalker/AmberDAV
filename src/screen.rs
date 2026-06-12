@@ -8,8 +8,10 @@
 //! it: the A button blanks the screen, and the X button starts a "DVD bounce"
 //! screensaver that drifts random images around to prevent burn-in.
 //!
-//! If the image comes out rotated on a given panel, set the env var
-//! `AMBERDAV_FB_ROTATE` to 90, 180, or 270.
+//! Rotation: portrait-mounted panels (the framebuffer reports taller than
+//! wide, e.g. the RG34XXSP under the stock OS) automatically get the
+//! landscape-authored canvas turned 90°; the env var `AMBERDAV_FB_ROTATE`
+//! (0/90/180/270) overrides the choice if the guess is wrong for a panel.
 //!
 //! See also — content: `canvas.rs` → choice: `display.rs` → sinks:
 //! `screen.rs`/`sdl.rs`/`wayland.rs` → state: `screen::Mode`.
@@ -226,6 +228,28 @@ pub fn show(
     set_status(&status, "disabled (headless build)".to_string());
 }
 
+/// Rotation for the landscape-authored canvas, plus whether it was chosen
+/// automatically. An explicit `AMBERDAV_FB_ROTATE` value always wins, snapped
+/// to 0/90/180/270 exactly as before. Without one (or with an unparseable
+/// one), portrait-mounted panels — the framebuffer reports taller than wide,
+/// e.g. the RG34XXSP under the stock OS — default to 90 so the info screen
+/// comes up upright instead of sideways (issue #38); landscape and square
+/// panels keep 0. The stock firmware offers no usable device identity
+/// (`/proc/device-tree/model` is the generic "sun50iw9" on every H700
+/// device), so the probed geometry *is* the detection signal. The `bool`
+/// rides along so the status string can tag an auto-chosen turn.
+#[allow(dead_code)] // used on framebuffer (device) builds and in tests
+fn pick_rotation(explicit: Option<&str>, xres: usize, yres: usize) -> (u32, bool) {
+    if let Some(d) = explicit.and_then(|s| s.trim().parse::<u32>().ok()) {
+        return ((d / 90 % 4) * 90, false);
+    }
+    if yres > xres {
+        (90, true)
+    } else {
+        (0, false)
+    }
+}
+
 /// Logical canvas dimensions for a given rotation and physical resolution.
 /// For 90/270 the canvas is authored landscape then turned to fit the panel.
 #[allow(dead_code)] // used on handheld (device) builds and in tests
@@ -350,6 +374,38 @@ mod tests {
         }
     }
 
+    // An explicit AMBERDAV_FB_ROTATE always wins (snapped to a multiple of
+    // 90, exactly the pre-existing parse), on any panel shape.
+    #[test]
+    fn explicit_rotation_always_wins() {
+        // Portrait panel, every explicit value — including 0 to pin the old
+        // default on a panel the heuristic would otherwise turn.
+        assert_eq!(pick_rotation(Some("0"), 480, 720), (0, false));
+        assert_eq!(pick_rotation(Some("90"), 480, 720), (90, false));
+        assert_eq!(pick_rotation(Some("180"), 480, 720), (180, false));
+        assert_eq!(pick_rotation(Some("270"), 480, 720), (270, false));
+        // Snapping and whitespace handling are unchanged.
+        assert_eq!(pick_rotation(Some("450"), 640, 480), (90, false));
+        assert_eq!(pick_rotation(Some(" 270 "), 640, 480), (270, false));
+    }
+
+    // Without an override the probed geometry is the detection signal: the
+    // canvas is authored landscape, so a portrait framebuffer (RG34XXSP under
+    // the stock OS) is exactly the renders-sideways signature — default to a
+    // 90° turn there, and to 0 on landscape/square panels (RG35XX Pro,
+    // RGcubeXX) so working devices are untouched.
+    #[test]
+    fn portrait_panels_default_to_a_quarter_turn() {
+        assert_eq!(pick_rotation(None, 480, 720), (90, true));
+        assert_eq!(pick_rotation(None, 480, 640), (90, true));
+        assert_eq!(pick_rotation(None, 640, 480), (0, false));
+        assert_eq!(pick_rotation(None, 720, 480), (0, false));
+        assert_eq!(pick_rotation(None, 720, 720), (0, false));
+        // An unparseable override falls back to the heuristic.
+        assert_eq!(pick_rotation(Some("sideways"), 480, 720), (90, true));
+        assert_eq!(pick_rotation(Some(""), 640, 480), (0, false));
+    }
+
     // The shim signature this guards against: ALL THREE bitfield lengths
     // zero. 16/32bpp get the de-facto layout (named, so the status string
     // can say so); unusual depths have no safe guess and keep the report.
@@ -427,14 +483,6 @@ mod tests {
 mod imp {
     use framebuffer::{Framebuffer, VarScreeninfo};
 
-    fn rotation() -> u32 {
-        std::env::var("AMBERDAV_FB_ROTATE")
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .map(|d| (d / 90 % 4) * 90)
-            .unwrap_or(0)
-    }
-
     /// Framebuffer geometry, probed once and reused for every frame.
     pub struct Geom {
         pub xres: usize,
@@ -444,6 +492,9 @@ mod imp {
         pub xoff: usize,
         pub pages: usize,
         pub rot: u32,
+        /// True when `rot` came from the portrait-panel heuristic rather than
+        /// an explicit `AMBERDAV_FB_ROTATE` (tagged in the status string).
+        rot_auto: bool,
         /// Logical canvas dimensions (landscape-as-authored).
         pub lw: usize,
         pub lh: usize,
@@ -469,7 +520,10 @@ mod imp {
             let xoff = var.xoffset as usize;
             // Panel may be double/triple-buffered (virtual height > visible).
             let pages = (var.yres_virtual as usize / yres).max(1);
-            let rot = rotation();
+            // Explicit env override wins; otherwise a portrait-mounted panel
+            // (e.g. RG34XXSP) gets the canvas auto-turned 90° (issue #38).
+            let explicit = std::env::var("AMBERDAV_FB_ROTATE").ok();
+            let (rot, rot_auto) = super::pick_rotation(explicit.as_deref(), xres, yres);
             let (lw, lh) = super::logical_dims(rot, xres, yres);
             // Some DRM-backed fbdev shims report all-zero RGB bitfields,
             // which would pack every pixel to 0 (black screen, "ok" status).
@@ -491,6 +545,7 @@ mod imp {
                 xoff,
                 pages,
                 rot,
+                rot_auto,
                 lw,
                 lh,
                 layout,
@@ -542,8 +597,12 @@ mod imp {
             Some(name) => format!(" fmt={name}(assumed)"),
             None => String::new(),
         };
+        // "(auto)" marks the portrait-panel default, so a wrongly-guessed
+        // turn is identifiable from the Status tab (override with
+        // AMBERDAV_FB_ROTATE).
+        let auto = if g.rot_auto { "(auto)" } else { "" };
         Ok(format!(
-            "{}x{} {}bpp rot={} pages={} virt={} pan={}{fmt}",
+            "{}x{} {}bpp rot={}{auto} pages={} virt={} pan={}{fmt}",
             g.xres, g.yres, g.var.bits_per_pixel, g.rot, g.pages, g.var.yres_virtual, panned
         ))
     }
