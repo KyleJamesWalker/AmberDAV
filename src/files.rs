@@ -1220,6 +1220,35 @@ fn zip_filename(rels: &[String]) -> String {
     }
 }
 
+/// Make the top-level archive entries unique (review §1.12): an exact
+/// duplicate selection (same source path) is dropped outright; distinct
+/// sources that happen to share a name get a `" (2)"`, `" (3)"`… suffix
+/// before the extension. Without this, a crafted path list produces a zip
+/// with duplicate entry names, which extractors handle unpredictably
+/// (skip, clobber, or error).
+fn uniquify_roots(roots: Vec<(PathBuf, String)>) -> Vec<(PathBuf, String)> {
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut used_names = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (path, name) in roots {
+        if !seen_paths.insert(path.clone()) {
+            continue;
+        }
+        let mut unique = name.clone();
+        for n in 2.. {
+            if used_names.insert(unique.clone()) {
+                break;
+            }
+            unique = match name.rsplit_once('.') {
+                Some((stem, ext)) if !stem.is_empty() => format!("{stem} ({n}).{ext}"),
+                _ => format!("{name} ({n})"),
+            };
+        }
+        out.push((path, unique));
+    }
+    out
+}
+
 /// `Content-Disposition: attachment` for `fname`, quotes/backslashes
 /// stripped (the policy `/api/download` has always used). `None` when the
 /// name can't form a header value — callers keep their default disposition.
@@ -1261,16 +1290,52 @@ pub async fn zip(_: Session, State(s): State<AppState>, Query(q): Query<ZipQuery
     if roots.is_empty() {
         return bad("nothing selected");
     }
+    let roots = uniquify_roots(roots);
+
+    // Pre-flight: an unreadable directory fails *now*, as a proper error
+    // response — once streaming starts, the 200 is irrevocable (§1.12).
+    for (abs, _) in &roots {
+        match tokio::fs::metadata(abs).await {
+            Ok(m) if m.is_dir() => {
+                if let Err(e) = tokio::fs::read_dir(abs).await {
+                    return io_err(e);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => return io_err(e),
+        }
+    }
 
     // Stream the archive: a writer task fills one end of a pipe, the response
     // reads the other. Memory stays bounded to the pipe buffer.
     let (writer, reader) = tokio::io::duplex(64 * 1024);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<std::io::Result<()>>();
     tokio::spawn(async move {
-        if let Err(e) = build_zip(writer, roots).await {
-            eprintln!("zip: aborted: {e}");
+        let res = build_zip(writer, roots).await;
+        if let Err(e) = &res {
+            eprintln!("zip: aborted mid-stream: {e}");
+        }
+        let _ = done_tx.send(res);
+    });
+    // The archive bytes, then a tail that surfaces the writer's outcome: on
+    // failure the body stream ends with an Err, so hyper drops the connection
+    // without the terminating chunk and the client sees a failed/truncated
+    // transfer — instead of a "complete" download that is silently a corrupt
+    // zip. (The status line is long gone by then; this is the only signal
+    // HTTP still allows mid-stream.)
+    let data = tokio_util::io::ReaderStream::new(reader);
+    let tail = futures_util::stream::once(async move {
+        done_rx
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::other("zip writer task vanished")))
+    })
+    .filter_map(|res| async move {
+        match res {
+            Ok(()) => None, // clean finish: nothing to append
+            Err(e) => Some(Err(e)),
         }
     });
-    let stream = tokio_util::io::ReaderStream::new(reader);
+    let stream = data.chain(tail);
     let disposition = attachment(&zip_filename(&rels))
         .unwrap_or_else(|| HeaderValue::from_static("attachment; filename=\"amber-dav.zip\""));
     (
@@ -1545,6 +1610,36 @@ mod tests {
         // Degenerate inputs never panic and keep the default.
         assert_eq!(zip_filename(&[]), "amber-dav.zip");
         assert_eq!(zip_filename(&v(&[""])), "amber-dav.zip");
+    }
+
+    // Entry-name hygiene (review §1.12): exact duplicate selections collapse
+    // to one entry; distinct sources sharing a name get numbered, with the
+    // suffix landing before the extension when there is one.
+    #[test]
+    fn zip_roots_are_deduplicated_and_uniquified() {
+        let r = |p: &str, n: &str| (PathBuf::from(p), n.to_string());
+        let out = uniquify_roots(vec![
+            r("/a/x.txt", "x.txt"),
+            r("/a/x.txt", "x.txt"), // exact duplicate: dropped
+            r("/b/x.txt", "x.txt"), // same name, different source: numbered
+            r("/c/x.txt", "x.txt"),
+            r("/d/dir", "dir"),
+            r("/e/dir", "dir"),         // no extension: suffix at the end
+            r("/f/.hidden", ".hidden"), // dotfile: not treated as extension-only
+            r("/g/.hidden", ".hidden"),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                r("/a/x.txt", "x.txt"),
+                r("/b/x.txt", "x (2).txt"),
+                r("/c/x.txt", "x (3).txt"),
+                r("/d/dir", "dir"),
+                r("/e/dir", "dir (2)"),
+                r("/f/.hidden", ".hidden"),
+                r("/g/.hidden", ".hidden (2)"),
+            ]
+        );
     }
 
     // The disposition helper strips quote/backslash (header injection) and
