@@ -150,9 +150,13 @@ jobs:
         with:
           version: "0.16.0"
 
+      # Prebuilt binary via install-action — `cargo install` compiled
+      # cargo-zigbuild from source on every cache-cold run (issue #51).
       - name: Install cargo-zigbuild
         if: matrix.zig
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - name: Install libSDL2 (sdl builds)
         if: matrix.sdl

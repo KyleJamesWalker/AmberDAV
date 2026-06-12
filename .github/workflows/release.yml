@@ -116,11 +116,33 @@ jobs:
       # carries only a 0.0.0 placeholder, so stamp the tag in here before building:
       # env!("CARGO_PKG_VERSION") is compiled into the binary (and drawn on the
       # device screen), so it must reflect the release, not the placeholder.
+      #
+      # Plain text substitution rather than cargo-edit's `cargo set-version`:
+      # installing cargo-edit compiled it from source in every matrix job,
+      # several cache-cold minutes each (issue #51). Same end state: BOTH
+      # files carry the tag version — the builds below run with --locked,
+      # which fails if Cargo.lock still records the placeholder — and
+      # build.rs passes any non-0.0.0 version through verbatim without
+      # touching git (issue #46), so the binary reports exactly the tag.
       - name: Stamp version from release tag
         shell: bash
         run: |
-          cargo install cargo-edit --locked
-          cargo set-version "${GITHUB_REF_NAME#v}"
+          v="${GITHUB_REF_NAME#v}"
+          # Cargo.toml: the [package] version is the only 0.0.0 line.
+          sed 's/^version = "0.0.0"$/version = "'"$v"'"/' Cargo.toml > Cargo.toml.tmp
+          mv Cargo.toml.tmp Cargo.toml
+          # Cargo.lock: only the amber-dav entry — a dependency could
+          # legitimately be version 0.0.0, so anchor on the package name.
+          awk -v v="$v" '
+            $0 == "name = \"amber-dav\"" { in_pkg = 1 }
+            in_pkg && $0 == "version = \"0.0.0\"" { $0 = "version = \"" v "\""; in_pkg = 0 }
+            { print }
+          ' Cargo.lock > Cargo.lock.tmp
+          mv Cargo.lock.tmp Cargo.lock
+          # Loud failure beats a release stamped 0.0.0 (or a --locked error
+          # three steps later) if the placeholder or tag shape ever changes.
+          grep -q "^version = \"$v\"\$" Cargo.toml || { echo "::error::Cargo.toml not stamped to '$v'"; exit 1; }
+          grep -q "^version = \"$v\"\$" Cargo.lock || { echo "::error::Cargo.lock not stamped to '$v'"; exit 1; }
 
       - name: Install Zig
         if: matrix.zig
@@ -128,9 +150,13 @@ jobs:
         with:
           version: "0.16.0"
 
+      # Prebuilt binary via install-action — `cargo install` compiled
+      # cargo-zigbuild from source on every cache-cold run (issue #51).
       - name: Install cargo-zigbuild
         if: matrix.zig
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - name: Install libSDL2 (sdl builds)
         if: matrix.sdl
