@@ -28,11 +28,42 @@ fn plain_segment(seg: &str) -> bool {
     if seg.contains('\\') || seg.contains('\0') {
         return false;
     }
+    // Reserved device names (`con`, `nul.txt`, …) never name a regular file
+    // on Windows: creating one fails with an opaque OS error and *opening*
+    // one reaches the device itself, so reject them up front there. On Unix
+    // they are ordinary names and stay allowed.
+    if cfg!(windows) && windows_reserved(seg) {
+        return false;
+    }
     let mut comps = Path::new(seg).components();
     matches!(
         (comps.next(), comps.next()),
         (Some(std::path::Component::Normal(_)), None)
     )
+}
+
+/// True when `name` (a single path segment) is a Windows reserved device
+/// name — `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9` — either
+/// bare or with an extension (`nul.txt` still opens the NUL device). The
+/// comparison is ASCII case-insensitive and ignores trailing spaces in the
+/// stem, matching Win32 name resolution. Pure so the table is testable on
+/// every host; [`plain_segment`] only *applies* it on Windows targets.
+fn windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    if !stem.is_ascii() {
+        return false;
+    }
+    match stem.len() {
+        3 => ["con", "prn", "aux", "nul"]
+            .into_iter()
+            .any(|dev| stem.eq_ignore_ascii_case(dev)),
+        4 => {
+            let (dev, digit) = stem.split_at(3);
+            (dev.eq_ignore_ascii_case("com") || dev.eq_ignore_ascii_case("lpt"))
+                && matches!(digit.as_bytes()[0], b'1'..=b'9')
+        }
+        _ => false,
+    }
 }
 
 /// Resolve a request path (relative to root, `/`-separated) to an absolute
@@ -1377,6 +1408,73 @@ mod tests {
         assert!(safe_name("C:").is_none());
         #[cfg(unix)]
         assert!(safe_name("C:").is_some());
+    }
+
+    // The reserved-name *table* is pure and checked on every host; whether it
+    // is applied is a target question, covered by the cfg'd test below.
+    #[test]
+    fn windows_reserved_matches_the_device_name_table() {
+        // The documented Win32 set, bare and with extensions, any case, and
+        // with the trailing spaces Win32 strips during name resolution.
+        for name in [
+            "con",
+            "CON",
+            "Con",
+            "prn",
+            "aux",
+            "nul",
+            "NUL.txt",
+            "con.tar.gz",
+            "com1",
+            "COM9",
+            "lpt1",
+            "LPT9",
+            "con ",
+            "con .txt",
+        ] {
+            assert!(windows_reserved(name), "should be reserved: {name:?}");
+        }
+        // Near misses stay ordinary names: prefixes/suffixes, COM0/LPT0 and
+        // double-digit ports (real files on Windows), non-ASCII lookalikes,
+        // and names that merely contain a reserved stem.
+        for name in [
+            "console",
+            "con1",
+            "com",
+            "com0",
+            "com10",
+            "lpt",
+            "lpt0",
+            "lptx",
+            "aux2",
+            "nula",
+            "my.con",
+            "xcon",
+            "cön",
+            "",
+            "photo.png",
+        ] {
+            assert!(!windows_reserved(name), "should not be reserved: {name:?}");
+        }
+    }
+
+    #[test]
+    fn safe_name_rejects_reserved_device_names_on_windows_only() {
+        for name in ["con", "NUL.txt", "com1", "lpt9.log"] {
+            #[cfg(windows)]
+            assert!(safe_name(name).is_none(), "must reject on Windows: {name}");
+            #[cfg(unix)]
+            assert!(safe_name(name).is_some(), "ordinary name on Unix: {name}");
+        }
+        // And `resolve` (which shares `plain_segment`) gates them per-segment.
+        let root = Path::new("/srv/root");
+        #[cfg(windows)]
+        assert_eq!(resolve(root, "a/nul.txt"), None);
+        #[cfg(unix)]
+        assert_eq!(
+            resolve(root, "a/nul.txt"),
+            Some(PathBuf::from("/srv/root/a/nul.txt"))
+        );
     }
 
     /// A scratch directory tree that cleans itself up.
