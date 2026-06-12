@@ -24,7 +24,7 @@ use crate::config::{Permission, Settings};
 /// with `--features fb` or `--features sdl`) it also paints connection info to
 /// the screen and shows live gamepad input.
 #[derive(Parser, Debug)]
-#[command(name = "amber-dav", version)]
+#[command(name = "amber-dav", version = crate::version::VERSION)]
 pub struct Cli {
     /// Directory to serve (positional alias for --root).
     #[arg(value_name = "ROOT")]
