@@ -33,6 +33,7 @@ dependencies = [
  "httpdate",
  "image",
  "jsonc-parser",
+ "libc",
  "local-ip-address",
  "qrcode",
  "rand",

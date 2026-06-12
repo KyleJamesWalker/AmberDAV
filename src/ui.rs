@@ -39,12 +39,17 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         .lock()
         .map(|s| s.clone())
         .unwrap_or_else(|_| "unknown".to_string());
+    let disk = disk_space(&state.root);
     Json(serde_json::json!({
         "ip": ip.to_string(),
         "port": info.port,
         "dav": format!("http://{}:{}{}", ip, info.port, crate::webdav::MOUNT),
         "root": state.root.to_string_lossy(),
         "screen": screen,
+        // Free/total bytes of the filesystem holding the served root — null
+        // when unreportable, and the UI hides the gauge (issue #43).
+        "disk_free": disk.map(|(free, _)| free),
+        "disk_total": disk.map(|(_, total)| total),
         // Non-null when the config file was unusable and defaults are in
         // effect — the Status tab shows this loudly (issue #19).
         "config_error": info.config_error,
@@ -54,6 +59,37 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         "live_input": cfg!(any(feature = "fb", feature = "sdl")),
     }))
     .into_response()
+}
+
+/// Free/total bytes of the filesystem holding `path`, via `statvfs`. "Free"
+/// is what an unprivileged writer can actually use (`f_bavail`, not
+/// `f_bfree`, which counts root-reserved blocks). `None` when the call fails
+/// or reports a zero-sized filesystem — the JSON fields become null and the
+/// web UI degrades by hiding the gauge.
+#[cfg(unix)]
+fn disk_space(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` outlives the call and is NUL-terminated; `s` is a writable
+    // out-param that statvfs fills only on the success (0) return.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    // The field widths differ per platform (u32 on macOS, u64 on Linux),
+    // hence the casts clippy would otherwise flag as redundant on Linux.
+    #[allow(clippy::unnecessary_cast)]
+    let (frsize, bavail, blocks) = (s.f_frsize as u64, s.f_bavail as u64, s.f_blocks as u64);
+    let free = bavail.saturating_mul(frsize);
+    let total = blocks.saturating_mul(frsize);
+    (total > 0).then_some((free, total))
+}
+
+/// No statvfs counterpart wired up on this platform (e.g. Windows): report
+/// "unavailable" rather than pulling in a platform API dependency.
+#[cfg(not(unix))]
+fn disk_space(_path: &std::path::Path) -> Option<(u64, u64)> {
+    None
 }
 
 /// Current settings (session-gated), read-only — for display in the UI.
@@ -112,6 +148,26 @@ pub async fn events(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    // The shim's invariants on a real filesystem: positive total, free never
+    // exceeding it. (Runs on every unix host; non-unix returns None and is
+    // covered by the missing-path case below behaving identically.)
+    #[cfg(unix)]
+    #[test]
+    fn disk_space_reports_plausible_numbers() {
+        let (free, total) =
+            disk_space(std::path::Path::new("/")).expect("statvfs on / should succeed");
+        assert!(total > 0, "total bytes must be positive");
+        assert!(free <= total, "free ({free}) cannot exceed total ({total})");
+    }
+
+    // A path that doesn't exist must yield None (→ null JSON fields), never
+    // an error response from /api/info.
+    #[test]
+    fn disk_space_on_a_missing_path_is_none() {
+        let p = std::path::Path::new("/definitely/not/a/real/amberdav/path");
+        assert_eq!(disk_space(p), None);
+    }
 
     fn sample() -> InputUpdate {
         InputUpdate {
