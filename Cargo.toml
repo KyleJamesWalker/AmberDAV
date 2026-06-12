@@ -63,6 +63,12 @@ fb = ["dep:evdev", "dep:framebuffer", "dep:smithay-client-toolkit"]
 # Deck + Anbernic. If both `fb` and `sdl` are enabled, `sdl` wins.
 sdl = ["dep:evdev", "dep:sdl2"]
 
+# statvfs for the free-disk-space gauge on /api/info. Already in the
+# dependency graph many times over (tokio, reqwest, …), so this vendors no
+# new code; non-unix targets simply report the fields as null.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Device-only deps. Linux-only crates (framebuffer/evdev/sdl2), pulled in solely
 # by the `fb`/`sdl` features, which are only ever built for the handheld devices.
 [target.'cfg(target_os = "linux")'.dependencies]

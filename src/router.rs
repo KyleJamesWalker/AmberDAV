@@ -277,6 +277,27 @@ mod tests {
         assert_eq!(entries[1]["size"], 3);
     }
 
+    // /api/info carries the disk gauge fields for the served root: numbers on
+    // unix (where the statvfs shim is wired up), null where unreportable —
+    // the UI hides the gauge on null, so the keys must always be present.
+    #[tokio::test]
+    async fn api_info_reports_disk_space_fields() {
+        let root = TmpRoot::new("api-info-disk");
+        let app = app(&root, Permission::ReadOnly);
+
+        let resp = send(&app, get_authed("/api/info")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let info: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert!(info.get("disk_free").is_some(), "disk_free key missing");
+        assert!(info.get("disk_total").is_some(), "disk_total key missing");
+        #[cfg(unix)]
+        {
+            let free = info["disk_free"].as_u64().expect("disk_free is a number");
+            let total = info["disk_total"].as_u64().expect("disk_total is a number");
+            assert!(total > 0 && free <= total, "free={free} total={total}");
+        }
+    }
+
     // --- login ------------------------------------------------------------
 
     // auth::login must set the session cookie only on the right password; a
