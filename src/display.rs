@@ -97,9 +97,7 @@ pub fn detect() -> DisplayKind {
     let kind = select(socket.as_deref(), fb0, override_.as_deref());
     // Log the decision: the device screen is headless from a terminal's view, so
     // this is how the sink choice is diagnosed (especially under Steam Game Mode).
-    eprintln!(
-        "display: sink={kind:?} (wayland_socket={socket:?}, fb0={fb0}, override={override_:?})"
-    );
+    tracing::info!("sink={kind:?} (wayland_socket={socket:?}, fb0={fb0}, override={override_:?})");
     kind
 }
 

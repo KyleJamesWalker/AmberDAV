@@ -48,11 +48,11 @@ impl ConnectionInfo {
             }
         }
         if let Err(e) = std::fs::write(&tmp, self.to_json()) {
-            eprintln!("connection: cannot write {}: {e}", tmp.display());
+            tracing::warn!("cannot write {}: {e}", tmp.display());
             return;
         }
         if let Err(e) = std::fs::rename(&tmp, path) {
-            eprintln!("connection: cannot rename into {}: {e}", path.display());
+            tracing::warn!("cannot rename into {}: {e}", path.display());
         }
     }
 }

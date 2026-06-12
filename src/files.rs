@@ -1313,7 +1313,7 @@ pub async fn zip(_: Session, State(s): State<AppState>, Query(q): Query<ZipQuery
     tokio::spawn(async move {
         let res = build_zip(writer, roots).await;
         if let Err(e) = &res {
-            eprintln!("zip: aborted mid-stream: {e}");
+            tracing::warn!("zip download aborted mid-stream: {e}");
         }
         let _ = done_tx.send(res);
     });

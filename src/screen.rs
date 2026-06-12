@@ -87,7 +87,7 @@ pub fn show(
             shutdown,
         ) {
             set_status(&status, format!("sdl failed: {e}"));
-            eprintln!("screen: sdl sink failed ({e}); connection info is in the log only");
+            tracing::warn!("sdl sink failed ({e}); connection info is in the log only");
         }
     });
 }
@@ -118,9 +118,7 @@ pub fn show(
                     crate::wayland::run(port, password, status.clone(), mode, socket, startup_error)
                 {
                     set_status(&status, format!("wayland failed: {e}"));
-                    eprintln!(
-                        "screen: wayland sink failed ({e}); connection info is in the log only"
-                    );
+                    tracing::warn!("wayland sink failed ({e}); connection info is in the log only");
                 }
             });
         }
@@ -129,8 +127,8 @@ pub fn show(
         }
         DisplayKind::Headless => {
             set_status(&status, "disabled (no display detected)".to_string());
-            eprintln!(
-                "screen: no /dev/fb0 and no Wayland display; connection info is in the log only"
+            tracing::info!(
+                "no /dev/fb0 and no Wayland display; connection info is in the log only"
             );
         }
     }
@@ -157,7 +155,7 @@ fn show_framebuffer(
                 Ok(g) => g,
                 Err(e) => {
                     set_status(&status, format!("geometry failed: {e}"));
-                    eprintln!("screen: {e}; connection info is in the log only");
+                    tracing::warn!("{e}; connection info is in the log only");
                     return;
                 }
             };
@@ -193,7 +191,7 @@ fn show_framebuffer(
                         Ok(info) => set_status(&status, format!("ok ({info}) mode={mode:?}")),
                         Err(e) => {
                             set_status(&status, format!("render failed: {e}"));
-                            eprintln!("screen: render failed ({e}); info is in the log only");
+                            tracing::warn!("render failed ({e}); info is in the log only");
                             break;
                         }
                     }
@@ -210,7 +208,7 @@ fn show_framebuffer(
         }
         Err(e) => {
             set_status(&status, format!("cannot open /dev/fb0: {e:?}"));
-            eprintln!("screen: cannot open /dev/fb0 ({e:?}); connection info is in the log only");
+            tracing::warn!("cannot open /dev/fb0 ({e:?}); connection info is in the log only");
         }
     });
 }
