@@ -2,8 +2,15 @@ name: CI
 
 on:
   pull_request:
+  # Direct-to-main commits must pass the same gates as PRs — untested pushes
+  # otherwise feed the release workflow (issue #51, review §2.20).
+  push:
+    branches: [main]
 
-# Cancel superseded runs on the same ref to save CI minutes.
+# Cancel superseded runs on the same ref to save CI minutes. PR runs and main
+# pushes live in different groups (refs/pull/N/merge vs refs/heads/main), so a
+# merge doesn't cancel anything mid-flight; rapid successive merges to main
+# supersede each other, which is the dedup we want.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
