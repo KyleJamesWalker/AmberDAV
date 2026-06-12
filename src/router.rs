@@ -309,11 +309,15 @@ mod tests {
         let resp = send(&app, get_authed("/api/list")).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let entries: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
-        // Folders sort first, then files.
-        assert_eq!(entries[0]["name"], "sub");
-        assert_eq!(entries[0]["dir"], true);
-        assert_eq!(entries[1]["name"], "a.txt");
-        assert_eq!(entries[1]["size"], 3);
+        // Order-independent on purpose: listings are deliberately unsorted
+        // (readdir order) — the web UI re-sorts client-side (issue #58).
+        let entries = entries.as_array().expect("listing is an array");
+        assert_eq!(entries.len(), 2);
+        let sub = entries.iter().find(|e| e["name"] == "sub").expect("sub");
+        assert_eq!(sub["dir"], true);
+        let file = entries.iter().find(|e| e["name"] == "a.txt").expect("a.txt");
+        assert_eq!(file["dir"], false);
+        assert_eq!(file["size"], 3);
     }
 
     // /api/info carries the disk gauge fields for the served root: numbers on

@@ -201,12 +201,12 @@ pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQue
         });
     }
 
-    // Folders first, then case-insensitive by name.
-    entries.sort_by(|a, b| {
-        b.dir
-            .cmp(&a.dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    // Deliberately unsorted (issue #58): ordering is the client's job — the
+    // web UI's sortView() re-sorts every listing by the user's chosen column
+    // anyway (and is this endpoint's only consumer), so a server-side sort
+    // was pure waste; the old comparator allocated two lowercase Strings per
+    // comparison (~120k transient allocations for a 5,000-entry folder on
+    // the A53). Entries arrive in readdir order — assume nothing about it.
     Json(entries).into_response()
 }
 
