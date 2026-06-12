@@ -215,14 +215,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Password to surface (screen + sidecar), honoring the hidden-password rule.
     let shown_password = display_password.then(|| password.clone());
 
-    // Optional sidecar for external launchers / Decky. Honors the hidden-pw rule.
+    // Optional sidecar for external launchers / Decky. Honors the hidden-pw
+    // rule. Written now and then kept fresh by a background task: Wi-Fi often
+    // associates after launch, so the boot-time IP can be 0.0.0.0 and would
+    // otherwise be served to launchers forever (issue #48).
     if let Some(cf) = settings
         .connection_file
         .as_deref()
         .filter(|p| !p.is_empty())
     {
-        connection::ConnectionInfo::new(ip, port, shown_password.clone())
-            .write(std::path::Path::new(cf));
+        connection::spawn_refresher(
+            std::path::PathBuf::from(cf),
+            port,
+            shown_password.clone(),
+            shutdown.clone(),
+        );
     }
 
     print_banner(ip, port, &root, &password);
