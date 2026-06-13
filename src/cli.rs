@@ -295,6 +295,32 @@ fn parse_u16_list(s: &str) -> Vec<u16> {
 /// collision, or a repeated `NAME=`) are a startup error — the map would
 /// silently keep only one of them, and mount names are the stable URLs DAV
 /// clients bookmark, so the user must pick names explicitly.
+/// Expand a leading `~` to the current user's home directory. The shell only
+/// performs this expansion at the start of a word or in shell-assignment
+/// context; inside a command argument like `NAME=~/path`, the `~` is literal.
+/// This makes `--root PDOG=~/Personal` work the same as `--root ~/Personal`.
+fn expand_home(path: &str) -> String {
+    // Accept both `~/` (Unix) and `~\` (Windows) — the backslash form never
+    // appears in practice on non-Windows but is harmless to recognize.
+    let tail: Option<&str> = if path == "~" {
+        Some("")
+    } else {
+        path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
+    };
+    if let Some(tail) = tail {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from);
+        if let Some(mut h) = home {
+            if !tail.is_empty() {
+                h.push(tail);
+            }
+            return h.to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 fn apply_root_entries(s: &mut Settings, entries: Vec<String>) -> Result<(), String> {
     if entries.len() == 1 {
         // Single entry: bare PATH or NAME=PATH. Both map to single-root.
@@ -305,9 +331,9 @@ fn apply_root_entries(s: &mut Settings, entries: Vec<String>) -> Result<(), Stri
                 tracing::info!("single root: mount name \"{name}\" ignored; content served at /");
                 p
             }
-            None => entry,
+            None => entry.as_str(),
         };
-        s.root = Some(path.to_string());
+        s.root = Some(expand_home(path));
         s.roots = None;
     } else {
         // Multiple entries: build a named-mount map.
@@ -315,14 +341,15 @@ fn apply_root_entries(s: &mut Settings, entries: Vec<String>) -> Result<(), Stri
         for entry in &entries {
             let (name, path) = entry
                 .split_once('=')
-                .map(|(n, p)| (n.to_string(), p.to_string()))
+                .map(|(n, p)| (n.to_string(), expand_home(p)))
                 .unwrap_or_else(|| {
                     // Bare path: use the last component as the mount name.
-                    let name = std::path::Path::new(entry.as_str())
+                    let expanded = expand_home(entry.as_str());
+                    let name = std::path::Path::new(expanded.as_str())
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| entry.clone());
-                    (name, entry.clone())
+                        .unwrap_or_else(|| expanded.clone());
+                    (name, expanded)
                 });
             if let Some(prev) = map.insert(name.clone(), path.clone()) {
                 return Err(format!(
@@ -648,5 +675,41 @@ mod tests {
         };
         let s = cli(&[]).resolve_with(file, env_of(&env)).expect("resolve");
         assert_eq!(s.root.as_deref(), Some("file-root"));
+    }
+
+    // `~` in a NAME=PATH argument is not expanded by the shell (tilde expansion
+    // only fires at the start of a word, not after `=` in a command argument).
+    // The parser must expand it so `PDOG=~/Personal` reaches the same real path
+    // as `~/Personal` alone (issue #76).
+    #[test]
+    fn tilde_in_named_mount_path_is_expanded() {
+        use super::expand_home;
+
+        // expand_home leaves non-tilde paths alone.
+        assert_eq!(expand_home("/absolute"), "/absolute");
+        assert_eq!(expand_home("relative/path"), "relative/path");
+
+        // If HOME is set, ~ expands to it.
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(expand_home("~"), home, "bare ~ is the home dir");
+            assert_eq!(
+                expand_home("~/Personal"),
+                format!("{home}/Personal"),
+                "~/sub expands correctly"
+            );
+        }
+
+        // CLI: PDOG=~/Personal stores the expanded path, not the literal ~.
+        if let Ok(home) = std::env::var("HOME") {
+            let s = cli(&["--root", "/srv/a", "--root", "PDOG=~/Personal"])
+                .resolve_with(Settings::default(), env_of(&[]))
+                .expect("resolve");
+            let roots = s.roots.expect("two --root flags must produce roots map");
+            assert_eq!(
+                roots.get("PDOG").map(String::as_str),
+                Some(format!("{home}/Personal").as_str()),
+                "PDOG path must be tilde-expanded"
+            );
+        }
     }
 }
