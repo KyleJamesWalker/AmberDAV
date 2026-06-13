@@ -51,7 +51,7 @@ mod webdav;
 
 use std::{
     net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -61,8 +61,8 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use input::InputUpdate;
-use state::{current_ip, AppState, ServerInfo, SharedSettings};
-use webdav::DavState;
+use state::{current_ip, AppState, MountTable, ServerInfo, SharedSettings};
+use webdav::{DavFs, DavState};
 
 /// Random-password length: 8 chars from the 31-symbol charset is ~40 bits —
 /// combined with the per-IP login throttle this puts brute force far out of
@@ -83,7 +83,12 @@ const INPUT_EVENT_BUFFER: usize = 256;
 /// settings ladder (CLI > env > file > default, [`cli::Cli::resolve`]) is
 /// topped with the compiled fallbacks and per-boot derivations.
 struct Effective {
+    /// The primary root path string (first or only entry), used for the
+    /// startup banner and screensaver path resolution.
     root: String,
+    /// Ordered named mounts: `(name, path_string)`. Single root → one entry
+    /// with an empty name. Set by [`resolve_mounts`].
+    mounts: Vec<(String, String)>,
     port: u16,
     bind: String,
     password: String,
@@ -91,21 +96,150 @@ struct Effective {
     /// could never be discovered.
     display_password: bool,
     bounce_enabled: bool,
-    /// Screensaver sources with relative entries resolved against the served
+    /// Screensaver sources with relative entries resolved against the primary
     /// root; empty when the screensaver is disabled.
     bounce_paths: Vec<PathBuf>,
+}
+
+/// True when `name` can serve as a mount name. Mount names are matched as
+/// exactly one URL path segment ([`state::MountTable::resolve`] and the
+/// WebDAV dispatch), so a name containing a separator, or spelling `.`/`..`,
+/// could never be addressed — reject it at startup instead of serving a
+/// silently unreachable mount. Spaces and non-ASCII are fine (percent-encoded
+/// on the wire).
+fn valid_mount_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', '\0'])
+        && !name.chars().any(|c| c.is_control())
+}
+
+/// Auto-mounts for the Windows all-drives virtual root (issue #76): one named
+/// mount per set bit in the `GetLogicalDrives` mask (bit 0 = `A:`, bit 1 =
+/// `B:`, …). Pure so the mapping is testable on every host; only the
+/// `cfg(windows)` call site queries the real mask.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn all_drive_mounts(mask: u32) -> Vec<(String, String)> {
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| {
+            let letter = (b'A' + i) as char;
+            (letter.to_string(), format!("{letter}:\\"))
+        })
+        .collect()
+}
+
+/// True when the resolved mounts are the single anonymous root `/` (or `\`) —
+/// the spelling that means "share everything". On Windows, where no real
+/// all-encompassing root exists, [`main`] expands this into per-drive
+/// auto-mounts; this deliberately overrides Win32's native meaning of `/`
+/// ("root of the current drive"), which `C:\` still spells explicitly.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn all_drives_requested(mounts: &[(String, String)]) -> bool {
+    matches!(mounts, [(name, path)] if name.is_empty() && (path == "/" || path == "\\"))
+}
+
+/// The Win32 logical-drive bitmask (kernel32). Declared directly so the
+/// dependency-free static build stays that way.
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLogicalDrives() -> u32;
+}
+
+/// Parse the `root`/`roots` settings into an ordered `(name, path)` list.
+///
+/// Single root → one entry with an empty name. Multi-root → one entry per
+/// named mount in alphabetical order (BTreeMap iteration order). This is pure
+/// so the validation and parsing are unit-testable.
+///
+/// Returns `Err(message)` when the config is invalid (both `root` and `roots`
+/// set, or a multi-root mount name that can't be one URL segment).
+fn resolve_mounts(settings: &config::Settings) -> Result<Vec<(String, String)>, String> {
+    match (&settings.root, &settings.roots) {
+        (Some(_), Some(_)) => Err(
+            "config error: both \"root\" and \"roots\" are set; use one or the other".to_string(),
+        ),
+        (None, Some(roots)) if roots.is_empty() => {
+            // Empty roots map: fall back to default single root.
+            Ok(vec![("".to_string(), ".".to_string())])
+        }
+        (None, Some(roots)) if roots.len() == 1 => {
+            // Single entry in roots: treat as single root (no mount prefix).
+            let (name, path) = roots.iter().next().unwrap();
+            if !name.is_empty() {
+                tracing::info!("single root: mount name \"{name}\" ignored; content served at /");
+            }
+            let path = if path.is_empty() { "." } else { path };
+            Ok(vec![("".to_string(), path.to_string())])
+        }
+        (None, Some(roots)) => {
+            // Multi-root mode.
+            if let Some((bad, _)) = roots.iter().find(|(n, _)| !valid_mount_name(n)) {
+                return Err(format!(
+                    "config error: invalid mount name {bad:?} — a mount name must be a \
+                     single path segment (non-empty, no '/' or '\\', not '.' or '..')"
+                ));
+            }
+            Ok(roots
+                .iter()
+                .map(|(n, p)| {
+                    (
+                        n.clone(),
+                        if p.is_empty() {
+                            ".".to_string()
+                        } else {
+                            p.clone()
+                        },
+                    )
+                })
+                .collect())
+        }
+        // Single root (from `root` field, or neither set → default).
+        (maybe_root, None) => {
+            let path = maybe_root
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .unwrap_or(".");
+            Ok(vec![("".to_string(), path.to_string())])
+        }
+    }
+}
+
+/// Resolve a virtual `/`-separated path against a `(name, path)` mount list:
+/// the single anonymous root maps directly; in multi-root the first segment
+/// selects the mount. The boot-time counterpart of
+/// [`state::MountTable::resolve`] (which needs canonicalized [`PathBuf`]s
+/// that don't exist yet at this layer).
+fn resolve_virtual(mounts: &[(String, String)], rel: &str) -> Option<PathBuf> {
+    match mounts {
+        [(name, path)] if name.is_empty() => Some(Path::new(path).join(rel)),
+        _ => {
+            let (mount, rest) = rel.split_once('/').unwrap_or((rel, ""));
+            let (_, path) = mounts.iter().find(|(n, _)| n == mount)?;
+            let base = PathBuf::from(path);
+            Some(if rest.is_empty() {
+                base
+            } else {
+                base.join(rest)
+            })
+        }
+    }
 }
 
 /// The second resolution layer (issue #54): derive the effective boot values
 /// from resolved settings. Pure — the random password is injected via
 /// `generate`, called only when no fixed password is configured — so the
 /// fallback rules are unit-testable.
-fn effective(settings: &config::Settings, generate: impl FnOnce() -> String) -> Effective {
-    let root = settings
-        .root
-        .clone()
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| ".".to_string());
+fn effective(
+    settings: &config::Settings,
+    generate: impl FnOnce() -> String,
+) -> Result<Effective, String> {
+    let mounts = resolve_mounts(settings)?;
+    // Primary root: first entry's path.
+    let root = mounts.first().map(|(_, p)| p.clone()).unwrap_or_default();
+
     let port = settings.port.unwrap_or(8080);
     let bind = settings
         .bind
@@ -132,12 +266,20 @@ fn effective(settings: &config::Settings, generate: impl FnOnce() -> String) -> 
             .folders
             .iter()
             .filter(|f| !f.is_empty())
-            .map(|f| {
+            .filter_map(|f| {
                 let p = PathBuf::from(f);
                 if p.is_absolute() {
-                    p
+                    Some(p)
                 } else {
-                    PathBuf::from(&root).join(f)
+                    // Relative entries resolve against the VIRTUAL root, same
+                    // convention as default_folder: single root → under that
+                    // root; multi-root → the first segment names the mount
+                    // ("one/roms" → <one's path>/roms). A relative path that
+                    // names no mount points at nothing in the virtual tree.
+                    resolve_virtual(&mounts, f).or_else(|| {
+                        tracing::warn!("bounce folder {f:?} matches no mount; ignored");
+                        None
+                    })
                 }
             })
             .collect()
@@ -145,15 +287,16 @@ fn effective(settings: &config::Settings, generate: impl FnOnce() -> String) -> 
         Vec::new()
     };
 
-    Effective {
+    Ok(Effective {
         root,
+        mounts,
         port,
         bind,
         password,
         display_password: random_password || settings.display_password,
         bounce_enabled,
         bounce_paths,
-    }
+    })
 }
 
 #[tokio::main]
@@ -181,7 +324,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parse error only when it is present, so the two never compete.
     let (file_settings, config_error) = config::load(&config_path);
     let config_error = config_error.or(config_write_error);
-    let settings = cli.resolve(file_settings);
+    let settings = match cli.resolve(file_settings) {
+        Ok(s) => s,
+        Err(msg) => {
+            tracing::error!("{msg}");
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        }
+    };
 
     // --save: persist the fully-resolved config and exit. No server is started.
     if cli.save {
@@ -194,13 +344,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // unit-tested (issue #54); the randomness is injected.
     let Effective {
         root,
+        mounts: mount_specs,
         port,
         bind,
         password,
         display_password,
         bounce_enabled,
         bounce_paths,
-    } = effective(&settings, || password::generate(PASSWORD_LEN));
+    } = match effective(&settings, || password::generate(PASSWORD_LEN)) {
+        Ok(e) => e,
+        Err(msg) => {
+            tracing::error!("{msg}");
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        }
+    };
+
+    // Windows all-drives (issue #76): `--root /` (or `\`) means "share
+    // everything"; with no real filesystem root to bind, expand it into one
+    // auto-mount per logical drive. Enumerated once at boot — hot-plugged
+    // drives appear after a relaunch, consistent with root binding at boot.
+    #[cfg(windows)]
+    let mount_specs = if all_drives_requested(&mount_specs) {
+        let drives = all_drive_mounts(unsafe { GetLogicalDrives() });
+        if drives.is_empty() {
+            tracing::error!("all-drives root: no logical drives reported; check permissions");
+            eprintln!("error: all-drives root: no logical drives reported");
+            std::process::exit(1);
+        }
+        drives
+    } else {
+        mount_specs
+    };
 
     // A specific bind address (not 0.0.0.0/::) is the only address that
     // accepts connections — pin it now so every user-facing surface (banner +
@@ -212,8 +387,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = password::generate(SESSION_TOKEN_LEN);
     let ip = current_ip();
 
-    // Canonicalize the served root so path-safety checks have a stable base.
-    let root_path = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));
+    // Canonicalize every mount root for stable path-safety comparisons.
+    // Overlapping/nested mounts are a config error (same files at two virtual
+    // paths → ambiguous rename/delete); check after canonicalization.
+    let mut canon_mounts: Vec<(String, PathBuf)> = mount_specs
+        .iter()
+        .map(|(name, path)| {
+            let canon = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            (name.clone(), canon)
+        })
+        .collect();
+
+    // Detect overlapping roots only in multi-root mode (single-root is always fine).
+    if canon_mounts.len() > 1 {
+        let paths: Vec<&PathBuf> = canon_mounts.iter().map(|(_, p)| p).collect();
+        for i in 0..paths.len() {
+            for j in 0..paths.len() {
+                if i != j && (paths[i].starts_with(paths[j]) || paths[j].starts_with(paths[i])) {
+                    let msg = format!(
+                        "config error: mount \"{}\" ({}) and mount \"{}\" ({}) overlap or are nested — \
+                         use non-overlapping directories",
+                        canon_mounts[i].0, paths[i].display(),
+                        canon_mounts[j].0, paths[j].display(),
+                    );
+                    tracing::error!("{msg}");
+                    eprintln!("error: {msg}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    // Duplicate mount names cannot reach this point: CLI/env lists error in
+    // `cli::apply_root_entries`, and the config `roots` map has unique keys.
+
+    let mount_table = if canon_mounts.len() == 1 && canon_mounts[0].0.is_empty() {
+        MountTable::single(canon_mounts.remove(0).1)
+    } else {
+        MountTable::multi(canon_mounts)
+    };
 
     let settings: SharedSettings = Arc::new(settings);
 
@@ -246,12 +458,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // login and the WebDAV Basic auth), so a guesser gets one budget total.
     let auth_throttle = Arc::new(throttle::Throttle::new());
 
+    // Build the DAV filesystem layer.
+    let dav_fs = if mount_table.is_single() {
+        DavFs::Single(webdav::build_single_handler(&root))
+    } else {
+        webdav::build_multi_fs(mount_table.mounts())
+    };
+
     let state = AppState {
-        root: Arc::new(root_path),
+        mounts: Arc::new(mount_table),
         session: Arc::from(session.as_str()),
         settings: settings.clone(),
         dav: DavState {
-            handler: webdav::build_handler(&root),
+            fs: dav_fs,
             password: Arc::from(password.as_str()),
             settings: settings.clone(),
             throttle: auth_throttle.clone(),
@@ -491,12 +710,16 @@ mod tests {
         panic!("generate must not be called when a fixed password is set")
     }
 
+    fn eff(s: &config::Settings, gen: impl FnOnce() -> String) -> Effective {
+        effective(s, gen).expect("effective() must not fail in tests with valid settings")
+    }
+
     // Empty/absent settings fall back to the compiled defaults, and an
     // absent password triggers exactly one generation, which forces
     // display_password on (a never-shown random password is undiscoverable).
     #[test]
     fn effective_defaults_and_random_password() {
-        let e = effective(&config::Settings::default(), || "gen-pw".to_string());
+        let e = eff(&config::Settings::default(), || "gen-pw".to_string());
         assert_eq!(e.root, ".");
         assert_eq!(e.port, 8080);
         assert_eq!(e.bind, "0.0.0.0");
@@ -512,7 +735,7 @@ mod tests {
             password: Some(String::new()),
             ..config::Settings::default()
         };
-        let e = effective(&s, || "gen2".to_string());
+        let e = eff(&s, || "gen2".to_string());
         assert_eq!((e.root.as_str(), e.bind.as_str()), (".", "0.0.0.0"));
         assert_eq!(e.password, "gen2");
     }
@@ -529,7 +752,7 @@ mod tests {
             bind: Some("127.0.0.1".to_string()),
             ..config::Settings::default()
         };
-        let e = effective(&s, no_gen);
+        let e = eff(&s, no_gen);
         assert_eq!(e.password, "fixed");
         assert!(!e.display_password, "fixed password may stay hidden");
         assert_eq!(e.root, "/srv/files");
@@ -548,7 +771,7 @@ mod tests {
         };
         s.bounce_screen.enabled = true;
         s.bounce_screen.folders = vec!["covers".to_string(), "/abs/art".to_string(), String::new()];
-        let e = effective(&s, || "x".to_string());
+        let e = eff(&s, || "x".to_string());
         assert!(e.bounce_enabled);
         assert_eq!(
             e.bounce_paths,
@@ -559,9 +782,154 @@ mod tests {
         );
 
         s.bounce_screen.enabled = false;
-        let e = effective(&s, || "x".to_string());
+        let e = eff(&s, || "x".to_string());
         assert!(!e.bounce_enabled);
         assert!(e.bounce_paths.is_empty(), "disabled resolves nothing");
+    }
+
+    // Multi-root: relative screensaver entries resolve against the VIRTUAL
+    // root — the first segment names the mount ("one/roms" → <one>/roms).
+    // A relative entry that names no mount points at nothing in the virtual
+    // tree and is dropped; absolute paths stay verbatim (issue #76).
+    #[test]
+    fn effective_bounce_paths_resolve_against_the_virtual_root() {
+        use std::collections::BTreeMap;
+        let mut roots = BTreeMap::new();
+        roots.insert("one".to_string(), "/srv/one".to_string());
+        roots.insert("two".to_string(), "/srv/two".to_string());
+        let mut s = config::Settings {
+            roots: Some(roots),
+            ..config::Settings::default()
+        };
+        s.bounce_screen.enabled = true;
+        s.bounce_screen.folders = vec![
+            "one/roms".to_string(),    // mount "one", subfolder roms
+            "two".to_string(),         // a mount by itself
+            "missing/art".to_string(), // names no mount → dropped
+            "/abs/art".to_string(),    // absolute → verbatim
+        ];
+        let e = eff(&s, || "x".to_string());
+        assert_eq!(
+            e.bounce_paths,
+            vec![
+                PathBuf::from("/srv/one/roms"),
+                PathBuf::from("/srv/two"),
+                PathBuf::from("/abs/art"),
+            ]
+        );
+    }
+
+    // Multi-root via `roots` field: resolve_mounts returns an ordered list of
+    // named entries (issue #76).
+    #[test]
+    fn resolve_mounts_multi_root() {
+        use std::collections::BTreeMap;
+        let mut roots = BTreeMap::new();
+        roots.insert("one".to_string(), "/srv/one".to_string());
+        roots.insert("two".to_string(), "/srv/two".to_string());
+        let s = config::Settings {
+            roots: Some(roots),
+            ..config::Settings::default()
+        };
+        let mounts = resolve_mounts(&s).expect("multi roots must resolve");
+        assert_eq!(mounts.len(), 2);
+        // BTreeMap is alphabetically ordered.
+        assert_eq!(mounts[0], ("one".to_string(), "/srv/one".to_string()));
+        assert_eq!(mounts[1], ("two".to_string(), "/srv/two".to_string()));
+    }
+
+    // Setting both root and roots is a config error.
+    #[test]
+    fn resolve_mounts_both_root_and_roots_is_error() {
+        use std::collections::BTreeMap;
+        let mut roots = BTreeMap::new();
+        roots.insert("x".to_string(), "/x".to_string());
+        let s = config::Settings {
+            root: Some("/y".to_string()),
+            roots: Some(roots),
+            ..config::Settings::default()
+        };
+        assert!(resolve_mounts(&s).is_err());
+    }
+
+    // A single-entry roots map behaves as single-root (no mount prefix).
+    #[test]
+    fn resolve_mounts_single_entry_roots_is_single_root() {
+        use std::collections::BTreeMap;
+        let mut roots = BTreeMap::new();
+        roots.insert("only".to_string(), "/srv/one".to_string());
+        let s = config::Settings {
+            roots: Some(roots),
+            ..config::Settings::default()
+        };
+        let mounts = resolve_mounts(&s).expect("single-entry roots must resolve");
+        // Single entry → single-root mode: empty name.
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].0, "");
+        assert_eq!(mounts[0].1, "/srv/one");
+    }
+
+    // Mount names become URL path segments; anything that can't be one exact
+    // segment (empty, separators, `.`/`..`, control chars) would be silently
+    // unreachable — reject it at startup instead (issue #76).
+    #[test]
+    fn resolve_mounts_rejects_invalid_names() {
+        use std::collections::BTreeMap;
+        for bad in ["", "a/b", "a\\b", ".", "..", "a\nb"] {
+            let mut roots = BTreeMap::new();
+            roots.insert(bad.to_string(), "/x".to_string());
+            roots.insert("ok".to_string(), "/y".to_string());
+            let s = config::Settings {
+                roots: Some(roots),
+                ..config::Settings::default()
+            };
+            let err = resolve_mounts(&s).expect_err(&format!("name {bad:?} must be rejected"));
+            assert!(err.contains("mount name"), "{err}");
+        }
+        // Spaces and unicode are fine — they are encoded on the wire.
+        let mut roots = BTreeMap::new();
+        roots.insert("my files".to_string(), "/x".to_string());
+        roots.insert("naïve".to_string(), "/y".to_string());
+        let s = config::Settings {
+            roots: Some(roots),
+            ..config::Settings::default()
+        };
+        resolve_mounts(&s).expect("space/unicode names are valid");
+    }
+
+    // Windows all-drives (issue #76): `--root /` expands to one auto-mount per
+    // set bit in the GetLogicalDrives mask. Pure, so testable on every host.
+    #[test]
+    fn all_drive_mounts_follows_the_drive_mask() {
+        // C: and D: (bits 2 and 3).
+        assert_eq!(
+            all_drive_mounts(0b1100),
+            vec![
+                ("C".to_string(), "C:\\".to_string()),
+                ("D".to_string(), "D:\\".to_string()),
+            ]
+        );
+        assert!(all_drive_mounts(0).is_empty());
+        // Bit 0 is A:.
+        assert_eq!(
+            all_drive_mounts(1),
+            vec![("A".to_string(), "A:\\".to_string())]
+        );
+    }
+
+    // The expansion only triggers for the single anonymous root `/` (or `\`);
+    // named mounts and ordinary paths pass through untouched.
+    #[test]
+    fn all_drives_requested_only_for_anonymous_slash_root() {
+        let single = |p: &str| vec![("".to_string(), p.to_string())];
+        assert!(all_drives_requested(&single("/")));
+        assert!(all_drives_requested(&single("\\")));
+        assert!(!all_drives_requested(&single("/srv")));
+        assert!(!all_drives_requested(&single("C:\\")));
+        assert!(!all_drives_requested(&[
+            ("a".to_string(), "/".to_string()),
+            ("b".to_string(), "/x".to_string()),
+        ]));
     }
 
     // The device exit paths (gamepad exit key, SDL window close) cancel the

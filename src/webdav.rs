@@ -8,7 +8,7 @@ use std::time::Instant;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Request, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::Engine;
@@ -19,11 +19,22 @@ use crate::{config::Permission, state::SharedSettings, throttle, throttle::Throt
 /// Path prefix the WebDAV tree is mounted under.
 pub const MOUNT: &str = "/dav";
 
-/// Shared state for the WebDAV route: the handler, the boot password, and the
-/// live settings (for permission enforcement on write methods).
+/// The filesystem layer exposed to dav-server: either a single `LocalFs` for
+/// single-root mode or a collection of per-mount handlers for multi-root mode.
+#[derive(Clone)]
+pub enum DavFs {
+    /// Single root: one `DavHandler` with `strip_prefix(MOUNT)`.
+    Single(DavHandler),
+    /// Multi-root: each mount has its own handler with
+    /// `strip_prefix("{MOUNT}/{name}")`. The virtual root is synthesized.
+    Multi(Arc<Vec<(String, DavHandler)>>),
+}
+
+/// Shared state for the WebDAV route: the filesystem, the boot password, and
+/// the live settings (for permission enforcement on write methods).
 #[derive(Clone)]
 pub struct DavState {
-    pub handler: DavHandler,
+    pub fs: DavFs,
     pub password: Arc<str>,
     pub settings: SharedSettings,
     /// Per-IP auth-failure throttle, shared with the web login (one guess
@@ -31,7 +42,7 @@ pub struct DavState {
     pub throttle: Arc<Throttle>,
 }
 
-/// Build a read/write WebDAV handler serving `root`, mounted at [`MOUNT`].
+/// Build a single-root WebDAV handler serving `root`, stripped at [`MOUNT`].
 ///
 /// The `LocalFs` platform flags are compile-time: on Windows hosts
 /// `case_insensitive` enables dav-server's cached case-insensitive lookups
@@ -40,7 +51,7 @@ pub struct DavState {
 /// enables its Finder optimizations (`._*` PROPSTAT caching and friends).
 /// Both are `false` elsewhere — notably on the Linux device builds, which
 /// keep the zero-overhead exact-match path.
-pub fn build_handler(root: &str) -> DavHandler {
+pub fn build_single_handler(root: &str) -> DavHandler {
     DavHandler::builder()
         .filesystem(LocalFs::new(
             root,
@@ -53,6 +64,45 @@ pub fn build_handler(root: &str) -> DavHandler {
         // Render directory listings in a browser, so `/dav` is browsable too.
         .autoindex(true)
         .build_handler()
+}
+
+/// Build a per-mount WebDAV handler for one named mount in multi-root mode.
+/// The handler strips `{MOUNT}/{mount_name}` so dav-server sees paths
+/// relative to the mount root.
+pub fn build_mount_handler(mount_name: &str, root: &str) -> DavHandler {
+    DavHandler::builder()
+        .filesystem(LocalFs::new(
+            root,
+            false,
+            cfg!(windows),
+            cfg!(target_os = "macos"),
+        ))
+        .locksystem(FakeLs::new())
+        .strip_prefix(format!("{MOUNT}/{mount_name}"))
+        .autoindex(true)
+        .build_handler()
+}
+
+/// Back-compat alias for single-root callers in tests.
+#[doc(hidden)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn build_handler(root: &str) -> DavHandler {
+    build_single_handler(root)
+}
+
+/// Build a `DavFs::Multi` from an ordered list of `(mount_name, root_path)`.
+/// Called from `main` where the private `DavHandler` type is not visible.
+pub fn build_multi_fs(mounts: &[(String, std::path::PathBuf)]) -> DavFs {
+    let handlers: Vec<(String, DavHandler)> = mounts
+        .iter()
+        .map(|(name, path)| {
+            (
+                name.clone(),
+                build_mount_handler(name, &path.to_string_lossy()),
+            )
+        })
+        .collect();
+    DavFs::Multi(Arc::new(handlers))
 }
 
 /// axum handler: authenticate, enforce permission, then hand off to dav-server.
@@ -96,10 +146,256 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
         return (StatusCode::FORBIDDEN, "operation not permitted\n").into_response();
     }
 
-    // axum's body implements http_body::Body<Data = Bytes>, which is exactly
-    // what `handle` wants; the response body just gets re-wrapped for axum.
-    let (parts, body) = state.handler.handle(req).await.into_parts();
-    Response::from_parts(parts, Body::new(body))
+    match &state.fs {
+        DavFs::Single(handler) => {
+            // axum's body implements http_body::Body<Data = Bytes>, which is
+            // exactly what `handle` wants; the response body just gets
+            // re-wrapped for axum.
+            let (parts, body) = handler.handle(req).await.into_parts();
+            Response::from_parts(parts, Body::new(body))
+        }
+        DavFs::Multi(mounts) => dispatch_multi(mounts, req).await,
+    }
+}
+
+/// Percent-decode one URL path segment. `None` for malformed escapes or
+/// non-UTF-8 bytes — no mount can have such a name.
+fn percent_decode(seg: &str) -> Option<String> {
+    let bytes = seg.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Percent-encode a mount name for use in an href: everything but the
+/// RFC 3986 unreserved set is escaped (also making the result XML-safe).
+fn percent_encode(name: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(name.len());
+    for &b in name.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Minimal XML text escaping for element content (displayname).
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Where a MOVE/COPY `Destination` header points, relative to the mount
+/// handling the request.
+#[derive(Debug, PartialEq)]
+enum DestCheck {
+    SameMount,
+    VirtualRoot,
+    OtherMount,
+    Invalid,
+}
+
+/// Classify a `Destination` header (absolute URL or absolute path, per
+/// RFC 4918) against the mount the request was routed to.
+///
+/// The per-mount handlers strip their prefix from the destination with a
+/// byte-wise `starts_with` inside dav-server, so a destination in a sibling
+/// mount whose name merely *extends* this one (`doc` vs `docs`) would
+/// otherwise be stripped to a garbage subpath and land inside the wrong
+/// mount. Only `SameMount` destinations may be forwarded; cross-mount
+/// transfers exist in the JSON file API, not over WebDAV.
+fn classify_destination(dest: &str, mount_name: &str) -> DestCheck {
+    // Reduce an absolute URL to its path.
+    let path = match dest.split_once("://") {
+        Some((_, rest)) => match rest.find('/') {
+            Some(i) => &rest[i..],
+            None => "/",
+        },
+        None => dest,
+    };
+    let Some(after_dav) = path.strip_prefix(MOUNT) else {
+        return DestCheck::Invalid; // outside the DAV tree (or relative)
+    };
+    if !after_dav.is_empty() && !after_dav.starts_with('/') {
+        return DestCheck::Invalid; // e.g. /davx — a different route entirely
+    }
+    let first = after_dav
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("");
+    if first.is_empty() {
+        return DestCheck::VirtualRoot;
+    }
+    match percent_decode(first) {
+        Some(name) if name == mount_name => DestCheck::SameMount,
+        Some(_) => DestCheck::OtherMount,
+        None => DestCheck::Invalid,
+    }
+}
+
+/// Dispatch a WebDAV request in multi-root mode.
+///
+/// - `PROPFIND` / `OPTIONS` at the virtual root → synthesized response.
+/// - Write methods at the virtual root → `403 Forbidden`.
+/// - `MOVE`/`COPY` whose `Destination` leaves the source mount → refused
+///   (see [`classify_destination`]).
+/// - Anything else → route to the appropriate per-mount handler.
+async fn dispatch_multi(mounts: &[(String, DavHandler)], req: Request) -> Response {
+    // Path segment immediately after MOUNT: either empty (virtual root) or a
+    // mount name possibly followed by further path components. The URI path
+    // is still percent-encoded; mount names are stored decoded.
+    let path = req.uri().path();
+    let after_dav = path.strip_prefix(MOUNT).unwrap_or(path);
+    let after_dav = after_dav.trim_start_matches('/');
+    let mount_name = match percent_decode(after_dav.split('/').next().unwrap_or("")) {
+        Some(name) => name,
+        None => return (StatusCode::BAD_REQUEST, "malformed path encoding\n").into_response(),
+    };
+
+    if mount_name.is_empty() {
+        // Request is at the virtual root (/dav or /dav/).
+        let method = req.method().as_str();
+        return match method {
+            "PROPFIND" => virtual_root_propfind(mounts, req.headers()),
+            "OPTIONS" => virtual_root_options(),
+            // Writes at the virtual root are always refused.
+            _ if !matches!(method, "GET" | "HEAD") => {
+                (StatusCode::FORBIDDEN, "cannot write to the virtual root\n").into_response()
+            }
+            _ => virtual_root_options(), // GET/HEAD: return OPTIONS-like response
+        };
+    }
+
+    // MOVE/COPY may only stay inside the mount; classify before forwarding so
+    // a cross-mount Destination can never reach a handler that would
+    // mis-strip it (a missing header is left to dav-server's own 400).
+    if matches!(req.method().as_str(), "MOVE" | "COPY") {
+        if let Some(dest) = req
+            .headers()
+            .get("Destination")
+            .and_then(|v| v.to_str().ok())
+        {
+            match classify_destination(dest, &mount_name) {
+                DestCheck::SameMount => {}
+                DestCheck::VirtualRoot => {
+                    return (StatusCode::FORBIDDEN, "cannot write to the virtual root\n")
+                        .into_response()
+                }
+                DestCheck::OtherMount => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        "cross-mount MOVE/COPY is not supported over WebDAV; \
+                         use the web file manager\n",
+                    )
+                        .into_response()
+                }
+                DestCheck::Invalid => {
+                    return (StatusCode::BAD_GATEWAY, "invalid Destination\n").into_response()
+                }
+            }
+        }
+    }
+
+    // Find the matching per-mount handler and forward.
+    if let Some((_, handler)) = mounts.iter().find(|(n, _)| *n == mount_name) {
+        let (parts, body) = handler.handle(req).await.into_parts();
+        Response::from_parts(parts, Body::new(body))
+    } else {
+        (StatusCode::NOT_FOUND, "unknown mount\n").into_response()
+    }
+}
+
+/// Synthesize a `207 Multi-Status` PROPFIND response for the virtual root,
+/// listing each mount as a `DAV:collection`. Handles `Depth: 0` (root only)
+/// and `Depth: 1` (root + mounts); `Depth: infinity` is forbidden.
+fn virtual_root_propfind(mounts: &[(String, DavHandler)], headers: &HeaderMap) -> Response {
+    let depth = headers
+        .get("Depth")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("1");
+
+    if depth == "infinity" {
+        return (
+            StatusCode::FORBIDDEN,
+            "Depth: infinity is not supported on the virtual root\n",
+        )
+            .into_response();
+    }
+
+    let root_href = format!("{MOUNT}/");
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+         <multistatus xmlns=\"DAV:\">\
+         <response>\
+         <href>",
+    );
+    xml.push_str(&root_href);
+    xml.push_str(
+        "</href>\
+         <propstat><prop><displayname/>\
+         <resourcetype><collection/></resourcetype>\
+         </prop><status>HTTP/1.1 200 OK</status></propstat>\
+         </response>",
+    );
+
+    if depth != "0" {
+        for (name, _) in mounts {
+            // Percent-encode the href (its output is XML-safe by
+            // construction) and XML-escape the human-readable displayname.
+            let href = format!("{MOUNT}/{}/", percent_encode(name));
+            xml.push_str("<response><href>");
+            xml.push_str(&href);
+            xml.push_str("</href><propstat><prop><displayname>");
+            xml.push_str(&xml_escape(name));
+            xml.push_str(
+                "</displayname>\
+                 <resourcetype><collection/></resourcetype>\
+                 </prop><status>HTTP/1.1 200 OK</status></propstat></response>",
+            );
+        }
+    }
+
+    xml.push_str("</multistatus>");
+
+    (
+        StatusCode::MULTI_STATUS,
+        [(header::CONTENT_TYPE, "application/xml; charset=\"utf-8\"")],
+        xml,
+    )
+        .into_response()
+}
+
+/// Minimal `OPTIONS` response for the virtual root: advertise WebDAV class 1
+/// and the allowed read methods.
+fn virtual_root_options() -> Response {
+    (
+        StatusCode::OK,
+        [
+            ("DAV", "1"),
+            ("Allow", "OPTIONS, PROPFIND"),
+            ("MS-Author-Via", "DAV"),
+        ],
+        "",
+    )
+        .into_response()
 }
 
 /// True when `method` may proceed at permission level `perm`. This list *is*
@@ -159,10 +455,131 @@ fn check_auth(req: &Request, password: &str) -> BasicAuth {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_auth, method_allowed, BasicAuth};
+    use super::{
+        check_auth, classify_destination, method_allowed, percent_decode, percent_encode,
+        xml_escape, BasicAuth, DestCheck,
+    };
     use crate::config::Permission;
     use axum::{body::Body, extract::Request, http::header};
     use base64::Engine;
+
+    // End-to-end through dispatch_multi: an encoded mount segment must reach
+    // its handler (not 404 as "unknown mount"), and a MOVE whose Destination
+    // names a sibling mount must be refused before dav-server can mis-strip
+    // the prefix ("doc" vs "docs").
+    #[tokio::test]
+    async fn dispatch_decodes_segments_and_gates_destinations() {
+        let dir = std::env::temp_dir().join(format!(
+            "amberdav-webdav-dispatch-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy();
+        let mounts = vec![
+            (
+                "my files".to_string(),
+                super::build_mount_handler("my files", &root),
+            ),
+            ("doc".to_string(), super::build_mount_handler("doc", &root)),
+        ];
+
+        let propfind = Request::builder()
+            .method("PROPFIND")
+            .uri("/dav/my%20files/")
+            .header("Depth", "0")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::dispatch_multi(&mounts, propfind).await;
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::MULTI_STATUS,
+            "encoded mount segment must route to its handler"
+        );
+
+        let cross = Request::builder()
+            .method("MOVE")
+            .uri("/dav/doc/f.txt")
+            .header("Destination", "http://h/dav/docs/g.txt")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::dispatch_multi(&mounts, cross).await;
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::BAD_GATEWAY,
+            "prefix-sibling destination must be refused, not forwarded"
+        );
+
+        let to_root = Request::builder()
+            .method("COPY")
+            .uri("/dav/doc/f.txt")
+            .header("Destination", "/dav/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = super::dispatch_multi(&mounts, to_root).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The dispatch layer sees the raw (still percent-encoded) URI path while
+    // mount names are configured decoded — the segment must be decoded before
+    // the lookup, and names must be re-encoded when emitted into hrefs.
+    #[test]
+    fn percent_codec_round_trips_mount_names() {
+        assert_eq!(percent_decode("my%20files").as_deref(), Some("my files"));
+        assert_eq!(percent_decode("one").as_deref(), Some("one"));
+        assert_eq!(percent_decode("na%C3%AFve").as_deref(), Some("naïve"));
+        assert_eq!(percent_decode("100%25").as_deref(), Some("100%"));
+        // Malformed escapes and non-UTF-8 can't name a mount.
+        assert_eq!(percent_decode("bad%zz"), None);
+        assert_eq!(percent_decode("trunc%2"), None);
+        assert_eq!(percent_decode("%FF"), None);
+
+        assert_eq!(percent_encode("my files"), "my%20files");
+        assert_eq!(percent_encode("a&b"), "a%26b");
+        assert_eq!(percent_encode("plain-1._~"), "plain-1._~");
+        // encode → decode is the identity.
+        assert_eq!(
+            percent_decode(&percent_encode("naïve & spaced")).as_deref(),
+            Some("naïve & spaced")
+        );
+    }
+
+    // Mount names land inside PROPFIND XML; `&`/`<`/`>` must not produce a
+    // document DAV clients fail to parse.
+    #[test]
+    fn xml_escape_covers_markup_characters() {
+        assert_eq!(xml_escape("a&b <c>"), "a&amp;b &lt;c&gt;");
+        assert_eq!(xml_escape("plain"), "plain");
+    }
+
+    // dav-server strips each handler's prefix from the Destination with a
+    // byte-wise starts_with, so a destination in a sibling mount whose name
+    // extends this one ("doc" vs "docs") would silently land INSIDE this
+    // mount — the dispatch layer must classify destinations itself and only
+    // forward same-mount transfers (issue #76 review).
+    #[test]
+    fn classify_destination_keeps_transfers_inside_the_mount() {
+        let c = classify_destination;
+        // Same mount: full URL or bare path, encoded or not.
+        assert_eq!(
+            c("http://h:8080/dav/one/x.txt", "one"),
+            DestCheck::SameMount
+        );
+        assert_eq!(c("/dav/one/sub/", "one"), DestCheck::SameMount);
+        assert_eq!(c("/dav/my%20files/x", "my files"), DestCheck::SameMount);
+        // The prefix-sibling trap: "docs" extends "doc".
+        assert_eq!(c("/dav/docs/g", "doc"), DestCheck::OtherMount);
+        assert_eq!(c("https://h/dav/two/x", "one"), DestCheck::OtherMount);
+        // The virtual root is never a write destination.
+        assert_eq!(c("http://h/dav/", "one"), DestCheck::VirtualRoot);
+        assert_eq!(c("/dav", "one"), DestCheck::VirtualRoot);
+        // Outside the DAV tree entirely, or unparseable: invalid.
+        assert_eq!(c("/elsewhere/x", "one"), DestCheck::Invalid);
+        assert_eq!(c("/davx/y", "one"), DestCheck::Invalid);
+        assert_eq!(c("not a url", "one"), DestCheck::Invalid);
+        assert_eq!(c("/dav/bad%zz/x", "one"), DestCheck::Invalid);
+    }
 
     fn req_with_basic(creds: Option<&str>) -> Request {
         let mut b = Request::builder().uri("/dav/");

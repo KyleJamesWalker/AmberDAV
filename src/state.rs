@@ -6,7 +6,7 @@
 
 use std::{
     net::IpAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
@@ -15,6 +15,163 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::{config, input::InputUpdate, screen, throttle::Throttle, webdav::DavState};
+
+// --- path safety ---------------------------------------------------------------
+//
+// The textual half of the path-safety trio lives here, next to `MountTable`
+// — every consumer (`files`, the mount resolver) shares ONE copy, so a
+// hardening change can never apply to one surface and miss the other.
+// Symlink containment is the other half, enforced by `files::confine`.
+
+/// True when `seg` is a plain file name: no backslash or NUL, and it parses
+/// as exactly one `Normal` path component on this OS. The component check is
+/// what keeps `PathBuf::push` honest on Windows, where pushing a segment with
+/// a prefix (`C:`, `\\?\C:\x`) or a root *replaces* the base path instead of
+/// appending — handing out the whole drive. Rooted segments (`/etc`) and
+/// `.`/`..` parse as non-`Normal` components and are rejected the same way.
+pub(crate) fn plain_segment(seg: &str) -> bool {
+    if seg.contains('\\') || seg.contains('\0') {
+        return false;
+    }
+    // Reserved device names (`con`, `nul.txt`, …) never name a regular file
+    // on Windows: creating one fails with an opaque OS error and *opening*
+    // one reaches the device itself, so reject them up front there. On Unix
+    // they are ordinary names and stay allowed.
+    if cfg!(windows) && windows_reserved(seg) {
+        return false;
+    }
+    let mut comps = Path::new(seg).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
+/// True when `name` (a single path segment) is a Windows reserved device
+/// name — `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9` — either
+/// bare or with an extension (`nul.txt` still opens the NUL device). The
+/// comparison is ASCII case-insensitive and ignores trailing spaces in the
+/// stem, matching Win32 name resolution. Pure so the table is testable on
+/// every host; [`plain_segment`] only *applies* it on Windows targets.
+pub(crate) fn windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    if !stem.is_ascii() {
+        return false;
+    }
+    match stem.len() {
+        3 => ["con", "prn", "aux", "nul"]
+            .into_iter()
+            .any(|dev| stem.eq_ignore_ascii_case(dev)),
+        4 => {
+            let (dev, digit) = stem.split_at(3);
+            (dev.eq_ignore_ascii_case("com") || dev.eq_ignore_ascii_case("lpt"))
+                && matches!(digit.as_bytes()[0], b'1'..=b'9')
+        }
+        _ => false,
+    }
+}
+
+/// Resolve a `/`-separated relative path into an absolute path lexically
+/// under `root`: every segment must pass [`plain_segment`], so no `..`, no
+/// rooted or drive-letter segments, no separators.
+pub(crate) fn resolve_segments(root: &Path, rel: &str) -> Option<PathBuf> {
+    let mut out = root.to_path_buf();
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => continue,
+            s if plain_segment(s) => out.push(s),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+// --- MountTable ---------------------------------------------------------------
+
+/// Named mount points, or a single anonymous root.
+///
+/// **Single mode** (one root, no name): the virtual path maps directly to the
+/// filesystem; no mount-name prefix appears in URLs. Identical to the
+/// pre-multi-root behavior.
+///
+/// **Multi mode** (two or more named roots): the virtual `/` is a synthetic
+/// read-only collection listing the mount names; real content starts one level
+/// down (`/name/file.txt`). The names are the stable URL identifiers that DAV
+/// clients bookmark.
+#[derive(Clone)]
+pub struct MountTable {
+    /// Ordered list of `(name, canonical_root)`. For single mode the name is
+    /// `""`. At least one entry is always present.
+    mounts: Arc<Vec<(String, PathBuf)>>,
+    /// True when this is a single anonymous root (mounts.len() == 1, name == "").
+    single: bool,
+}
+
+impl MountTable {
+    /// Single-root mode: one directory, no mount prefix in URLs.
+    pub fn single(path: PathBuf) -> Self {
+        MountTable {
+            mounts: Arc::new(vec![("".to_string(), path)]),
+            single: true,
+        }
+    }
+
+    /// Multi-root mode: named mounts, virtual root synthesized. Must contain
+    /// at least two entries; panics in debug builds otherwise.
+    pub fn multi(mounts: Vec<(String, PathBuf)>) -> Self {
+        debug_assert!(mounts.len() >= 2, "multi needs at least two mounts");
+        MountTable {
+            mounts: Arc::new(mounts),
+            single: false,
+        }
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.single
+    }
+
+    /// True for multi-root when `rel` addresses the virtual root (`""` or any
+    /// number of leading/trailing slashes). Always false in single mode.
+    pub fn is_virtual_root(&self, rel: &str) -> bool {
+        !self.single && rel.trim_matches('/').is_empty()
+    }
+
+    /// For single-root: the canonical root path. For multi-root: `None`.
+    pub fn single_root(&self) -> Option<&Path> {
+        self.single.then(|| self.mounts[0].1.as_path())
+    }
+
+    /// All mounts as `(name, canonical_path)` slices. The name is `""` for
+    /// single-root; callers that need to display names should check `is_single`.
+    pub fn mounts(&self) -> &[(String, PathBuf)] {
+        &self.mounts
+    }
+
+    /// Resolve a request-relative path to `(mount_root, absolute_path)`.
+    ///
+    /// - **Single mode**: maps `rel` into the single root.
+    /// - **Multi mode**: the first `/`-separated segment selects the mount;
+    ///   the rest is resolved inside that mount.
+    ///
+    /// Returns `None` for traversal attempts, unknown mount names, and (in
+    /// multi mode) an empty first segment — the virtual root has no filesystem
+    /// path; handlers check [`is_virtual_root`](Self::is_virtual_root) first.
+    pub fn resolve(&self, rel: &str) -> Option<(&Path, PathBuf)> {
+        if self.single {
+            let root = &self.mounts[0].1;
+            resolve_segments(root, rel).map(|p| (root.as_path(), p))
+        } else {
+            let rel = rel.trim_start_matches('/');
+            // Split on the first `/` to peel off the mount name.
+            let (mount_name, rest) = rel.split_once('/').unwrap_or((rel, ""));
+            if mount_name.is_empty() {
+                return None; // virtual root — caller checks is_virtual_root
+            }
+            let (_, root) = self.mounts.iter().find(|(n, _)| n == mount_name)?;
+            resolve_segments(root, rest).map(|p| (root.as_path(), p))
+        }
+    }
+}
 
 /// Server facts shown on the status page and startup banner.
 pub struct ServerInfo {
@@ -72,8 +229,9 @@ pub type SharedSettings = Arc<config::Settings>;
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
-    /// Canonical directory served over WebDAV and the file API.
-    pub root: Arc<PathBuf>,
+    /// Mount table: one root (single mode) or several named mounts (multi
+    /// mode). All file-API handlers route through this.
+    pub mounts: Arc<MountTable>,
     /// Opaque per-boot session token handed out on successful login.
     pub session: Arc<str>,
     /// Settings loaded from the config file.
@@ -108,6 +266,96 @@ impl FromRef<AppState> for DavState {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // ---- MountTable: single-root mode ----------------------------------------
+
+    #[test]
+    fn single_root_resolve_maps_directly() {
+        let t = MountTable::single(PathBuf::from("/srv/root"));
+        let (root, path) = t.resolve("a/b").unwrap();
+        assert_eq!(root, Path::new("/srv/root"));
+        assert_eq!(path, PathBuf::from("/srv/root/a/b"));
+    }
+
+    #[test]
+    fn single_root_resolve_empty_is_root() {
+        let t = MountTable::single(PathBuf::from("/srv/root"));
+        let (_, path) = t.resolve("").unwrap();
+        assert_eq!(path, PathBuf::from("/srv/root"));
+    }
+
+    #[test]
+    fn single_root_resolve_blocks_traversal() {
+        let t = MountTable::single(PathBuf::from("/srv/root"));
+        assert!(t.resolve("../../etc").is_none());
+        assert!(t.resolve("a/../../../etc").is_none());
+    }
+
+    #[test]
+    fn single_root_is_virtual_root_always_false() {
+        let t = MountTable::single(PathBuf::from("/srv/root"));
+        assert!(!t.is_virtual_root(""));
+        assert!(!t.is_virtual_root("/"));
+    }
+
+    // ---- MountTable: multi-root mode ------------------------------------------
+
+    fn two_mount_table() -> MountTable {
+        MountTable::multi(vec![
+            ("one".to_string(), PathBuf::from("/srv/one")),
+            ("two".to_string(), PathBuf::from("/srv/two")),
+        ])
+    }
+
+    #[test]
+    fn multi_resolve_dispatches_on_first_segment() {
+        let t = two_mount_table();
+        let (root, path) = t.resolve("one/file.txt").unwrap();
+        assert_eq!(root, Path::new("/srv/one"));
+        assert_eq!(path, PathBuf::from("/srv/one/file.txt"));
+
+        let (root, path) = t.resolve("/two/sub/dir").unwrap();
+        assert_eq!(root, Path::new("/srv/two"));
+        assert_eq!(path, PathBuf::from("/srv/two/sub/dir"));
+    }
+
+    #[test]
+    fn multi_resolve_mount_root_itself() {
+        let t = two_mount_table();
+        let (root, path) = t.resolve("one").unwrap();
+        assert_eq!(root, Path::new("/srv/one"));
+        assert_eq!(path, PathBuf::from("/srv/one"));
+    }
+
+    #[test]
+    fn multi_resolve_unknown_mount_is_none() {
+        let t = two_mount_table();
+        assert!(t.resolve("unknown/file").is_none());
+    }
+
+    #[test]
+    fn multi_resolve_virtual_root_is_none() {
+        let t = two_mount_table();
+        assert!(t.resolve("").is_none());
+        assert!(t.resolve("/").is_none());
+    }
+
+    #[test]
+    fn multi_is_virtual_root_detects_empty_path() {
+        let t = two_mount_table();
+        assert!(t.is_virtual_root(""));
+        assert!(t.is_virtual_root("/"));
+        assert!(t.is_virtual_root("///"));
+        assert!(!t.is_virtual_root("one"));
+        assert!(!t.is_virtual_root("one/file"));
+    }
+
+    #[test]
+    fn multi_resolve_blocks_traversal_within_mount() {
+        let t = two_mount_table();
+        assert!(t.resolve("one/../../etc").is_none());
+        assert!(t.resolve("one/../two/secret").is_none()); // can't jump mounts
+    }
 
     // A specific bind address — loopback included — is the only address that
     // accepts connections, so it is what every surface must advertise

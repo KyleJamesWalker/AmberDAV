@@ -7,7 +7,10 @@
 //! `permission`, `default_folder`, and `favorites` are read live per request. `password`,
 //! `display_password`, and `root` are bound at boot and need a relaunch.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -98,8 +101,13 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub display_password: bool,
     /// Absolute path to serve. `None`/absent → use the CLI argument / default.
+    /// Mutually exclusive with `roots` — setting both is a startup error.
     #[serde(default)]
     pub root: Option<String>,
+    /// Named mount points: `{"name": "/path", …}`. Mutually exclusive with
+    /// `root`. Absent or `null` → use `root`/CLI/default.
+    #[serde(default)]
+    pub roots: Option<BTreeMap<String, String>>,
     /// Port to listen on. `None`/absent → CLI/env, else 8080.
     #[serde(default)]
     pub port: Option<u16>,
@@ -143,6 +151,7 @@ impl Default for Settings {
             password: None,
             display_password: true,
             root: None,
+            roots: None,
             port: None,
             bind: None,
             default_folder: String::new(),
@@ -277,6 +286,23 @@ fn to_jsonc_pretty(s: &Settings) -> String {
         format!("[\n{}\n  ]", rows.join(",\n"))
     };
 
+    // Emit either "root" (single path) or "roots" (named mounts), never both.
+    let root_section = if let Some(roots) = &s.roots {
+        let pairs: Vec<String> = roots
+            .iter()
+            .map(|(k, v)| format!("    {}: {}", json(k), json(v)))
+            .collect();
+        format!(
+            "// Named mount points. Each key is the URL prefix; value is the directory.\n  // [env: AMBERDAV_ROOT=name=path;name2=path2]  [CLI: --root name=path]\n  \"roots\": {{\n{}\n  }}",
+            pairs.join(",\n")
+        )
+    } else {
+        format!(
+            "// Absolute path to serve. null = the CLI argument / default (\".\").\n  \"root\": {root}",
+            root = json(&s.root)
+        )
+    };
+
     format!(
         r#"{{
   // Human-readable device name shown in the browser tab title.
@@ -291,8 +317,7 @@ fn to_jsonc_pretty(s: &Settings) -> String {
   // (otherwise it could never be discovered); false hides a fixed one.
   "display_password": {display_password},
 
-  // Absolute path to serve. null = the CLI argument / default (".").
-  "root": {root},
+  {root_section},
 
   // Port to listen on. null = CLI/env, else 8080.
   "port": {port},
@@ -339,7 +364,6 @@ fn to_jsonc_pretty(s: &Settings) -> String {
         name = json(&s.name),
         password = json(&s.password),
         display_password = json(&s.display_password),
-        root = json(&s.root),
         port = json(&s.port),
         bind = json(&s.bind),
         default_folder = json(&s.default_folder),
@@ -404,6 +428,7 @@ mod tests {
             );
         }
         // Every config key is present so users edit rather than guess names.
+        // Default settings emit "root" (single-root form).
         for key in [
             "name",
             "password",
@@ -446,6 +471,7 @@ mod tests {
             password: Some("li\"ttle\\Secr3t".to_string()),
             display_password: false,
             root: Some("/mnt/mmc".to_string()),
+            roots: None,
             port: Some(9090),
             bind: Some("127.0.0.1".to_string()),
             default_folder: "Roms".to_string(),
@@ -569,5 +595,46 @@ mod tests {
         let (s, err) = load(&tmp.0);
         assert!(err.is_some(), "type mismatch must surface an error");
         assert!(s.port.is_none());
+    }
+
+    // The "roots" object form round-trips through save + load (issue #76).
+    #[test]
+    fn save_then_load_round_trips_roots() {
+        let mut roots_map = BTreeMap::new();
+        roots_map.insert("roms".to_string(), "/mnt/sd/Roms".to_string());
+        roots_map.insert("saves".to_string(), "/mnt/sd/Saves".to_string());
+        let custom = Settings {
+            roots: Some(roots_map),
+            root: None,
+            ..Settings::default()
+        };
+        let tmp = TmpConfig::new("roundtrip-roots", "");
+        save(&tmp.0, &custom).unwrap();
+        let text = std::fs::read_to_string(&tmp.0).unwrap();
+        assert!(
+            text.contains("\"roots\""),
+            "saved config must contain roots key"
+        );
+        assert!(
+            !text.contains("\"root\":"),
+            "must not emit both root and roots"
+        );
+        let (loaded, err) = load(&tmp.0);
+        assert!(err.is_none(), "roots config must parse cleanly: {err:?}");
+        assert_settings_eq(&loaded, &custom);
+    }
+
+    // A JSONC config with the "roots" object form parses correctly.
+    #[test]
+    fn load_roots_object_parses() {
+        let tmp = TmpConfig::new(
+            "roots-obj",
+            r#"{ "roots": { "one": "/path/one", "data": "/path/data" } }"#,
+        );
+        let (s, err) = load(&tmp.0);
+        assert!(err.is_none(), "roots config must parse cleanly: {err:?}");
+        let roots = s.roots.expect("roots should be present");
+        assert_eq!(roots.get("one").map(|s| s.as_str()), Some("/path/one"));
+        assert_eq!(roots.get("data").map(|s| s.as_str()), Some("/path/data"));
     }
 }

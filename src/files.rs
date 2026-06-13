@@ -1,7 +1,8 @@
 //! JSON file-manager API backing the web UI. All paths are relative to the
-//! served root; traversal is rejected ([`resolve`]/[`safe_name`] validate the
-//! segments, [`confine`] keeps symlinks from escaping). Every handler
-//! requires a session.
+//! served root; traversal is rejected (`state::MountTable::resolve` and
+//! [`safe_name`] validate the segments via the shared `state::plain_segment`,
+//! [`confine`] keeps symlinks from escaping). Every handler requires a
+//! session.
 
 use std::path::{Path, PathBuf};
 
@@ -16,71 +17,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::{auth::Session, state::AppState};
-
-/// True when `seg` is a plain file name: no backslash or NUL, and it parses
-/// as exactly one `Normal` path component on this OS. The component check is
-/// what keeps `PathBuf::push` honest on Windows, where pushing a segment with
-/// a prefix (`C:`, `\\?\C:\x`) or a root *replaces* the base path instead of
-/// appending — handing out the whole drive. Rooted segments (`/etc`) and
-/// `.`/`..` parse as non-`Normal` components and are rejected the same way.
-fn plain_segment(seg: &str) -> bool {
-    if seg.contains('\\') || seg.contains('\0') {
-        return false;
-    }
-    // Reserved device names (`con`, `nul.txt`, …) never name a regular file
-    // on Windows: creating one fails with an opaque OS error and *opening*
-    // one reaches the device itself, so reject them up front there. On Unix
-    // they are ordinary names and stay allowed.
-    if cfg!(windows) && windows_reserved(seg) {
-        return false;
-    }
-    let mut comps = Path::new(seg).components();
-    matches!(
-        (comps.next(), comps.next()),
-        (Some(std::path::Component::Normal(_)), None)
-    )
-}
-
-/// True when `name` (a single path segment) is a Windows reserved device
-/// name — `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9` — either
-/// bare or with an extension (`nul.txt` still opens the NUL device). The
-/// comparison is ASCII case-insensitive and ignores trailing spaces in the
-/// stem, matching Win32 name resolution. Pure so the table is testable on
-/// every host; [`plain_segment`] only *applies* it on Windows targets.
-fn windows_reserved(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
-    if !stem.is_ascii() {
-        return false;
-    }
-    match stem.len() {
-        3 => ["con", "prn", "aux", "nul"]
-            .into_iter()
-            .any(|dev| stem.eq_ignore_ascii_case(dev)),
-        4 => {
-            let (dev, digit) = stem.split_at(3);
-            (dev.eq_ignore_ascii_case("com") || dev.eq_ignore_ascii_case("lpt"))
-                && matches!(digit.as_bytes()[0], b'1'..=b'9')
-        }
-        _ => false,
-    }
-}
-
-/// Resolve a request path (relative to root, `/`-separated) to an absolute
-/// path lexically inside `root`: every segment must be a plain name, so no
-/// `..`, no rooted or drive-letter segments, no separators. This is a purely
-/// textual check — symlink containment is enforced separately by [`confine`].
-fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
-    let mut out = root.to_path_buf();
-    for seg in rel.split('/') {
-        match seg {
-            "" | "." => continue,
-            s if plain_segment(s) => out.push(s),
-            _ => return None,
-        }
-    }
-    Some(out)
-}
+use crate::{auth::Session, state::plain_segment, state::AppState};
 
 /// Validate a single new file/dir name (no path separators or traversal).
 fn safe_name(name: &str) -> Option<&str> {
@@ -89,8 +26,8 @@ fn safe_name(name: &str) -> Option<&str> {
 
 /// Canonicalize `path` and require the result to stay within `root`, which
 /// `main` canonicalized once at startup so the comparison is apples-to-apples
-/// (e.g. `/var` vs `/private/var` on macOS). [`resolve`] only validates the
-/// textual segments; this is what stops a symlink inside the tree
+/// (e.g. `/var` vs `/private/var` on macOS). The mount resolver only validates
+/// the textual segments; this is what stops a symlink inside the tree
 /// (`link -> /etc`) from escaping it. For operations that create or act on a
 /// leaf that must not be followed, confine the parent and re-join the name.
 async fn confine(root: &Path, path: &Path) -> std::io::Result<PathBuf> {
@@ -174,10 +111,27 @@ struct Entry {
 
 pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQuery>) -> Response {
     let rel = q.path.unwrap_or_default();
-    let Some(dir) = resolve(&s.root, &rel) else {
+
+    // Multi-root virtual root: synthesize a listing of the mount names.
+    if s.mounts.is_virtual_root(&rel) {
+        let entries: Vec<Entry> = s
+            .mounts
+            .mounts()
+            .iter()
+            .map(|(name, _)| Entry {
+                name: name.clone(),
+                dir: true,
+                size: 0,
+                modified: 0,
+            })
+            .collect();
+        return Json(entries).into_response();
+    }
+
+    let Some((mount_root, dir)) = s.mounts.resolve(&rel) else {
         return bad("invalid path");
     };
-    let dir = match confine(&s.root, &dir).await {
+    let dir = match confine(mount_root, &dir).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
@@ -227,10 +181,16 @@ pub async fn mkdir(_: Session, State(s): State<AppState>, Json(b): Json<MkdirBod
     if !s.permission().can_write() {
         return forbidden();
     }
-    let (Some(name), Some(parent)) = (safe_name(&b.name), resolve(&s.root, &b.path)) else {
+    if s.mounts.is_virtual_root(&b.path) {
+        return forbidden();
+    }
+    let Some(name) = safe_name(&b.name) else {
         return bad("invalid name or path");
     };
-    let parent = match confine(&s.root, &parent).await {
+    let Some((mount_root, parent)) = s.mounts.resolve(&b.path) else {
+        return bad("invalid name or path");
+    };
+    let parent = match confine(mount_root, &parent).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
@@ -250,10 +210,13 @@ pub async fn delete(_: Session, State(s): State<AppState>, Json(b): Json<PathsBo
         return forbidden();
     }
     for p in &b.paths {
-        let Some(target) = resolve(&s.root, p) else {
+        if s.mounts.is_virtual_root(p) {
+            return bad("refusing to delete the root");
+        }
+        let Some((mount_root, target)) = s.mounts.resolve(p) else {
             return bad("invalid path");
         };
-        if target == *s.root {
+        if target == mount_root {
             return bad("refusing to delete the root");
         }
         // Confine the parent, not the target: the leaf is removed as an entry
@@ -262,7 +225,7 @@ pub async fn delete(_: Session, State(s): State<AppState>, Json(b): Json<PathsBo
         let (Some(parent), Some(fname)) = (target.parent(), target.file_name()) else {
             return bad("invalid path");
         };
-        let target = match confine(&s.root, parent).await {
+        let target = match confine(mount_root, parent).await {
             Ok(p) => p.join(fname),
             Err(e) => return io_err(e),
         };
@@ -292,7 +255,13 @@ pub async fn rename(_: Session, State(s): State<AppState>, Json(b): Json<RenameB
     if !s.permission().can_write() {
         return forbidden();
     }
-    let (Some(name), Some(src)) = (safe_name(&b.name), resolve(&s.root, &b.path)) else {
+    if s.mounts.is_virtual_root(&b.path) {
+        return forbidden();
+    }
+    let Some(name) = safe_name(&b.name) else {
+        return bad("invalid name or path");
+    };
+    let Some((mount_root, src)) = s.mounts.resolve(&b.path) else {
         return bad("invalid name or path");
     };
     let (Some(parent), Some(fname)) = (src.parent(), src.file_name()) else {
@@ -300,7 +269,7 @@ pub async fn rename(_: Session, State(s): State<AppState>, Json(b): Json<RenameB
     };
     // Confine the parent: rename acts on the leaf entry itself (a symlink is
     // renamed, never followed), and the new name stays in the same directory.
-    let parent = match confine(&s.root, parent).await {
+    let parent = match confine(mount_root, parent).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
@@ -378,32 +347,40 @@ impl PlanError {
 /// `copy_mode` mirrors how the operation treats the source leaf: copy reads
 /// *through* a symlinked source (confine the full path), move renames the
 /// leaf entry as-is (confine only the parent).
+///
+/// For multi-root: src and dst may be in different mounts. Each is confined
+/// to its own mount root. Cross-mount moves fall back to copy-then-delete in
+/// `move_` when `rename(2)` fails with `EXDEV`.
 async fn plan_transfer(
-    root: &Path,
+    mounts: &crate::state::MountTable,
     srcs: &[String],
     dest: &str,
     overwrite: bool,
     copy_mode: bool,
 ) -> Result<Vec<(PathBuf, PathBuf)>, PlanError> {
     let invalid = |m: &str| PlanError::Bad(m.to_string());
-    let destdir = resolve(root, dest).ok_or_else(|| invalid("invalid destination"))?;
-    let destdir = confine(root, &destdir).await.map_err(PlanError::Io)?;
+    let (dest_root, destdir) = mounts
+        .resolve(dest)
+        .ok_or_else(|| invalid("invalid destination"))?;
+    let destdir = confine(dest_root, &destdir).await.map_err(PlanError::Io)?;
     let mut jobs = Vec::new();
     let mut conflicts: Vec<String> = Vec::new();
     for src in srcs {
-        let sp = resolve(root, src).ok_or_else(|| invalid("invalid source"))?;
+        let (src_root, sp) = mounts
+            .resolve(src)
+            .ok_or_else(|| invalid("invalid source"))?;
         // The destination entry keeps the name the user selected, not a link
         // target's.
         let Some(fname) = sp.file_name().map(std::ffi::OsStr::to_os_string) else {
             return Err(invalid("invalid source"));
         };
         let sp = if copy_mode {
-            confine(root, &sp).await.map_err(PlanError::Io)?
+            confine(src_root, &sp).await.map_err(PlanError::Io)?
         } else {
             let Some(parent) = sp.parent() else {
                 return Err(invalid("invalid source"));
             };
-            confine(root, parent)
+            confine(src_root, parent)
                 .await
                 .map_err(PlanError::Io)?
                 .join(&fname)
@@ -459,23 +436,81 @@ pub async fn move_(_: Session, State(s): State<AppState>, Json(b): Json<Transfer
     if !s.permission().can_write() {
         return forbidden();
     }
-    let jobs = match plan_transfer(&s.root, &b.srcs, &b.dest, b.overwrite, false).await {
+    if s.mounts.is_virtual_root(&b.dest) {
+        return forbidden();
+    }
+    let jobs = match plan_transfer(&s.mounts, &b.srcs, &b.dest, b.overwrite, false).await {
         Ok(jobs) => jobs,
         Err(e) => return e.into_response(),
     };
     for (sp, dst) in jobs {
-        if let Err(e) = tokio::fs::rename(&sp, &dst).await {
-            return io_err(e);
+        match tokio::fs::rename(&sp, &dst).await {
+            Ok(()) => {}
+            Err(e) if cross_device(&e) => {
+                if let Err(e) = move_across_devices(&sp, &dst).await {
+                    return io_err(e);
+                }
+            }
+            Err(e) => return io_err(e),
         }
     }
     ok()
+}
+
+/// Cross-mount / cross-filesystem move fallback: replicate `sp` at `dst` with
+/// symlinks preserved as symlinks — exactly what `rename(2)` does on one
+/// filesystem; dereferencing would instead materialize the targets' bytes,
+/// including content from *outside* the served mounts — then delete the
+/// source (directory or file). On copy-success/delete-failure the copy stays
+/// in place and the error surfaces: partial state is visible, the original is
+/// safe.
+async fn move_across_devices(sp: &Path, dst: &Path) -> std::io::Result<()> {
+    let res = tokio::task::spawn_blocking({
+        let (sp, dst) = (sp.to_path_buf(), dst.to_path_buf());
+        move || copy_recursive_links(&sp, &dst)
+    })
+    .await;
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(std::io::Error::other(e.to_string())),
+    }
+    let removed = match tokio::fs::symlink_metadata(sp).await {
+        Ok(m) if m.is_dir() => tokio::fs::remove_dir_all(sp).await,
+        _ => tokio::fs::remove_file(sp).await,
+    };
+    if let Err(e) = removed {
+        // Copy succeeded; delete failed. Leave the copy.
+        tracing::warn!(
+            "cross-mount move: copy succeeded but delete of {} failed: {e}",
+            sp.display()
+        );
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// True when `e` is a cross-device rename error (`EXDEV` on Unix).
+fn cross_device(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::EXDEV)
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows a cross-volume rename surfaces as ErrorCode 17 (ERROR_NOT_SAME_DEVICE).
+        e.raw_os_error() == Some(17)
+    }
 }
 
 pub async fn copy(_: Session, State(s): State<AppState>, Json(b): Json<TransferBody>) -> Response {
     if !s.permission().can_write() {
         return forbidden();
     }
-    let jobs = match plan_transfer(&s.root, &b.srcs, &b.dest, b.overwrite, true).await {
+    if s.mounts.is_virtual_root(&b.dest) {
+        return forbidden();
+    }
+    let jobs = match plan_transfer(&s.mounts, &b.srcs, &b.dest, b.overwrite, true).await {
         Ok(jobs) => jobs,
         Err(e) => return e.into_response(),
     };
@@ -494,6 +529,10 @@ pub async fn copy(_: Session, State(s): State<AppState>, Json(b): Json<TransferB
     }
 }
 
+/// Recursive copy for the `copy` endpoint. File symlinks are dereferenced
+/// (`std::fs::copy` follows them) — pasting a link produces an independent
+/// copy of the data, and `plan_transfer` already canonicalized + confined the
+/// source leaf so the bytes always come from inside the source mount.
 fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
@@ -501,6 +540,44 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         for ent in std::fs::read_dir(src)? {
             let ent = ent?;
             copy_recursive(&ent.path(), &dst.join(ent.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+/// Recursive copy for [`move_across_devices`]: symlinks are recreated as
+/// symlinks, never followed. The move path deliberately skips canonicalizing
+/// the leaf (so links can be moved as entries), which means following one
+/// here could read through a link pointing outside every mount.
+fn copy_recursive_links(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        #[cfg(unix)]
+        {
+            let target = std::fs::read_link(src)?;
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            return std::os::unix::fs::symlink(target, dst);
+        }
+        // Windows symlinks need per-type calls and a privilege; refusing the
+        // move is safer than silently materializing the target's bytes.
+        #[cfg(not(unix))]
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("cannot move symlink {} across drives", src.display()),
+        ));
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for ent in std::fs::read_dir(src)? {
+            let ent = ent?;
+            copy_recursive_links(&ent.path(), &dst.join(ent.file_name()))?;
         }
     } else {
         if let Some(parent) = dst.parent() {
@@ -696,20 +773,26 @@ pub async fn upload(
     Query(q): Query<UploadQuery>,
     body: Body,
 ) -> Response {
+    if s.mounts.is_virtual_root(&q.path) {
+        return forbidden();
+    }
     if !s.permission().can_write() {
         return forbidden();
     }
-    let (Some(name), Some(dir)) = (safe_name(&q.name), resolve(&s.root, &q.path)) else {
+    let Some(name) = safe_name(&q.name) else {
         return bad("invalid name or path");
     };
-    let mut dir = match confine(&s.root, &dir).await {
+    let Some((mount_root, dir)) = s.mounts.resolve(&q.path) else {
+        return bad("invalid name or path");
+    };
+    let mut dir = match confine(mount_root, &dir).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
     // Folder uploads carry the file's folder path relative to the upload
     // destination; create it (validated per segment) before streaming.
     if let Some(sub) = q.dir.as_deref().filter(|d| !d.is_empty()) {
-        dir = match ensure_subdir(&s.root, dir, sub).await {
+        dir = match ensure_subdir(mount_root, dir, sub).await {
             Ok(p) => p,
             Err(e) => return e.into_response(),
         };
@@ -980,10 +1063,10 @@ pub async fn raw(
     headers: HeaderMap,
 ) -> Response {
     let rel = q.path.unwrap_or_default();
-    let Some(path) = resolve(&s.root, &rel) else {
+    let Some((mount_root, path)) = s.mounts.resolve(&rel) else {
         return bad("invalid path");
     };
-    let path = match confine(&s.root, &path).await {
+    let path = match confine(mount_root, &path).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
@@ -1127,10 +1210,10 @@ pub async fn thumb(
     headers: HeaderMap,
 ) -> Response {
     let rel = q.path.unwrap_or_default();
-    let Some(path) = resolve(&s.root, &rel) else {
+    let Some((mount_root, path)) = s.mounts.resolve(&rel) else {
         return bad("invalid path");
     };
-    let path = match confine(&s.root, &path).await {
+    let path = match confine(mount_root, &path).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
@@ -1277,7 +1360,7 @@ pub async fn zip(_: Session, State(s): State<AppState>, Query(q): Query<ZipQuery
     // Resolve each selection to (abs path, top-level entry name).
     let mut roots: Vec<(PathBuf, String)> = Vec::new();
     for rel in &rels {
-        let Some(abs) = resolve(&s.root, rel) else {
+        let Some((mount_root, abs)) = s.mounts.resolve(rel) else {
             return bad("invalid path");
         };
         // The archive entry keeps the selected name; the path it reads from
@@ -1286,7 +1369,7 @@ pub async fn zip(_: Session, State(s): State<AppState>, Query(q): Query<ZipQuery
         let Some(name) = abs.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             return bad("invalid path");
         };
-        let abs = match confine(&s.root, &abs).await {
+        let abs = match confine(mount_root, &abs).await {
             Ok(p) => p,
             Err(e) => return io_err(e),
         };
@@ -1405,7 +1488,7 @@ pub async fn download(
     headers: HeaderMap,
 ) -> Response {
     let rel = q.path.unwrap_or_default();
-    let Some(path) = resolve(&s.root, &rel) else {
+    let Some((mount_root, path)) = s.mounts.resolve(&rel) else {
         return bad("invalid path");
     };
     // Suggested filename comes from the requested path (what the UI shows),
@@ -1414,7 +1497,7 @@ pub async fn download(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".to_string());
-    let path = match confine(&s.root, &path).await {
+    let path = match confine(mount_root, &path).await {
         Ok(p) => p,
         Err(e) => return io_err(e),
     };
@@ -1451,6 +1534,10 @@ pub async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The textual path-safety helpers live in `state` (one shared copy for
+    // this module and the mount resolver); the tests here exercise them
+    // against this module's handlers, so alias the old local names.
+    use crate::state::{resolve_segments as resolve, windows_reserved};
 
     #[test]
     fn resolve_blocks_traversal() {
@@ -1712,6 +1799,70 @@ mod tests {
         assert_eq!(confine(&root, &inlink).await.unwrap(), root.join("ok.txt"));
     }
 
+    // Cross-mount moves fall back to copy-then-delete (issue #76). The delete
+    // step must handle directories — `remove_file` fails with "is a directory",
+    // which would leave the tree duplicated in both mounts on every dir move.
+    #[tokio::test]
+    async fn move_across_devices_moves_a_directory_tree() {
+        let src = TmpTree::new("xdev-src");
+        let dst = TmpTree::new("xdev-dst");
+        let from = src.0.join("folder");
+        std::fs::create_dir(&from).unwrap();
+        std::fs::write(from.join("a.txt"), b"a").unwrap();
+        std::fs::create_dir(from.join("sub")).unwrap();
+        std::fs::write(from.join("sub/b.txt"), b"b").unwrap();
+
+        let to = dst.0.join("folder");
+        move_across_devices(&from, &to)
+            .await
+            .expect("directory move must succeed");
+        assert_eq!(std::fs::read(to.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(to.join("sub/b.txt")).unwrap(), b"b");
+        assert!(!from.exists(), "source must be deleted after the copy");
+    }
+
+    // A symlink crossing mounts must arrive as a symlink — exactly what
+    // rename(2) does on one filesystem — never as a dereferenced copy of its
+    // target: following it would materialize content from OUTSIDE the mounts
+    // into the share (issue #76 review).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn move_across_devices_preserves_symlinks() {
+        let outside = TmpTree::new("xdev-outside");
+        std::fs::write(outside.0.join("secret.txt"), b"top secret").unwrap();
+        let target = outside.0.join("secret.txt");
+        let src = TmpTree::new("xdev-link-src");
+        let dst = TmpTree::new("xdev-link-dst");
+        let link = src.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let moved = dst.0.join("link");
+        move_across_devices(&link, &moved)
+            .await
+            .expect("symlink move must succeed");
+        let meta = std::fs::symlink_metadata(&moved).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "must stay a symlink, not become a data copy"
+        );
+        assert_eq!(std::fs::read_link(&moved).unwrap(), target);
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "source link must be deleted"
+        );
+
+        // The same holds for symlinks nested inside a moved folder.
+        let from = src.0.join("folder");
+        std::fs::create_dir(&from).unwrap();
+        std::os::unix::fs::symlink(&target, from.join("inner")).unwrap();
+        let to = dst.0.join("folder");
+        move_across_devices(&from, &to).await.unwrap();
+        assert!(std::fs::symlink_metadata(to.join("inner"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
     // Issue #23 §1: pasting a copied file back into its own folder used to
     // run `std::fs::copy(A/x, A/x)`, which truncates the file to zero bytes.
     // The plan must reject it before anything touches the disk — and
@@ -1721,9 +1872,10 @@ mod tests {
         let tree = TmpTree::new("copy-self");
         let root = std::fs::canonicalize(&tree.0).unwrap();
         std::fs::write(root.join("x.txt"), b"payload").unwrap();
+        let mounts = crate::state::MountTable::single(root.clone());
 
         for overwrite in [false, true] {
-            let err = plan_transfer(&root, &["x.txt".into()], "", overwrite, true)
+            let err = plan_transfer(&mounts, &["x.txt".into()], "", overwrite, true)
                 .await
                 .unwrap_err();
             assert!(
@@ -1745,8 +1897,9 @@ mod tests {
         std::fs::write(root.join("x.txt"), b"payload").unwrap();
         std::fs::create_dir(root.join("sub")).unwrap();
         std::os::unix::fs::symlink(root.join("x.txt"), root.join("sub/x.txt")).unwrap();
+        let mounts = crate::state::MountTable::single(root.clone());
 
-        let err = plan_transfer(&root, &["x.txt".into()], "sub", true, true)
+        let err = plan_transfer(&mounts, &["x.txt".into()], "sub", true, true)
             .await
             .unwrap_err();
         assert!(matches!(err, PlanError::Bad(ref m) if m.contains("same")));
@@ -1760,8 +1913,9 @@ mod tests {
         let tree = TmpTree::new("move-self");
         let root = std::fs::canonicalize(&tree.0).unwrap();
         std::fs::write(root.join("x.txt"), b"payload").unwrap();
+        let mounts = crate::state::MountTable::single(root.clone());
 
-        let jobs = plan_transfer(&root, &["x.txt".into()], "", false, false)
+        let jobs = plan_transfer(&mounts, &["x.txt".into()], "", false, false)
             .await
             .unwrap();
         assert!(jobs.is_empty());
@@ -1775,9 +1929,10 @@ mod tests {
         let tree = TmpTree::new("dir-into-self");
         let root = std::fs::canonicalize(&tree.0).unwrap();
         std::fs::create_dir(root.join("d")).unwrap();
+        let mounts = crate::state::MountTable::single(root.clone());
 
         for copy_mode in [false, true] {
-            let err = plan_transfer(&root, &["d".into()], "d", false, copy_mode)
+            let err = plan_transfer(&mounts, &["d".into()], "d", false, copy_mode)
                 .await
                 .unwrap_err();
             assert!(
@@ -1793,6 +1948,7 @@ mod tests {
     async fn plan_collision_requires_overwrite() {
         let tree = TmpTree::new("collision");
         let root = std::fs::canonicalize(&tree.0).unwrap();
+        let mounts = crate::state::MountTable::single(root.clone());
         std::fs::create_dir(root.join("a")).unwrap();
         std::fs::create_dir(root.join("b")).unwrap();
         std::fs::write(root.join("a/x.txt"), b"new").unwrap();
@@ -1800,7 +1956,7 @@ mod tests {
 
         // Both copy and move refuse to clobber without consent…
         for copy_mode in [false, true] {
-            let err = plan_transfer(&root, &["a/x.txt".into()], "b", false, copy_mode)
+            let err = plan_transfer(&mounts, &["a/x.txt".into()], "b", false, copy_mode)
                 .await
                 .unwrap_err();
             assert!(
@@ -1811,7 +1967,7 @@ mod tests {
         assert_eq!(std::fs::read(root.join("b/x.txt")).unwrap(), b"old");
 
         // …and `overwrite=true` plans the very jobs the handler then runs.
-        let jobs = plan_transfer(&root, &["a/x.txt".into()], "b", true, true)
+        let jobs = plan_transfer(&mounts, &["a/x.txt".into()], "b", true, true)
             .await
             .unwrap();
         assert_eq!(jobs, vec![(root.join("a/x.txt"), root.join("b/x.txt"))]);
@@ -1827,15 +1983,16 @@ mod tests {
     async fn plan_passes_clean_transfers() {
         let tree = TmpTree::new("clean");
         let root = std::fs::canonicalize(&tree.0).unwrap();
+        let mounts = crate::state::MountTable::single(root.clone());
         std::fs::create_dir(root.join("dst")).unwrap();
         std::fs::write(root.join("x.txt"), b"payload").unwrap();
 
-        let jobs = plan_transfer(&root, &["x.txt".into()], "dst", false, false)
+        let jobs = plan_transfer(&mounts, &["x.txt".into()], "dst", false, false)
             .await
             .unwrap();
         assert_eq!(jobs, vec![(root.join("x.txt"), root.join("dst/x.txt"))]);
 
-        let err = plan_transfer(&root, &["x.txt".into()], "missing", false, false)
+        let err = plan_transfer(&mounts, &["x.txt".into()], "missing", false, false)
             .await
             .unwrap_err();
         assert!(matches!(err, PlanError::Io(_)));
