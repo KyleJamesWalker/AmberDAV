@@ -181,12 +181,13 @@ mod tests {
         let settings = Arc::new(settings);
         let (events, _) = broadcast::channel(8);
         let throttle = Arc::new(crate::throttle::Throttle::new());
+        let canon_root = std::fs::canonicalize(root).unwrap();
         AppState {
-            root: Arc::new(std::fs::canonicalize(root).unwrap()),
+            mounts: Arc::new(crate::state::MountTable::single(canon_root)),
             session: Arc::from(SESSION),
             settings: settings.clone(),
             dav: DavState {
-                handler: webdav::build_handler(root.to_str().unwrap()),
+                fs: webdav::DavFs::Single(webdav::build_handler(root.to_str().unwrap())),
                 password: Arc::from(PASSWORD),
                 settings,
                 throttle: throttle.clone(),
@@ -205,6 +206,43 @@ mod tests {
 
     fn app(root: &TmpRoot, permission: Permission) -> Router {
         super::router(state_for(&root.0, permission))
+    }
+
+    /// Multi-root `AppState` over two scratch mounts named `one` and `two`,
+    /// wired exactly as `main()` does it (canonical roots, per-mount DAV
+    /// handlers, synthesized virtual root).
+    fn multi_app(one: &TmpRoot, two: &TmpRoot, permission: Permission) -> Router {
+        let settings = Arc::new(Settings {
+            permission,
+            ..Settings::default()
+        });
+        let (events, _) = broadcast::channel(8);
+        let throttle = Arc::new(crate::throttle::Throttle::new());
+        let mounts = vec![
+            ("one".to_string(), std::fs::canonicalize(&one.0).unwrap()),
+            ("two".to_string(), std::fs::canonicalize(&two.0).unwrap()),
+        ];
+        let state = AppState {
+            dav: DavState {
+                fs: webdav::build_multi_fs(&mounts),
+                password: Arc::from(PASSWORD),
+                settings: settings.clone(),
+                throttle: throttle.clone(),
+            },
+            mounts: Arc::new(crate::state::MountTable::multi(mounts)),
+            session: Arc::from(SESSION),
+            settings,
+            info: Arc::new(ServerInfo {
+                port: 8080,
+                password: PASSWORD.to_string(),
+                config_error: None,
+            }),
+            throttle,
+            events,
+            screen_status: Arc::new(std::sync::Mutex::new("test".to_string())),
+            shutdown: CancellationToken::new(),
+        };
+        super::router(state)
     }
 
     /// The session cookie a successful login would have set.
@@ -1143,6 +1181,79 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
         assert_eq!(json["password"], serde_json::Value::Null);
+    }
+
+    // The web UI needs to know the virtual root is read-only to hide the
+    // write affordances there (issue #76): /api/settings carries an
+    // authoritative multi_root flag (the settings' own root/roots fields are
+    // pre-resolution and can't be trusted for this).
+    #[tokio::test]
+    async fn settings_response_carries_the_multi_root_flag() {
+        let root = TmpRoot::new("settings-single");
+        let resp = send(
+            &app(&root, Permission::ReadWrite),
+            get_authed("/api/settings"),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["multi_root"], serde_json::Value::Bool(false));
+
+        let one = TmpRoot::new("settings-multi-one");
+        let two = TmpRoot::new("settings-multi-two");
+        let resp = send(
+            &multi_app(&one, &two, Permission::ReadWrite),
+            get_authed("/api/settings"),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["multi_root"], serde_json::Value::Bool(true));
+    }
+
+    // Multi-root end to end: `/` lists the mount names, content resolves one
+    // level down, and every write surface refuses the virtual root on both
+    // the JSON API and WebDAV (issue #76).
+    #[tokio::test]
+    async fn multi_root_virtual_root_lists_mounts_and_refuses_writes() {
+        let one = TmpRoot::new("vroot-one");
+        let two = TmpRoot::new("vroot-two");
+        std::fs::write(one.0.join("a.txt"), b"in one").unwrap();
+        let app = multi_app(&one, &two, Permission::ReadWriteDelete);
+
+        // Virtual root listing: the two mounts, as directories.
+        let resp = send(&app, get_authed("/api/list?path=")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["one", "two"]);
+
+        // Content lives one level down.
+        let resp = send(&app, get_authed("/api/list?path=one")).await;
+        let body = body_string(resp).await;
+        assert!(body.contains("a.txt"), "{body}");
+
+        // JSON API write surfaces refuse the virtual root.
+        let mkdir = json_authed("POST", "/api/mkdir", r#"{"path":"","name":"x"}"#);
+        assert_eq!(send(&app, mkdir).await.status(), StatusCode::FORBIDDEN);
+        let del = json_authed("POST", "/api/delete", r#"{"paths":["/"]}"#);
+        assert_eq!(send(&app, del).await.status(), StatusCode::BAD_REQUEST);
+
+        // WebDAV: PROPFIND at the virtual root lists the mounts; writes 403.
+        let resp = send(&app, dav("PROPFIND", "/dav/", Some(PASSWORD), "")).await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("/dav/one/") && body.contains("/dav/two/"),
+            "{body}"
+        );
+        let resp = send(&app, dav("MKCOL", "/dav/x", Some(PASSWORD), "")).await;
+        assert_ne!(resp.status(), StatusCode::CREATED);
+        let resp = send(&app, dav("PUT", "/dav/", Some(PASSWORD), "data")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     // The landing page routes by session: file manager when logged in,

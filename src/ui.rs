@@ -83,12 +83,33 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         .lock()
         .map(|s| s.clone())
         .unwrap_or_else(|_| "unknown".to_string());
-    let disk = disk_space(&state.root);
+    // For disk space: report the single root's filesystem; in multi-root mode
+    // report the first mount's filesystem (UI shows the gauge for situational
+    // awareness, not per-mount breakdown).
+    let disk_path = state
+        .mounts
+        .single_root()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            state
+                .mounts
+                .mounts()
+                .first()
+                .map(|(_, p)| p.clone())
+                .unwrap_or_default()
+        });
+    let disk = disk_space(&disk_path);
+    // "root" field: single path string for single-root, or null for multi-root
+    // (multi-root clients use the `/api/list` response to discover mounts).
+    let root_display = state
+        .mounts
+        .single_root()
+        .map(|p| p.to_string_lossy().into_owned());
     Json(serde_json::json!({
         "ip": ip.to_string(),
         "port": info.port,
         "dav": format!("http://{}:{}{}", ip, info.port, crate::webdav::MOUNT),
-        "root": state.root.to_string_lossy(),
+        "root": root_display,
         "screen": screen,
         // Free/total bytes of the filesystem holding the served root — null
         // when unreportable, and the UI hides the gauge (issue #43).
@@ -175,6 +196,13 @@ pub async fn get_settings(_: Session, State(state): State<AppState>) -> Response
             } else {
                 serde_json::Value::Null
             },
+        );
+        // Authoritative multi-root flag (issue #76): the UI hides the write
+        // affordances at the read-only virtual root. The raw root/roots
+        // fields are pre-resolution and can't answer this.
+        obj.insert(
+            "multi_root".to_string(),
+            serde_json::Value::from(!state.mounts.is_single()),
         );
     }
     Json(value).into_response()

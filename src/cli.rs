@@ -14,6 +14,8 @@
 //! positional `root`/`port` args, which `clap`'s native `env` can't order
 //! against a separate `--root`/`--port` flag.
 
+use std::collections::BTreeMap;
+
 use clap::{Parser, ValueEnum};
 
 use crate::config::{Permission, Settings};
@@ -26,16 +28,20 @@ use crate::config::{Permission, Settings};
 #[derive(Parser, Debug)]
 #[command(name = "amber-dav", version = crate::version::VERSION)]
 pub struct Cli {
-    /// Directory to serve (positional alias for --root).
+    /// Directory to serve (positional alias for --root, single root only).
     #[arg(value_name = "ROOT")]
     root_pos: Option<String>,
     /// Port to listen on (positional alias for --port).
     #[arg(value_name = "PORT")]
     port_pos: Option<u16>,
 
-    /// Directory to serve. [env: AMBERDAV_ROOT] [default: .]
+    /// Directory to serve. May be repeated for named mounts:
+    ///   --root /path         (single root, today's behavior)
+    ///   --root name=/path    (named mount)
+    ///   --root name=/path --root other=/path2   (multi-root)
+    /// [env: AMBERDAV_ROOT] [default: .]
     #[arg(long, value_name = "PATH")]
-    root: Option<String>,
+    root: Vec<String>,
     /// Port to listen on. [env: AMBERDAV_PORT (or PORT)] [default: 8080]
     #[arg(long, value_name = "N")]
     port: Option<u16>,
@@ -99,14 +105,21 @@ impl Cli {
     /// file, honouring CLI > env > file > compiled default. A field left unset
     /// at every layer keeps the value already on `s` (the loaded file, or the
     /// compiled default behind it).
-    pub fn resolve(&self, s: Settings) -> Settings {
+    ///
+    /// `Err` carries a user-facing message for invalid root lists (duplicate
+    /// mount names) — a startup error, not something to fall back from.
+    pub fn resolve(&self, s: Settings) -> Result<Settings, String> {
         self.resolve_with(s, |key| std::env::var(key).ok())
     }
 
     /// [`resolve`](Cli::resolve) with the environment lookup injected, so the
     /// precedence rules are testable without mutating the process environment
     /// (`std::env::set_var` is unsafe under parallel tests).
-    fn resolve_with(&self, mut s: Settings, env: impl Fn(&str) -> Option<String>) -> Settings {
+    fn resolve_with(
+        &self,
+        mut s: Settings,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Settings, String> {
         // A non-empty env var, or `None` (unset or empty so it can't mask a
         // config value).
         let env_str = |key: &str| env(key).filter(|v| !v.is_empty());
@@ -130,13 +143,31 @@ impl Cli {
         let env_permission =
             |key: &str| -> Option<Permission> { Permission::from_str(&env_str(key)?, true).ok() };
 
-        if let Some(v) = self
-            .root
-            .clone()
-            .or_else(|| self.root_pos.clone())
-            .or_else(|| env_str("AMBERDAV_ROOT"))
-        {
-            s.root = Some(v);
+        // Root resolution: --root (repeatable) > root_pos > AMBERDAV_ROOT env.
+        // Any CLI --root entries replace the entire root/roots config; same for
+        // env. The positional alias only applies when no --root flags were given
+        // and only sets a single root.
+        let cli_roots: Vec<String> = if !self.root.is_empty() {
+            self.root.clone()
+        } else if let Some(pos) = self.root_pos.clone() {
+            vec![pos]
+        } else {
+            vec![]
+        };
+
+        if !cli_roots.is_empty() {
+            apply_root_entries(&mut s, cli_roots)?;
+        } else if let Some(env_val) = env_str("AMBERDAV_ROOT") {
+            // `;`-separated list of [NAME=]PATH entries. A single bare path keeps
+            // today's single-root behavior unchanged.
+            let entries: Vec<String> = env_val
+                .split(';')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect();
+            if !entries.is_empty() {
+                apply_root_entries(&mut s, entries)?;
+            }
         }
         if let Some(v) = self
             .port
@@ -219,7 +250,7 @@ impl Cli {
         if let Some(v) = self.name.clone().or_else(|| env_str("AMBERDAV_NAME")) {
             s.name = Some(v);
         }
-        s
+        Ok(s)
     }
 }
 
@@ -249,6 +280,61 @@ fn parse_bool(v: &str) -> Option<bool> {
 /// whitespace is trimmed and unparseable entries are skipped.
 fn parse_u16_list(s: &str) -> Vec<u16> {
     s.split(',').filter_map(|c| c.trim().parse().ok()).collect()
+}
+
+/// Apply a list of `[NAME=]PATH` root entries to settings, replacing whatever
+/// `root`/`roots` was previously set at that layer.
+///
+/// One entry → single-root (`settings.root`), `roots` cleared.
+/// Two or more → `settings.roots` map, `root` cleared.
+///
+/// Splitting on the **first** `=` only lets Windows absolute paths through:
+/// `C=C:\Users\me` → name `C`, path `C:\Users\me`.
+///
+/// Two entries resolving to the same mount name (a bare-path basename
+/// collision, or a repeated `NAME=`) are a startup error — the map would
+/// silently keep only one of them, and mount names are the stable URLs DAV
+/// clients bookmark, so the user must pick names explicitly.
+fn apply_root_entries(s: &mut Settings, entries: Vec<String>) -> Result<(), String> {
+    if entries.len() == 1 {
+        // Single entry: bare PATH or NAME=PATH. Both map to single-root.
+        let entry = &entries[0];
+        // Split on first `=` to separate an optional name from the path.
+        let path = match entry.split_once('=') {
+            Some((name, p)) => {
+                tracing::info!("single root: mount name \"{name}\" ignored; content served at /");
+                p
+            }
+            None => entry,
+        };
+        s.root = Some(path.to_string());
+        s.roots = None;
+    } else {
+        // Multiple entries: build a named-mount map.
+        let mut map = BTreeMap::new();
+        for entry in &entries {
+            let (name, path) = entry
+                .split_once('=')
+                .map(|(n, p)| (n.to_string(), p.to_string()))
+                .unwrap_or_else(|| {
+                    // Bare path: use the last component as the mount name.
+                    let name = std::path::Path::new(entry.as_str())
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| entry.clone());
+                    (name, entry.clone())
+                });
+            if let Some(prev) = map.insert(name.clone(), path.clone()) {
+                return Err(format!(
+                    "config error: mounts \"{prev}\" and \"{path}\" both get the name \
+                     \"{name}\"; give one an explicit name with --root NAME=PATH"
+                ));
+            }
+        }
+        s.roots = Some(map);
+        s.root = None;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -293,17 +379,23 @@ mod tests {
 
         // CLI beats env (root); env beats file (port); file survives when
         // neither CLI nor env supplies a value (bind).
-        let s = cli(&["--root", "cli-root"]).resolve_with(file.clone(), env_of(&env));
+        let s = cli(&["--root", "cli-root"])
+            .resolve_with(file.clone(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.root.as_deref(), Some("cli-root"));
         assert_eq!(s.port, Some(2222));
         assert_eq!(s.bind.as_deref(), Some("10.0.0.1"));
 
         // No CLI: env wins over the file.
-        let s = cli(&[]).resolve_with(file.clone(), env_of(&env));
+        let s = cli(&[])
+            .resolve_with(file.clone(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.root.as_deref(), Some("env-root"));
 
         // Nothing set anywhere: the compiled default (None here) holds.
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&[]));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect("resolve");
         assert_eq!(s.root, None);
         assert_eq!(s.port, None);
         assert_eq!(s.permission, Permission::ReadWrite);
@@ -313,20 +405,25 @@ mod tests {
     // the named flags outrank them.
     #[test]
     fn positional_args_count_as_cli_but_flags_win() {
-        let s = cli(&["pos-root", "9000"]).resolve_with(Settings::default(), env_of(&[]));
+        let s = cli(&["pos-root", "9000"])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect("resolve");
         assert_eq!(s.root.as_deref(), Some("pos-root"));
         assert_eq!(s.port, Some(9000));
 
         let s = cli(&["pos-root", "9000", "--root", "flag-root", "--port", "9001"])
-            .resolve_with(Settings::default(), env_of(&[]));
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect("resolve");
         assert_eq!(s.root.as_deref(), Some("flag-root"));
         assert_eq!(s.port, Some(9001));
 
         // Positionals still beat the environment.
-        let s = cli(&["pos-root"]).resolve_with(
-            Settings::default(),
-            env_of(&[("AMBERDAV_ROOT", "env-root")]),
-        );
+        let s = cli(&["pos-root"])
+            .resolve_with(
+                Settings::default(),
+                env_of(&[("AMBERDAV_ROOT", "env-root")]),
+            )
+            .expect("resolve");
         assert_eq!(s.root.as_deref(), Some("pos-root"));
     }
 
@@ -335,11 +432,15 @@ mod tests {
     #[test]
     fn amberdav_port_beats_generic_port() {
         let both = [("AMBERDAV_PORT", "2222"), ("PORT", "3333")];
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&both));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&both))
+            .expect("resolve");
         assert_eq!(s.port, Some(2222));
 
         let generic = [("PORT", "3333")];
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&generic));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&generic))
+            .expect("resolve");
         assert_eq!(s.port, Some(3333));
     }
 
@@ -358,7 +459,7 @@ mod tests {
             ("AMBERDAV_DISPLAY_PASSWORD", "maybe"),
             ("AMBERDAV_BLANK_KEYS", "abc,def"),
         ];
-        let s = cli(&[]).resolve_with(file, env_of(&env));
+        let s = cli(&[]).resolve_with(file, env_of(&env)).expect("resolve");
         assert_eq!(s.root.as_deref(), Some("file-root"));
         assert_eq!(s.port, Some(1111));
         // Unparseable bool/list values are treated as unset, not as false/empty.
@@ -371,13 +472,17 @@ mod tests {
     fn bool_env_spellings_and_cli_override() {
         for (val, want) in [("1", true), ("on", true), ("FALSE", false), ("no", false)] {
             let env = [("AMBERDAV_DISPLAY_PASSWORD", val)];
-            let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+            let s = cli(&[])
+                .resolve_with(Settings::default(), env_of(&env))
+                .expect("resolve");
             assert_eq!(s.display_password, want, "value {val:?}");
         }
 
         // The CLI flag wins over a contradicting env var.
         let env = [("AMBERDAV_DISPLAY_PASSWORD", "true")];
-        let s = cli(&["--no-display-password"]).resolve_with(Settings::default(), env_of(&env));
+        let s = cli(&["--no-display-password"])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
         assert!(!s.display_password);
     }
 
@@ -386,16 +491,21 @@ mod tests {
     #[test]
     fn permission_resolves_through_the_layers() {
         let env = [("AMBERDAV_PERMISSION", "read_only")];
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.permission, Permission::ReadOnly);
 
         let s = cli(&["--permission", "read_write_delete"])
-            .resolve_with(Settings::default(), env_of(&env));
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.permission, Permission::ReadWriteDelete);
 
         // Garbage env spelling: ignored, file/default holds.
         let env = [("AMBERDAV_PERMISSION", "rwx")];
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.permission, Permission::ReadWrite);
     }
 
@@ -409,19 +519,25 @@ mod tests {
         let env = [("AMBERDAV_NAME", "env-name")];
 
         // CLI beats env.
-        let s = cli(&["--name", "cli-name"]).resolve_with(file.clone(), env_of(&env));
+        let s = cli(&["--name", "cli-name"])
+            .resolve_with(file.clone(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.name.as_deref(), Some("cli-name"));
 
         // Env beats file.
-        let s = cli(&[]).resolve_with(file.clone(), env_of(&env));
+        let s = cli(&[])
+            .resolve_with(file.clone(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.name.as_deref(), Some("env-name"));
 
         // File survives when neither CLI nor env supplies a value.
-        let s = cli(&[]).resolve_with(file, env_of(&[]));
+        let s = cli(&[]).resolve_with(file, env_of(&[])).expect("resolve");
         assert_eq!(s.name.as_deref(), Some("file-name"));
 
         // Nothing set → None (falls back to "web access" in the UI).
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&[]));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect("resolve");
         assert_eq!(s.name, None);
     }
 
@@ -430,15 +546,107 @@ mod tests {
     #[test]
     fn exit_key_lists_and_legacy_singular() {
         let env = [("AMBERDAV_EXIT_KEYS", "1, 2"), ("AMBERDAV_EXIT_KEY", "9")];
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.exit_keys, vec![1, 2]);
 
         let env = [("AMBERDAV_EXIT_KEY", "9")];
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.exit_keys, vec![9]);
 
         let env = [("AMBERDAV_EXIT_KEYS", "nope")];
-        let s = cli(&[]).resolve_with(Settings::default(), env_of(&env));
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
         assert_eq!(s.exit_keys, Settings::default().exit_keys);
+    }
+
+    // Two bare paths with the same basename would silently collapse to one
+    // BTreeMap key — the spec requires a startup error naming both roots and
+    // showing the NAME= fix instead (issue #76).
+    #[test]
+    fn multi_root_duplicate_basenames_is_an_error() {
+        let err = cli(&["--root", "/a/data", "--root", "/b/data"])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect_err("colliding basenames must be a startup error");
+        assert!(err.contains("/a/data"), "must name the first root: {err}");
+        assert!(err.contains("/b/data"), "must name the second root: {err}");
+        assert!(err.contains("NAME="), "must show the NAME= fix: {err}");
+
+        // Same via the env list.
+        let err = cli(&[])
+            .resolve_with(
+                Settings::default(),
+                env_of(&[("AMBERDAV_ROOT", "/a/data;/b/data")]),
+            )
+            .expect_err("env basename collision must error too");
+        assert!(err.contains("data"), "{err}");
+
+        // Explicit names dedupe the same way: repeating a NAME is an error.
+        cli(&["--root", "x=/a", "--root", "x=/b"])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect_err("duplicate explicit names must be a startup error");
+    }
+
+    // A single --root value is treated as single-root (sets settings.root,
+    // clears settings.roots). Multi --root values build a named-mount map.
+    #[test]
+    fn multi_root_cli_flag() {
+        // Single bare path → single root.
+        let s = cli(&["--root", "/srv/files"])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect("resolve");
+        assert_eq!(s.root.as_deref(), Some("/srv/files"));
+        assert!(s.roots.is_none());
+
+        // Named single path → still single root (name stripped, path kept).
+        let s = cli(&["--root", "data=/srv/files"])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect("resolve");
+        assert_eq!(s.root.as_deref(), Some("/srv/files"));
+        assert!(s.roots.is_none());
+
+        // Two --root flags → roots map.
+        let s = cli(&["--root", "one=/srv/one", "--root", "two=/srv/two"])
+            .resolve_with(Settings::default(), env_of(&[]))
+            .expect("resolve");
+        assert!(s.root.is_none());
+        let roots = s.roots.expect("two --root flags must produce roots map");
+        assert_eq!(roots.get("one").map(String::as_str), Some("/srv/one"));
+        assert_eq!(roots.get("two").map(String::as_str), Some("/srv/two"));
+    }
+
+    // AMBERDAV_ROOT with `;` as the separator for multi-root env configuration.
+    #[test]
+    fn multi_root_env_semicolon_separated() {
+        // Single entry (no semicolon): single root.
+        let env = [("AMBERDAV_ROOT", "/srv/files")];
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
+        assert_eq!(s.root.as_deref(), Some("/srv/files"));
+        assert!(s.roots.is_none());
+
+        // Two entries: roots map.
+        let env = [("AMBERDAV_ROOT", "one=/srv/one;two=/srv/two")];
+        let s = cli(&[])
+            .resolve_with(Settings::default(), env_of(&env))
+            .expect("resolve");
+        assert!(s.root.is_none());
+        let roots = s.roots.expect("two entries must produce roots map");
+        assert_eq!(roots.get("one").map(String::as_str), Some("/srv/one"));
+        assert_eq!(roots.get("two").map(String::as_str), Some("/srv/two"));
+
+        // Empty string does not mask the file value.
+        let env = [("AMBERDAV_ROOT", "")];
+        let file = Settings {
+            root: Some("file-root".to_string()),
+            ..Settings::default()
+        };
+        let s = cli(&[]).resolve_with(file, env_of(&env)).expect("resolve");
+        assert_eq!(s.root.as_deref(), Some("file-root"));
     }
 }
