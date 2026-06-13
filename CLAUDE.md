@@ -65,12 +65,12 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 |------|---------|
 | `src/main.rs` | thin startup wiring: resolve settings → build `AppState` → `router()` → serve; banner + QR |
 | `src/router.rs` | **every HTTP route in one block** (extracted from `main()`, issue #32) + end-to-end integration tests; the routes/auth table lives on `router()` |
-| `src/state.rs` | `AppState`/`ServerInfo`/`SharedSettings` shared by all handlers; `current_ip()` |
+| `src/state.rs` | `AppState`/`ServerInfo`/`SharedSettings` shared by all handlers; `current_ip()`; the `MountTable` (named mounts, issue #76) and the shared textual path-safety (`plain_segment`/`resolve_segments`) |
 | `src/cli.rs` | CLI flags (clap) + CLI > env > file > default resolution (`Cli::resolve`, testable via `resolve_with`) |
 | `src/config.rs` | JSONC `config.json` schema + platform location, load/save, permission levels |
 | `src/auth.rs` | session-cookie login for the web UI (`Session` extractor, login/logout) |
 | `src/ui.rs` | **web** handlers: landing/login pages, `/api/info`, `/api/settings`, the live-input SSE stream (despite the name, this is the browser UI — "the UI" elsewhere can mean the device screen) |
-| `src/files.rs` | JSON file API (list/upload/download/zip/raw/thumb/rename/move/copy/delete) + the path-safety trio `resolve`/`safe_name`/`confine`, HTTP Range, thumbnail disk cache |
+| `src/files.rs` | JSON file API (list/upload/download/zip/raw/thumb/rename/move/copy/delete) + `safe_name`/`confine` (textual segment checks live in `state.rs`), HTTP Range, thumbnail disk cache |
 | `src/webdav.rs` | `dav-server` bridged into axum + HTTP Basic auth + the `method_allowed` permission gate |
 | `src/update.rs` | self-update: GitHub Releases check/apply, SHA256 verification, per-shape asset mapping |
 | `src/password.rs` | per-boot password generator (unambiguous charset) |
