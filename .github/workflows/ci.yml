@@ -36,6 +36,12 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      # The SPA's JS is a standalone file, so a syntax error in it no longer
+      # hides inside app.html where nothing ever parsed it. Node is preinstalled
+      # on the runner; --check parses without executing, for pennies.
+      - name: JS syntax check (app.js)
+        run: node --check src/web/app.js
+
       # Default (headless) build: the server/desktop configuration, no
       # device-only deps. This is what the x86_64-linux release asset ships.
       - name: Clippy
