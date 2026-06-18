@@ -6,7 +6,7 @@ use axum::{
     http::HeaderMap,
     response::{
         sse::{Event, KeepAlive, Sse},
-        Html, IntoResponse, Redirect, Response,
+        IntoResponse, Redirect, Response,
     },
     Json,
 };
@@ -19,8 +19,12 @@ use crate::{auth::Session, input::InputUpdate, state::AppState};
 
 const APP_HTML: &str = include_str!("web/app.html");
 const LOGIN_HTML: &str = include_str!("web/login.html");
+// The SPA's CSS and JS live in their own files so each concern diffs on its
+// own and CI can lint app.js. Still embedded — no build step.
+const APP_CSS: &str = include_str!("web/app.css");
+const APP_JS: &str = include_str!("web/app.js");
 
-/// Strong ETags for the embedded pages (issue #58): a content hash rather
+/// Strong ETags for the embedded assets (issue #58): a content hash rather
 /// than the version string, because a dev rebuild can change app.html
 /// without changing the git-describe version (same dirty hash) — a
 /// version-derived ETag would then serve a stale 304 during local dev.
@@ -28,6 +32,9 @@ const LOGIN_HTML: &str = include_str!("web/login.html");
 static APP_ETAG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| content_etag(APP_HTML));
 static LOGIN_ETAG: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| content_etag(LOGIN_HTML));
+static APP_CSS_ETAG: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| content_etag(APP_CSS));
+static APP_JS_ETAG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| content_etag(APP_JS));
 
 fn content_etag(body: &str) -> String {
     use sha2::Digest;
@@ -49,29 +56,58 @@ fn none_match(headers: &HeaderMap, etag: &str) -> bool {
         })
 }
 
-/// Serve an embedded page with its ETag, answering a matching
-/// `If-None-Match` with 304 — the pages are immutable per build, so a
-/// revisit skips re-downloading the SPA over the device's slow link.
-fn cached_page(headers: &HeaderMap, etag: &'static str, body: &'static str) -> Response {
-    let tag = [(axum::http::header::ETAG, etag)];
+/// Serve an embedded asset with its ETag and content type, answering a
+/// matching `If-None-Match` with 304 — the assets are immutable per build, so
+/// a revisit skips re-downloading the SPA over the device's slow link.
+fn cached_asset(
+    headers: &HeaderMap,
+    etag: &'static str,
+    content_type: &'static str,
+    body: &'static str,
+) -> Response {
+    let hdrs = [
+        (axum::http::header::ETAG, etag),
+        (axum::http::header::CONTENT_TYPE, content_type),
+    ];
     if none_match(headers, etag) {
-        (axum::http::StatusCode::NOT_MODIFIED, tag).into_response()
+        (axum::http::StatusCode::NOT_MODIFIED, hdrs).into_response()
     } else {
-        (tag, Html(body)).into_response()
+        (hdrs, body).into_response()
     }
 }
 
 /// Landing page: the file manager if logged in, otherwise the login page.
 pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if crate::auth::is_authed(&headers, &state.session) {
-        cached_page(&headers, &APP_ETAG, APP_HTML)
+        cached_asset(&headers, &APP_ETAG, "text/html; charset=utf-8", APP_HTML)
     } else {
         Redirect::to("/login").into_response()
     }
 }
 
 pub async fn login_page(headers: HeaderMap) -> Response {
-    cached_page(&headers, &LOGIN_ETAG, LOGIN_HTML)
+    cached_asset(
+        &headers,
+        &LOGIN_ETAG,
+        "text/html; charset=utf-8",
+        LOGIN_HTML,
+    )
+}
+
+/// The SPA's external stylesheet and script. Both are public — they hold no
+/// secrets, mirror the always-public login page's needs, and the HTML that
+/// references them is itself session-gated.
+pub async fn app_css(headers: HeaderMap) -> Response {
+    cached_asset(&headers, &APP_CSS_ETAG, "text/css; charset=utf-8", APP_CSS)
+}
+
+pub async fn app_js(headers: HeaderMap) -> Response {
+    cached_asset(
+        &headers,
+        &APP_JS_ETAG,
+        "text/javascript; charset=utf-8",
+        APP_JS,
+    )
 }
 
 /// Connection details for the Status tab (session-gated).

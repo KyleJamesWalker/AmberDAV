@@ -83,7 +83,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 | `src/wayland.rs` | Wayland `wl_shm` sink — Steam Deck Game Mode, where Gamescope owns DRM (fb builds, Linux) |
 | `src/sdl.rs` | SDL2 sink with driver auto-selection — Steam Deck + Anbernic (sdl builds, Linux) |
 | `src/bounce.rs` | DVD-bounce screensaver engine, shared by the fb and sdl sinks (device builds only) |
-| `src/web/` | `login.html` + `app.html` (the single-page file manager), embedded via `include_str!` |
+| `src/web/` | `login.html` + the file-manager SPA, split into `app.html` (markup) + `app.css` + `app.js`, each embedded via `include_str!` and served from `/`, `/app.css`, `/app.js` |
 | `example_APPS/` | ready-to-copy `WebDAV.sh` launcher + SD-card layout for the Anbernic |
 
 ## Entry points
@@ -108,7 +108,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
   commas, parsed with `jsonc-parser`. The comments are the on-device
   documentation; don't convert it to strict JSON.
 - **The canvas palette is hand-synced.** The colors in `src/canvas.rs` mirror
-  the `:root` CSS variables in `src/web/app.html` and `login.html`. Change one,
+  the `:root` CSS variables in `src/web/app.css` and `login.html`. Change one,
   change both.
 - **Device-only code paths are unreachable on a dev machine.** The
   framebuffer/Wayland/SDL/evdev paths need real hardware; the decision logic is
