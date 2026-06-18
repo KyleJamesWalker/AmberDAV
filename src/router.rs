@@ -57,6 +57,8 @@ async fn access_log(req: Request, next: Next) -> Response {
 ///
 /// ```text
 /// GET  /                  -   app.html when authed, else redirect to /login
+/// GET  /app.css           -   SPA stylesheet (public; no secrets)
+/// GET  /app.js            -   SPA script (public; no secrets)
 /// GET  /login             -   login page
 /// POST /login             -   checks the password, sets the `sid` cookie
 /// GET  /logout            -   clears the session cookie
@@ -88,6 +90,8 @@ async fn access_log(req: Request, next: Next) -> Response {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(ui::index))
+        .route("/app.css", get(ui::app_css))
+        .route("/app.js", get(ui::app_js))
         .route("/login", get(ui::login_page).post(auth::login))
         .route("/logout", get(auth::logout))
         .route("/events", get(ui::events))
@@ -444,6 +448,46 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(send(&app, req).await.status(), StatusCode::SEE_OTHER);
+    }
+
+    // The SPA's CSS and JS are public (no session needed), carry the right
+    // content type, and get the same ETag/304 treatment as the pages.
+    #[tokio::test]
+    async fn app_assets_serve_with_content_type_and_etags() {
+        let root = TmpRoot::new("assets");
+        let app = app(&root, Permission::ReadOnly);
+
+        for (uri, ctype, needle) in [
+            ("/app.css", "text/css", ":root"),
+            ("/app.js", "text/javascript", "let cwd"),
+        ] {
+            // No session cookie: still served (the assets hold no secrets).
+            let resp = send(&app, get(uri)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert!(
+                resp.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with(ctype),
+                "{uri} content type"
+            );
+            let etag = resp.headers()[header::ETAG].to_str().unwrap().to_string();
+            assert!(
+                etag.starts_with('"') && etag.ends_with('"'),
+                "{uri}: {etag}"
+            );
+            assert!(body_string(resp).await.contains(needle), "{uri} body");
+
+            // Revisit with the tag: 304, no body re-sent.
+            let req = Request::builder()
+                .uri(uri)
+                .header(header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap();
+            let resp = send(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NOT_MODIFIED, "{uri} revisit");
+            assert!(body_string(resp).await.is_empty(), "{uri} 304 body");
+        }
     }
 
     // --- zip downloads ----------------------------------------------------
