@@ -950,7 +950,10 @@ async function showPreviewAt(i) {
   else if (isAud(e)) body.innerHTML = `<audio src="${url}" controls autoplay></audio>`;
   else if (isTxt(e)) {
     if (e.size > TEXT_PREVIEW_MAX_BYTES) { body.innerHTML = '<div class="note">File too large to preview — download instead.</div>'; return; }
-    try { const r = await fetch(url); const t = await r.text();
+    // cache:'no-cache' forces a conditional revalidation (If-None-Match) so an
+    // in-app edit is reflected immediately — without it the browser's heuristic
+    // freshness serves a stale copy of a recently-modified file (issue #104).
+    try { const r = await fetch(url, { cache: 'no-cache' }); const t = await r.text();
       if (token !== previewToken) return;        // user navigated away while loading
       const pre = document.createElement('pre'); pre.textContent = t; body.innerHTML = ''; body.appendChild(pre); }
     catch (err) { if (token === previewToken) body.innerHTML = '<div class="note">' + escapeHtml(err.message) + '</div>'; }
@@ -974,8 +977,10 @@ async function openEditor(e) {
   const area = $('ed-area'); area.value = ''; area.disabled = true;
   $('editor').classList.add('show');
   // Fetch raw bytes directly (not via api(), which would JSON-parse .json).
+  // cache:'no-cache' revalidates rather than trusting heuristic freshness, so
+  // re-opening a file just edited in-app loads the new bytes (issue #104).
   try {
-    const r = await fetch('/api/raw?path=' + enc(join(cwd, e.name)));
+    const r = await fetch('/api/raw?path=' + enc(join(cwd, e.name)), { cache: 'no-cache' });
     if (r.status === 401) { location.href = '/login'; return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
     area.value = await r.text(); edBaseline = area.value; area.disabled = false; area.focus();
