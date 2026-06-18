@@ -445,6 +445,7 @@ let sortKey = 'name', sortDir = 1;
 let lastIndex = null;             // for shift-range selection
 const rowEls = new Map();         // name → row/card element, for selection-only updates (issue #41)
 let perm = 'read_write';          // live permission level from settings
+let multiRoot = false;            // server has named mounts: '' is a read-only mount listing
 let defaultFolder = '';           // folder to open after login
 let editing = null;               // entry currently open in the text editor
 
@@ -573,7 +574,8 @@ function renderCrumbs() {
     s.textContent = label; if (!last) s.onclick = () => go(path);
     // Non-last crumbs double as move targets: dropping rows on an ancestor
     // moves them up the tree (the last crumb is cwd — a no-op, not a target).
-    if (!last) {
+    // The multi-root Home crumb is the read-only mount listing, never a target.
+    if (!last && !(multiRoot && path === '')) {
       s.ondragover = (ev) => { if (!dragNames) return; ev.preventDefault(); ev.stopPropagation();
         ev.dataTransfer.dropEffect = 'move'; s.classList.add('droptgt'); };
       s.ondragleave = () => s.classList.remove('droptgt');
@@ -601,7 +603,7 @@ function attachRowEvents(el, e, idx) {
     if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; syncSelection(); syncToolbar(); }
     openMenu(ev.clientX, ev.clientY); };
   // Drag-to-move (issue #44): every row drags; folder rows accept drops.
-  el.draggable = canWrite();
+  el.draggable = canWriteHere();
   el.ondragstart = (ev) => dragStart(ev, e, el);
   el.ondragend = () => dragEnd(el);
   if (e.dir) {
@@ -693,9 +695,14 @@ function setView(v) {
 
 function canWrite() { return perm !== 'read_only'; }
 function canDelete() { return perm === 'read_write_delete'; }
+// In multi-root mode '' is the synthetic mount listing — read-only on the
+// server (issue #76), so every write affordance is disabled there. Copying a
+// whole mount stays allowed (pasting it *inside* a mount works).
+function atVirtualRoot() { return multiRoot && !cwd; }
+function canWriteHere() { return canWrite() && !atVirtualRoot(); }
 
 function syncToolbar() {
-  const n = selection.size, w = canWrite();
+  const n = selection.size, w = canWriteHere();
   $('t-up').disabled = !w;
   $('t-updir').disabled = !w;
   $('t-mkdir').disabled = !w;
@@ -704,8 +711,8 @@ function syncToolbar() {
   $('t-dl').disabled = n < 1;   // download (read) always allowed
   $('t-rename').disabled = n !== 1 || !w;
   $('t-cut').disabled = n < 1 || !w;
-  $('t-copy').disabled = n < 1 || !w;
-  $('t-del').disabled = n < 1 || !canDelete();
+  $('t-copy').disabled = n < 1 || !canWrite();
+  $('t-del').disabled = n < 1 || !canDelete() || atVirtualRoot();
   $('t-paste').disabled = !clipboard || !w;
 }
 
@@ -864,7 +871,7 @@ const DRAG_TYPE = 'application/x-amberdav-move';
 let dragNames = null;               // names being dragged; null = not our drag
 
 function dragStart(ev, e, el) {
-  if (!canWrite()) { ev.preventDefault(); return; }
+  if (!canWriteHere()) { ev.preventDefault(); return; }
   // Dragging a selected row carries the whole selection; dragging an
   // unselected row moves just that row (the selection is left alone).
   dragNames = selection.has(e.name) ? [...selection] : [e.name];
@@ -1146,7 +1153,7 @@ async function collectDropped(entries) {
 // ---- context menu ----
 function openMenu(x, y) {
   const m = $('menu'); const n = selection.size;
-  const w = canWrite();
+  const w = canWriteHere();
   // The single selected entry, if exactly one — used to gate text editing.
   const selEntry = n === 1 ? view.find(e => e.name === [...selection][0]) : null;
   const canEdit = !!(selEntry && isTxt(selEntry) && w);
@@ -1158,10 +1165,10 @@ function openMenu(x, y) {
     { label: '⬇ Download Selected', fn: doDownload, off: n < 1 },
     'sep',
     { label: '✂ Cut', fn: doCut, off: n < 1 || !w },
-    { label: '⧉ Copy', fn: doCopy, off: n < 1 || !w },
+    { label: '⧉ Copy', fn: doCopy, off: n < 1 || !canWrite() },
     { label: '⤵ Paste', fn: doPaste, off: !clipboard || !w },
     'sep',
-    { label: '🗑 Delete', fn: doDelete, off: n < 1 || !canDelete() },
+    { label: '🗑 Delete', fn: doDelete, off: n < 1 || !canDelete() || atVirtualRoot() },
     { label: '✎ Rename', fn: doRename, off: n !== 1 || !w },
     { label: '📝 Edit', fn: () => openEditor(selEntry), off: !canEdit },
     'sep',
@@ -1522,6 +1529,7 @@ const main = document.querySelector('main'); let dragDepth = 0;
 main.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop').classList.remove('show'); } });
 main.addEventListener('drop', async (e) => { e.preventDefault(); dragDepth = 0; $('drop').classList.remove('show');
   if (!canWrite()) { toast('Read-only — uploads are disabled', true); return; }
+  if (atVirtualRoot()) { toast('The root lists the shared mounts — open one to upload', true); return; }
   // Folder-aware path: snapshot the entries *synchronously* — the
   // DataTransferItemList is gone after the first await — then traverse
   // directories recursively. A dropped folder used to surface as a useless
@@ -1562,6 +1570,7 @@ function renderFavorites(favs) {
   try {
     const s = await api('GET', '/api/settings');
     perm = s.permission || 'read_write'; defaultFolder = s.default_folder || '';
+    multiRoot = !!s.multi_root;
     renderFavorites(s.favorites);
   }
   catch (e) { /* fall back to defaults */ }
