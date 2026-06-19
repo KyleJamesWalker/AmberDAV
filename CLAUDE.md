@@ -84,7 +84,8 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 | `src/sdl.rs` | SDL2 sink with driver auto-selection — Steam Deck + Anbernic (sdl builds, Linux) |
 | `src/bounce.rs` | DVD-bounce screensaver engine, shared by the fb and sdl sinks (device builds only) |
 | `src/web/` | `login.html` + the file-manager SPA, split into `app.html` (markup) + `app.css` + `app.js`, each embedded via `include_str!` and served from `/`, `/app.css`, `/app.js` |
-| `example_APPS/` | ready-to-copy `WebDAV.sh` launcher + SD-card layout for the Anbernic |
+| `device/anbernic/` | ready-to-copy `AmberDAV.sh` launcher + SD-card layout for the Anbernic stock OS |
+| `device/muos/` | muOS `.muxapp` packaging: `mux_launch.sh` + `resources/amberdav.png` glyph + `build-muxapp.sh` (local packager, mirrors the release.yml `muxapp` job); serves `/` after remounting rootfs rw |
 
 ## Entry points
 

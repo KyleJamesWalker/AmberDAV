@@ -42,6 +42,15 @@ jobs:
       - name: JS syntax check (app.js)
         run: node --check src/web/app.js
 
+      # Device launcher scripts are shell, and mux_launch.sh never runs in CI
+      # (it needs the handheld), so bash -n is the only thing that catches a
+      # syntax error in it. Same cheap-early-signal idea as the app.js check.
+      - name: Shell syntax check (device launchers)
+        run: |
+          bash -n device/anbernic/AmberDAV.sh
+          bash -n device/muos/mux_launch.sh
+          bash -n device/muos/build-muxapp.sh
+
       # Default (headless) build: the server/desktop configuration, no
       # device-only deps. This is what the x86_64-linux release asset ships.
       - name: Clippy
@@ -208,4 +217,39 @@ jobs:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}${{ matrix.ext }}
           # Test artifacts, not releases — expire them quickly to avoid bloat.
-          retention-days: 14
+          retention-days: 3
+
+  # Exercise the muOS .muxapp packaging on every PR so launcher/layout breakage
+  # surfaces here, not at release time — the release.yml `muxapp` job runs the
+  # exact same device/muos/build-muxapp.sh. Reuses the sdl binary the build job
+  # already produced (debug, but the right shape) and uploads the resulting
+  # .muxapp so it can be grabbed off the PR and installed on a device.
+  muxapp:
+    name: muxapp (muOS package)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download sdl binary
+        uses: actions/download-artifact@v7
+        with:
+          name: amber-dav-aarch64-linux-sdl
+
+      - name: Package and verify .muxapp
+        run: |
+          chmod +x device/muos/build-muxapp.sh
+          device/muos/build-muxapp.sh amber-dav-aarch64-linux-sdl
+          # Fail loudly if the inner AmberDAV/ layout muOS expects is missing.
+          names="$(unzip -Z1 dist/AmberDAV.muxapp)"
+          echo "$names"
+          for f in AmberDAV/mux_launch.sh AmberDAV/amber-dav AmberDAV/glyph/amberdav.png; do
+            echo "$names" | grep -qx "$f" || { echo "::error::.muxapp missing $f"; exit 1; }
+          done
+
+      - name: Upload .muxapp
+        uses: actions/upload-artifact@v7
+        with:
+          name: AmberDAV.muxapp
+          path: dist/AmberDAV.muxapp
+          retention-days: 3

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# WebDAV.sh — launches amber-dav: a file-manager web UI + WebDAV server +
+# AmberDAV.sh — launches amber-dav: a file-manager web UI + WebDAV server +
 # live gamepad button viewer. Connect from a browser/WebDAV client on the same
 # network. By default the password is regenerated on every launch (see the log
 # file below); set a fixed one in config.json to avoid re-reading it.
@@ -8,16 +8,16 @@
 # On-device controls: Menu = quit, A = blank screen, X = bounce screensaver.
 #
 # Layout on the SD card (the .sh name becomes the Apps-menu label):
-#   Roms/APPS/WebDAV.sh
-#   Roms/APPS/webdav/amber-dav    <- the aarch64 binary
-#   Roms/APPS/webdav/config.json    <- settings (written on first launch)
-#   Roms/APPS/webdav/log.txt        <- created on launch (IP, password, QR)
+#   Roms/APPS/AmberDAV.sh
+#   Roms/APPS/AmberDAV/amber-dav    <- the aarch64 binary
+#   Roms/APPS/AmberDAV/config.json    <- settings (written on first launch)
+#   Roms/APPS/AmberDAV/log.txt        <- created on launch (IP, password, QR)
 
 . /mnt/mod/ctrl/configs/functions &>/dev/null
 export HOME=/root
 
 progdir="$(cd "$(dirname "$0")" || exit; pwd)"
-appdir="$progdir/webdav"
+appdir="$progdir/AmberDAV"
 bin="$appdir/amber-dav"
 log_file="$appdir/log.txt"
 
