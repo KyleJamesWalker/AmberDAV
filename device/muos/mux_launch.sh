@@ -12,22 +12,23 @@
 # Install: drop AmberDAV.muxapp into /mnt/mmc/ARCHIVE, then
 # Applications -> Archive Manager -> select it. muOS extracts this folder to
 # <storage>/MUOS/application/AmberDAV/ and lists AmberDAV in Applications.
+#
+# The menu glyph is shipped at AmberDAV/glyph/amberdav.png (matching the
+# `# ICON:` name above); muOS reads it from the app's own folder, so the
+# launcher does nothing for the icon. (Apps on SD2/mnt/sdcard need muOS
+# 2508.3+ for the glyph to render — fixed well before 2601 Jacaranda.)
 
 . /opt/muos/script/var/func.sh        # GET_VAR, FB_SWITCH, etc.
 echo app >/tmp/act_go                 # tell muOS this is an "app" activity
-export HOME=/root
 
-# Resolve our extracted folder via the active storage mount (handles
-# SD1/SD2, /mnt/mmc vs /mnt/sdcard) rather than hardcoding a path.
-ROOT_DIR="$(GET_VAR "device" "storage/rom/mount")"
-APP_DIR="${ROOT_DIR}/MUOS/application/AmberDAV"
+# Resolve our own folder from the script's location. Do NOT derive it from
+# GET_VAR storage/rom/mount: that points at the *internal* card (/mnt/mmc), but
+# muOS also lists apps installed on the SD card (/mnt/sdcard). When the two
+# differ the binary path is wrong, nothing runs, and no log is written. The
+# script always lives in its own install dir, whichever card that is.
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 bin="${APP_DIR}/amber-dav"
 log_file="${APP_DIR}/log.txt"
-
-# Copy our menu glyph into the active theme so AmberDAV gets its list-row icon
-# (muOS recolors it to the theme; a flat silhouette is intentional).
-cp "${APP_DIR}/resources/amberdav.png" \
-   /opt/muos/default/MUOS/theme/active/glyph/muxapp/amberdav.png 2>/dev/null
 
 # muOS hides rootfs (mmcblk0p5) read-only. Remount it rw so we can serve — and
 # edit — the whole OS filesystem, then share / (matches the Ports launcher).
@@ -49,7 +50,7 @@ chmod +x "$bin" 2>/dev/null
 
 # The app owns /dev/fb0 while running; hand the framebuffer back to muOS.
 SCREEN_TYPE="internal"
-[ "$(GET_VAR global boot/device_mode)" = "1" ] && SCREEN_TYPE="external"
+[ "$(GET_VAR config boot/device_mode)" = "1" ] && SCREEN_TYPE="external"
 FB_SWITCH "$(GET_VAR device screen/${SCREEN_TYPE}/width)" \
           "$(GET_VAR device screen/${SCREEN_TYPE}/height)" 32
 

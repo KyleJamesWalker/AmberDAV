@@ -42,13 +42,15 @@ if [ ! -f "$bin" ]; then
 fi
 
 # Stage the inner folder muOS extracts: AmberDAV/{mux_launch.sh, amber-dav,
-# resources/amberdav.png}.
+# glyph/amberdav.png}. The glyph lives in glyph/ (not resources/) because that
+# is where muOS reads an app's menu icon — the name matches the `# ICON:`
+# header in mux_launch.sh.
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 app="$stage/AmberDAV"
-mkdir -p "$app/resources"
+mkdir -p "$app/glyph"
 cp "$here/mux_launch.sh" "$app/mux_launch.sh"
-cp "$here/resources/amberdav.png" "$app/resources/amberdav.png"
+cp "$here/glyph/amberdav.png" "$app/glyph/amberdav.png"
 cp "$bin" "$app/amber-dav"
 chmod +x "$app/mux_launch.sh" "$app/amber-dav"
 

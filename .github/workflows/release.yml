@@ -191,7 +191,7 @@ jobs:
 
   # muOS one-file install: repackage the already-built
   # aarch64-linux-fb binary as AmberDAV-<version>.muxapp — a ZIP holding
-  # AmberDAV/{mux_launch.sh, amber-dav, resources/amberdav.png}. Users drop it
+  # AmberDAV/{mux_launch.sh, amber-dav, glyph/amberdav.png}. Users drop it
   # into /mnt/mmc/ARCHIVE and install via Archive Manager. The packaging is
   # done by device/muos/build-muxapp.sh so local builds and CI stay identical.
   #

@@ -243,7 +243,7 @@ jobs:
           # Fail loudly if the inner AmberDAV/ layout muOS expects is missing.
           names="$(unzip -Z1 dist/AmberDAV.muxapp)"
           echo "$names"
-          for f in AmberDAV/mux_launch.sh AmberDAV/amber-dav AmberDAV/resources/amberdav.png; do
+          for f in AmberDAV/mux_launch.sh AmberDAV/amber-dav AmberDAV/glyph/amberdav.png; do
             echo "$names" | grep -qx "$f" || { echo "::error::.muxapp missing $f"; exit 1; }
           done
 
