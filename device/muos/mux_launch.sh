@@ -18,8 +18,16 @@
 # launcher does nothing for the icon. (Apps on SD2/mnt/sdcard need muOS
 # 2508.3+ for the glyph to render — fixed well before 2601 Jacaranda.)
 
-. /opt/muos/script/var/func.sh        # GET_VAR, FB_SWITCH, etc.
+. /opt/muos/script/var/func.sh        # GET_VAR, FB_SWITCH, SETUP_SDL_ENVIRONMENT, etc.
 echo app >/tmp/act_go                 # tell muOS this is an "app" activity
+
+# This ships the SDL build (amber-dav-aarch64-linux-sdl). muOS is an SDL-native
+# platform: the SDL sink renders the connection screen through muOS's SDL stack,
+# which composites instantly. The raw-framebuffer build instead writes /dev/fb0
+# directly, which muOS's UI keeps overwriting, so its screen redraws lag. Pull in
+# muOS's SDL environment (controller map, scaler, rotation) so input and the
+# display behave like any other muOS app.
+SETUP_SDL_ENVIRONMENT
 
 # Resolve our own folder from the script's location. Do NOT derive it from
 # GET_VAR storage/rom/mount: that points at the *internal* card (/mnt/mmc), but
@@ -38,17 +46,13 @@ share_root="/"
 # Listen port (change if 8080 is taken).
 port=8080
 
-# Screen rotation is auto-detected; uncomment to force 0/90/180/270 if a panel
-# still comes out rotated.
-# export AMBERDAV_FB_ROTATE=270
-
 chmod +x "$bin" 2>/dev/null
 
 # Blocks while the server runs; quitting the app from muOS stops it.
 # IP, password, and a QR code are written to the log on startup.
 "$bin" "$share_root" "$port" > "$log_file" 2>&1
 
-# The app owns /dev/fb0 while running; hand the framebuffer back to muOS.
+# SDL may have changed the framebuffer mode; hand it back to muOS on exit.
 SCREEN_TYPE="internal"
 [ "$(GET_VAR config boot/device_mode)" = "1" ] && SCREEN_TYPE="external"
 FB_SWITCH "$(GET_VAR device screen/${SCREEN_TYPE}/width)" \

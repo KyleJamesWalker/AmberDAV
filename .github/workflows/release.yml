@@ -190,13 +190,15 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}${{ matrix.ext }}" --clobber
 
   # muOS one-file install: repackage the already-built
-  # aarch64-linux-fb binary as AmberDAV-<version>.muxapp — a ZIP holding
+  # aarch64-linux-sdl binary as AmberDAV-<version>.muxapp — a ZIP holding
   # AmberDAV/{mux_launch.sh, amber-dav, glyph/amberdav.png}. Users drop it
   # into /mnt/mmc/ARCHIVE and install via Archive Manager. The packaging is
   # done by device/muos/build-muxapp.sh so local builds and CI stay identical.
+  # The SDL build (not fb) because muOS composites SDL instantly, where the raw
+  # framebuffer build's screen lags as muOS's UI overwrites it.
   #
-  # Self-update note: a .muxapp is a repackaged -fb binary, so a muOS install
-  # self-updates as aarch64-linux-fb (update::asset_for) — the loose binary,
+  # Self-update note: a .muxapp is a repackaged -sdl binary, so a muOS install
+  # self-updates as aarch64-linux-sdl (update::asset_for) — the loose binary,
   # not a re-wrapped .muxapp. Acceptable; revisit if muOS users want otherwise.
   muxapp:
     name: AmberDAV.muxapp
@@ -204,19 +206,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Download fb binary
+      - name: Download sdl binary
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'amber-dav-aarch64-linux-fb' --dir .
+            --pattern 'amber-dav-aarch64-linux-sdl' --dir .
       - name: Package .muxapp
         env:
           # Versioned name; checksums job picks it up by the AmberDAV-*.muxapp glob.
           MUXAPP_OUT: AmberDAV-${{ github.ref_name }}.muxapp
         run: |
           chmod +x device/muos/build-muxapp.sh
-          device/muos/build-muxapp.sh amber-dav-aarch64-linux-fb
+          device/muos/build-muxapp.sh amber-dav-aarch64-linux-sdl
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}

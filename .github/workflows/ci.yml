@@ -221,7 +221,7 @@ jobs:
 
   # Exercise the muOS .muxapp packaging on every PR so launcher/layout breakage
   # surfaces here, not at release time — the release.yml `muxapp` job runs the
-  # exact same device/muos/build-muxapp.sh. Reuses the fb binary the build job
+  # exact same device/muos/build-muxapp.sh. Reuses the sdl binary the build job
   # already produced (debug, but the right shape) and uploads the resulting
   # .muxapp so it can be grabbed off the PR and installed on a device.
   muxapp:
@@ -231,15 +231,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download fb binary
+      - name: Download sdl binary
         uses: actions/download-artifact@v7
         with:
-          name: amber-dav-aarch64-linux-fb
+          name: amber-dav-aarch64-linux-sdl
 
       - name: Package and verify .muxapp
         run: |
           chmod +x device/muos/build-muxapp.sh
-          device/muos/build-muxapp.sh amber-dav-aarch64-linux-fb
+          device/muos/build-muxapp.sh amber-dav-aarch64-linux-sdl
           # Fail loudly if the inner AmberDAV/ layout muOS expects is missing.
           names="$(unzip -Z1 dist/AmberDAV.muxapp)"
           echo "$names"
