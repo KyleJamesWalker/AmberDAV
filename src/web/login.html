@@ -109,9 +109,17 @@
       if (tag) tag.textContent = d.name;
     }
   }).catch(function() {});
-  if (new URLSearchParams(location.search).has('e')) {
+  var qs = new URLSearchParams(location.search);
+  if (qs.has('e')) {
     document.getElementById('err').textContent = 'Incorrect code — check the device screen or startup banner.';
     document.getElementById('pw').focus();
+  }
+  // Carry `next` (the folder the SPA was bounced from) onto the form's POST so
+  // the server can send us back there after a correct code — deep links and
+  // post-restart refreshes survive the login instead of dropping to Home.
+  var next = qs.get('next');
+  if (next) {
+    document.querySelector('form.card').action = '/login?next=' + encodeURIComponent(next);
   }
   // Show/hide the code (issue #56). Eye = "click to show"; the slash is
   // drawn while the code is visible (= "click to hide").

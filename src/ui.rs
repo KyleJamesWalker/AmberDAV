@@ -3,7 +3,7 @@
 
 use axum::{
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, Uri},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Redirect, Response,
@@ -77,11 +77,15 @@ fn cached_asset(
 }
 
 /// Landing page: the file manager if logged in, otherwise the login page.
-pub async fn index(State(state): State<AppState>, headers: HeaderMap) -> Response {
+///
+/// The redirect carries the original location (the SPA's `?path=` folder) as
+/// `next` so a deep link or a post-restart refresh returns to the same folder
+/// after the password is re-entered, instead of dropping back to Home.
+pub async fn index(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
     if crate::auth::is_authed(&headers, &state.session) {
         cached_asset(&headers, &APP_ETAG, "text/html; charset=utf-8", APP_HTML)
     } else {
-        Redirect::to("/login").into_response()
+        Redirect::to(&crate::auth::login_redirect(&uri)).into_response()
     }
 }
 
