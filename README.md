@@ -117,27 +117,27 @@ amber-dav --help                        # full flag/env list
 
 ## Install on Anbernic device
 
-The stock OS launches apps from `Roms/APPS/` on the SD card: a `*.sh` script
-there appears in the Apps menu, and the filename becomes the menu label. This
-repo ships a ready-made launcher under [`example_APPS/`](example_APPS).
+The stock OS lists `*.sh` launchers from `Roms/APPS/` on the SD card. Copy the
+ready-made launcher + binary layout from [`device/anbernic/`](device/anbernic)
+and launch **AmberDAV** from the Apps menu — it serves the whole SD card on port
+`8080`.
 
-Copy this layout to the SD card (the games/second card on a two-slot device):
-
-```
-Roms/APPS/WebDAV.sh            <- launcher (this is the Apps-menu entry)
-Roms/APPS/webdav/amber-dav     <- the aarch64 binary you built
-Roms/APPS/webdav/config.json   <- written automatically on first launch
-Roms/APPS/webdav/log.txt       <- created on launch (IP, password, QR text)
-```
-
-Then launch **WebDAV** from the device's Apps menu. `WebDAV.sh` serves the whole
-SD card root (two levels up from `Roms/APPS`) on port `8080` and writes startup
-output to `log.txt`. Edit the script to change the port, served root, or screen
-rotation — it's commented.
+→ **[`device/anbernic/README.md`](device/anbernic/README.md)** for the SD-card
+layout, where to drop the binary, and on-device controls.
 
 > The binary takes optional `[ROOT] [PORT]` positional arguments (defaults:
 > current dir, `8080`). CLI flags and `AMBERDAV_*` env vars take precedence over
 > `config.json`, so a launcher can override the file without editing it.
+
+## Install on muOS
+
+muOS installs from a single `AmberDAV-<version>.muxapp` (a ZIP its Archive
+Manager extracts) — no separate binary to copy. Drop it into `/mnt/mmc/ARCHIVE`,
+install via **Applications → Archive Manager**, then launch **AmberDAV** from the
+**Applications** menu. It serves the whole OS filesystem (`/`) on port `8080`.
+
+→ **[`device/muos/README.md`](device/muos/README.md)** for the `.muxapp` install,
+the alternate Ports method, and how to build a `.muxapp` from a dev build.
 
 ## Install on Steam Deck
 
@@ -396,10 +396,10 @@ HOST=http://192.168.1.42:8080
 PASS=littleSecr3t
 
 # Upload alongside the running binary, then atomically swap it in.
-curl -u x:$PASS -T "$BIN" "$HOST/dav/Roms/APPS/webdav/amber-dav.new"
+curl -u x:$PASS -T "$BIN" "$HOST/dav/Roms/APPS/AmberDAV/amber-dav.new"
 curl -u x:$PASS -X MOVE \
-  -H "Destination: $HOST/dav/Roms/APPS/webdav/amber-dav" \
-  "$HOST/dav/Roms/APPS/webdav/amber-dav.new"
+  -H "Destination: $HOST/dav/Roms/APPS/AmberDAV/amber-dav" \
+  "$HOST/dav/Roms/APPS/AmberDAV/amber-dav.new"
 ```
 
 Quit (Menu button) and relaunch from the Apps menu to run the new build. This
@@ -411,7 +411,7 @@ requires `permission` to be `read_write` or `read_write_delete`.
   landscape, and portrait-mounted panels (e.g. the RG34XXSP) are auto-rotated
   90° — the Status tab shows `rot=90(auto)` when that kicked in. If a panel
   still comes out wrong, set `AMBERDAV_FB_ROTATE` to `0`, `90`, `180`, or
-  `270` to override (there's a commented line in `WebDAV.sh`).
+  `270` to override (there's a commented line in `AmberDAV.sh`).
 - **Blank screen / frozen on the loading splash.** Some Allwinner framebuffer
   drivers only present a frame on an `FBIOPAN_DISPLAY` ioctl and use multiple
   buffer pages; amber-dav handles both. Check `log.txt` and the Status tab —
@@ -447,7 +447,8 @@ level is enforced on every mutating request.
 | `src/update.rs` | in-app update: GitHub Releases check + binary download/rename dance |
 | `src/password.rs` | per-boot password generator |
 | `src/web/` | `login.html`, `app.html` (the single-page file manager) |
-| `example_APPS/` | ready-to-copy `WebDAV.sh` launcher + SD-card layout |
+| `device/anbernic/` | ready-to-copy `AmberDAV.sh` launcher + SD-card layout (Anbernic stock OS) |
+| `device/muos/` | `mux_launch.sh` + glyph + `build-muxapp.sh`, packaged into a `.muxapp` |
 
 ## License
 
