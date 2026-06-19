@@ -1105,6 +1105,15 @@ window.addEventListener('beforeunload', (e) => {
 // Back reads as "go up/out" rather than leaving a modal stranded over a folder
 // that changed underneath it.
 window.addEventListener('popstate', (e) => {
+  // Guard Back out of the editor when it holds unsaved edits — the same
+  // protection as the close button / Esc / tab-close (beforeunload), now for
+  // the browser Back button. popstate can't be prevented (the history move
+  // already happened), so a declined discard is undone by re-pushing the
+  // folder the editor sits over, keeping the user on the editor.
+  if ($('editor').classList.contains('show')) {
+    if (editorDirty() && !confirmDiscard()) { history.pushState({ path: cwd }, '', urlForPath(cwd)); return; }
+    closeEditor();
+  }
   const path = e.state && typeof e.state.path === 'string' ? e.state.path : pathFromUrl();
   closePreview();
   showView('files');
