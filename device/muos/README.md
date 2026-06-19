@@ -8,9 +8,15 @@ Two ways to run AmberDAV on muOS:
 - **Ports** — drop a launcher and binary under `ROMS/Ports/` (the original
   method, below).
 
-Both wrap the **`amber-dav-aarch64-linux-fb`** binary, remount the rootfs
+Both wrap the **`amber-dav-aarch64-linux-sdl`** binary, remount the rootfs
 read-write, and serve the whole OS filesystem (`/`) on port `8080`. On-device
 controls: **Menu** = quit, **A** = blank screen, **X** = bounce screensaver.
+
+> **Why the SDL build, not `-fb`?** muOS is an SDL-native platform — it keeps
+> its own UI drawing to `/dev/fb0`, so the raw-framebuffer build's connection
+> screen redraws slowly (muOS overwrites each frame; it only re-asserts every
+> few seconds). The SDL build renders through muOS's SDL stack, which composites
+> instantly. It dynamically links the system `libSDL2`, which muOS ships.
 
 ## Install via `.muxapp` (Archive Manager)
 
@@ -21,7 +27,7 @@ A `.muxapp` is just a ZIP whose single top-level `AmberDAV/` folder holds
 AmberDAV.muxapp                  (zip)
 └── AmberDAV/
     ├── mux_launch.sh            # entry point muOS runs
-    ├── amber-dav                # aarch64 -fb binary
+    ├── amber-dav                # aarch64 -sdl binary (dynamic; muOS ships libSDL2)
     └── glyph/amberdav.png       # 24×24 menu glyph (muOS reads it here; name matches `# ICON:`)
 ```
 
@@ -35,18 +41,21 @@ AmberDAV.muxapp                  (zip)
    `<storage>/MUOS/application/AmberDAV/`.
 3. Launch **AmberDAV** from the **Applications** menu.
 
-`mux_launch.sh` copies the glyph into the active theme, remounts rootfs rw,
-serves `/`, logs the IP/password/QR to `log.txt` next to the binary, and
-restores the framebuffer to muOS on exit.
+`mux_launch.sh` sets up muOS's SDL environment (controller map, scaler,
+rotation), remounts rootfs rw, serves `/`, logs the IP/password/QR to `log.txt`
+next to the binary, and restores the framebuffer mode to muOS on exit. The glyph
+needs no launcher action — muOS reads it straight from `glyph/amberdav.png`.
 
 ### Building the `.muxapp` yourself
 
-Download `AmberDAV-<version>.muxapp` from the GitHub release, or build one from a
-dev binary with the local packager (mirrors the release CI `muxapp` job):
+Easiest is to download `AmberDAV-<version>.muxapp` from the GitHub release — the
+SDL build is `aarch64-gnu` and doesn't cross-compile cleanly off an aarch64
+Linux host. Otherwise package a prebuilt binary with the local packager (it
+mirrors the release CI `muxapp` job):
 
 ```sh
-device/muos/build-muxapp.sh                                  # cross-builds the fb binary, then packages
-device/muos/build-muxapp.sh dist/amber-dav-aarch64-linux-fb  # package an already-built binary
+device/muos/build-muxapp.sh dist/amber-dav-aarch64-linux-sdl  # package an already-built binary
+device/muos/build-muxapp.sh                                   # build from source (needs aarch64 Linux + libsdl2-dev)
 # -> dist/AmberDAV.muxapp   (copy that one file to the device's ARCHIVE)
 ```
 
@@ -57,7 +66,7 @@ under `ROMS/Ports/`. Lay out:
 
 ```
 /mnt/sdcard/ROMS/Ports/AmberDAV.sh         <- launcher (menu entry)
-/mnt/sdcard/ROMS/Ports/AmberDAV/amber-dav  <- the aarch64 -fb binary
+/mnt/sdcard/ROMS/Ports/AmberDAV/amber-dav  <- the aarch64 binary (-sdl recommended; see above)
 /mnt/sdcard/ROMS/Ports/AmberDAV/log.txt    <- created on launch (IP, password, QR)
 ```
 
