@@ -30,8 +30,15 @@ repo="$(cd "$here/../.." && pwd)"
 target="aarch64-unknown-linux-gnu"
 # CI overrides MUXAPP_OUT with a versioned name (AmberDAV-<version>.muxapp);
 # locally it defaults to a plain name that's easy to copy to the device.
+# Absolutize it: the zip below runs inside the staging dir (cd "$stage"), so a
+# relative MUXAPP_OUT would otherwise land there instead of the working dir —
+# and the later unzip/upload would not find it (release job, not caught by CI
+# whose default is already absolute).
 out="${MUXAPP_OUT:-$repo/dist/AmberDAV.muxapp}"
 out_dir="$(dirname "$out")"
+mkdir -p "$out_dir"
+out_dir="$(cd "$out_dir" && pwd)"
+out="$out_dir/$(basename "$out")"
 
 # Binary source: positional arg > env var > built from source.
 bin="${1:-${AMBER_DAV_BIN:-}}"
@@ -60,7 +67,6 @@ cp "$here/glyph/amberdav.png" "$app/glyph/amberdav.png"
 cp "$bin" "$app/amber-dav"
 chmod +x "$app/mux_launch.sh" "$app/amber-dav"
 
-mkdir -p "$out_dir"
 rm -f "$out"
 ( cd "$stage" && zip -r -q "$out" AmberDAV )
 

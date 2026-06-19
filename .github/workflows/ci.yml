@@ -237,11 +237,16 @@ jobs:
           name: amber-dav-aarch64-linux-sdl
 
       - name: Package and verify .muxapp
+        env:
+          # Use a relative MUXAPP_OUT, exactly like the release job — that path
+          # (zip runs from the staging dir) is what broke the release once; CI
+          # missing it was the gap. Keep this relative so CI guards it.
+          MUXAPP_OUT: AmberDAV.muxapp
         run: |
           chmod +x device/muos/build-muxapp.sh
           device/muos/build-muxapp.sh amber-dav-aarch64-linux-sdl
           # Fail loudly if the inner AmberDAV/ layout muOS expects is missing.
-          names="$(unzip -Z1 dist/AmberDAV.muxapp)"
+          names="$(unzip -Z1 AmberDAV.muxapp)"
           echo "$names"
           for f in AmberDAV/mux_launch.sh AmberDAV/amber-dav AmberDAV/glyph/amberdav.png; do
             echo "$names" | grep -qx "$f" || { echo "::error::.muxapp missing $f"; exit 1; }
@@ -251,5 +256,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: AmberDAV.muxapp
-          path: dist/AmberDAV.muxapp
+          path: AmberDAV.muxapp
           retention-days: 3
