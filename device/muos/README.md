@@ -3,7 +3,7 @@
 Two ways to run AmberDAV on muOS:
 
 - **`.muxapp` (recommended)** — a one-file install via Archive Manager. Files in
-  this folder (`mux_launch.sh` + `resources/amberdav.png`) are packaged into
+  this folder (`mux_launch.sh` + `glyph/amberdav.png`) are packaged into
   `AmberDAV-<version>.muxapp` by `build-muxapp.sh` and by the release CI.
 - **Ports** — drop a launcher and binary under `ROMS/Ports/` (the original
   method, below).
@@ -22,8 +22,13 @@ AmberDAV.muxapp                  (zip)
 └── AmberDAV/
     ├── mux_launch.sh            # entry point muOS runs
     ├── amber-dav                # aarch64 -fb binary
-    └── resources/amberdav.png   # 24×24 menu glyph
+    └── glyph/amberdav.png       # 24×24 menu glyph (muOS reads it here; name matches `# ICON:`)
 ```
+
+> The glyph must live in `glyph/amberdav.png` — that is the path muOS reads an
+> app's list icon from, and the name matches the `# ICON: amberdav` header in
+> `mux_launch.sh`. Apps installed on the SD card (SD2, `/mnt/sdcard`) need muOS
+> **2508.3+** for the icon to render (a frontend fix for SD2 glyph paths).
 
 1. Copy `AmberDAV-<version>.muxapp` to `/mnt/mmc/ARCHIVE` on the device.
 2. **Applications → Archive Manager**, select it — muOS extracts AmberDAV to
