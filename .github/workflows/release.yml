@@ -137,6 +137,12 @@ jobs:
         shell: bash
         run: |
           v="${GITHUB_REF_NAME#v}"
+          # A release event can fire before GitHub's tag/release state is
+          # consistent, delivering an empty GITHUB_REF_NAME. Catch that here:
+          # the grep guards below would otherwise pass ('version = ""' matches
+          # the empty-$v pattern), deferring failure to an opaque cargo
+          # "empty string, expected a semver version" three steps later.
+          [ -n "$v" ] || { echo "::error::GITHUB_REF_NAME empty — release event carried no tag name"; exit 1; }
           # Cargo.toml: the [package] version is the only 0.0.0 line.
           sed 's/^version = "0.0.0"$/version = "'"$v"'"/' Cargo.toml > Cargo.toml.tmp
           mv Cargo.toml.tmp Cargo.toml
