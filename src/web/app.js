@@ -19,6 +19,17 @@ const $ = (id) => document.getElementById(id);
 const join = (dir, name) => dir ? dir + '/' + name : name;
 const enc = encodeURIComponent;
 
+// ---- URL <-> folder routing (deep links, back/forward, login survival) ----
+// The current folder lives in the address bar as `?path=<folder>`, so it can
+// be bookmarked, shared, and restored by Back/Forward. Home is the bare `/`
+// (no query). go() keeps the URL in sync; popstate replays history entries.
+const urlForPath = (path) => path ? location.pathname + '?path=' + enc(path) : location.pathname;
+const pathFromUrl = () => new URLSearchParams(location.search).get('path') || '';
+// A 401 means the session is gone (e.g. the server restarted). Bounce to the
+// login page but carry where we are as `next`, so re-authenticating returns to
+// this exact folder instead of Home — the server redirects back to it.
+function gotoLogin() { location.href = '/login?next=' + enc(location.pathname + location.search); }
+
 // ---- file type helpers ----
 // These extension lists are duplicated elsewhere and must stay in rough sync:
 // the server's text/preview gate (src/files.rs) and the device bounce icons
@@ -88,7 +99,7 @@ async function api(method, url, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(url, opts);
-  if (r.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
+  if (r.status === 401) { gotoLogin(); throw new Error('unauthorized'); }
   // Keep the HTTP status on the error so callers can react to specific
   // failures (doPaste turns a 409 collision into an overwrite prompt).
   if (!r.ok) { const err = new Error((await r.text()) || r.statusText); err.status = r.status; throw err; }
@@ -291,11 +302,17 @@ function syncToolbar() {
 // after a newer go() started, so a slow response can never overwrite the
 // entries of the directory the user is actually in (mirrors previewToken).
 let navToken = 0;
-async function go(path) {
+// `push` (default) adds a history entry so Back returns to the previous
+// folder; it's false for the initial load and for popstate-driven navigation
+// (we're already moving *through* history then, not adding to it). Refreshes
+// of the same folder never push — the path is unchanged.
+async function go(path, push = true) {
   const token = ++navToken;
+  const changed = path !== cwd;
   // Entering a different folder clears the filter; a refresh of the same
   // folder (t-refresh, post-mutation reloads) keeps it active.
-  if (path !== cwd) setFilter('');
+  if (changed) setFilter('');
+  if (push && changed) history.pushState({ path }, '', urlForPath(path));
   cwd = path; selection = new Set(); lastIndex = null;
   try {
     const list = await api('GET', '/api/list?path=' + enc(cwd));
@@ -376,7 +393,7 @@ async function doNewFile() {
     // fetch, not api(): the upload endpoint takes query params + raw body.
     // Empty body = create empty file; safe_name validates server-side.
     const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name), { method: 'PUT', body: '' });
-    if (r.status === 401) { location.href = '/login'; return; }
+    if (r.status === 401) { gotoLogin(); return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
   } catch (e) { toast(e.message, true); return; }
   toast('Created ' + name);
@@ -404,6 +421,29 @@ async function doDelete() {
   if (!confirm('Delete ' + paths.length + ' item(s)? This cannot be undone.')) return;
   try { await api('POST', '/api/delete', { paths }); toast('Deleted'); go(cwd); refreshDisk(); }
   catch (e) { toast(e.message, true); }
+}
+// Web-UI path (what the breadcrumbs show), not the server's filesystem path:
+// selectedPaths() is already cwd-relative, so a leading '/' makes it read as
+// an absolute path rooted at Home. Multiple selections copy one per line.
+async function doCopyPath() {
+  const paths = selectedPaths(); if (!paths.length) return;
+  const text = paths.map(p => '/' + p).join('\n');
+  const ok = await copyText(text);
+  toast(ok ? 'Copied path' + (paths.length > 1 ? 's' : '') : 'Copy failed', !ok);
+}
+// Clipboard write with a fallback for the plain-HTTP LAN case: the async
+// Clipboard API only exists in a secure context, so on http://<ip> it's
+// undefined and we drop to a hidden-textarea + execCommand('copy').
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  } catch { return false; }
 }
 function doCut() { clipboard = { mode: 'cut', paths: selectedPaths() }; toast('Cut ' + clipboard.paths.length + ' item(s)'); syncToolbar(); }
 function doCopy() { clipboard = { mode: 'copy', paths: selectedPaths() }; toast('Copied ' + clipboard.paths.length + ' item(s)'); syncToolbar(); }
@@ -557,7 +597,7 @@ async function openEditor(e) {
   // re-opening a file just edited in-app loads the new bytes (issue #104).
   try {
     const r = await fetch('/api/raw?path=' + enc(join(cwd, e.name)), { cache: 'no-cache' });
-    if (r.status === 401) { location.href = '/login'; return; }
+    if (r.status === 401) { gotoLogin(); return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
     area.value = await r.text(); edBaseline = area.value; area.disabled = false; area.focus();
   } catch (err) { toast(err.message, true); closeEditor(); }
@@ -570,7 +610,7 @@ async function saveEditor() {
     // (without it the server now 409s instead of replacing an existing file).
     const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name) + '&overwrite=true',
                           { method: 'PUT', body: text });
-    if (r.status === 401) { location.href = '/login'; return; }
+    if (r.status === 401) { gotoLogin(); return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
     edBaseline = text;                // what we just persisted — editor is clean again
     toast('Saved ' + name); closeEditor(); go(cwd);
@@ -598,7 +638,7 @@ function putFile(dest, file, rel, onProgress, overwrite) {
                   + (overwrite ? '&overwrite=true' : ''));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
-      if (xhr.status === 401) { location.href = '/login'; return; }
+      if (xhr.status === 401) { gotoLogin(); return; }
       if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
       // Keep the status so uploadItems can turn a 409 into an overwrite prompt.
       const err = new Error(xhr.responseText || xhr.statusText); err.status = xhr.status; reject(err);
@@ -735,6 +775,7 @@ function openMenu(x, y) {
     'sep',
     { label: '✂ Cut', fn: doCut, off: n < 1 || !w },
     { label: '⧉ Copy', fn: doCopy, off: n < 1 || !canWrite() },
+    { label: '📋 Copy Path', fn: doCopyPath, off: n < 1 },
     { label: '⤵ Paste', fn: doPaste, off: !clipboard || !w },
     'sep',
     { label: '🗑 Delete', fn: doDelete, off: n < 1 || !canDelete() || atVirtualRoot() },
@@ -1082,6 +1123,27 @@ window.addEventListener('beforeunload', (e) => {
   e.returnValue = '';                 // legacy Chrome requires a set returnValue
 });
 
+// Browser Back/Forward: re-navigate to the folder the popped history entry
+// points at (state.path, falling back to the URL's ?path=). push=false — we're
+// moving through existing history, not adding to it. Close any open preview so
+// Back reads as "go up/out" rather than leaving a modal stranded over a folder
+// that changed underneath it.
+window.addEventListener('popstate', (e) => {
+  // Guard Back out of the editor when it holds unsaved edits — the same
+  // protection as the close button / Esc / tab-close (beforeunload), now for
+  // the browser Back button. popstate can't be prevented (the history move
+  // already happened), so a declined discard is undone by re-pushing the
+  // folder the editor sits over, keeping the user on the editor.
+  if ($('editor').classList.contains('show')) {
+    if (editorDirty() && !confirmDiscard()) { history.pushState({ path: cwd }, '', urlForPath(cwd)); return; }
+    closeEditor();
+  }
+  const path = e.state && typeof e.state.path === 'string' ? e.state.path : pathFromUrl();
+  closePreview();
+  showView('files');
+  go(path, false);
+});
+
 // click-away to clear selection / close menu
 document.addEventListener('click', (e) => { closeMenu();
   if (e.target.closest('#view-files .listwrap') && !e.target.closest('tr') && !e.target.closest('.gcard')) {
@@ -1143,6 +1205,12 @@ function renderFavorites(favs) {
     renderFavorites(s.favorites);
   }
   catch (e) { /* fall back to defaults */ }
-  go(defaultFolder);
+  // A `?path=` in the URL (a shared deep link, or where Back/restart-login
+  // dropped us) wins over the configured default folder; otherwise open the
+  // default. Normalize the bar to match the folder we actually open, and seed
+  // the first history entry's state so an immediate Back has a path to read.
+  const start = new URLSearchParams(location.search).has('path') ? pathFromUrl() : defaultFolder;
+  await go(start, false);
+  history.replaceState({ path: start }, '', urlForPath(start));
   refreshDisk();                    // populate the sidebar gauge on first paint
 })();

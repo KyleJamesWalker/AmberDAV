@@ -57,10 +57,13 @@ async fn access_log(req: Request, next: Next) -> Response {
 ///
 /// ```text
 /// GET  /                  -   app.html when authed, else redirect to /login
+///                             (carrying `?path=` as `next` so login returns
+///                             to the same folder)
 /// GET  /app.css           -   SPA stylesheet (public; no secrets)
 /// GET  /app.js            -   SPA script (public; no secrets)
 /// GET  /login             -   login page
-/// POST /login             -   checks the password, sets the `sid` cookie
+/// POST /login             -   checks the password, sets the `sid` cookie,
+///                             honors a safe `next` redirect (else /)
 /// GET  /logout            -   clears the session cookie
 /// GET  /events            S   live-input SSE stream (Status tab)
 /// GET  /api/name          -   device name for the browser tab title (public)
@@ -620,6 +623,48 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(resp.headers()[header::LOCATION], "/login?e=1");
         assert!(resp.headers().get(header::SET_COOKIE).is_none());
+    }
+
+    // A safe `next` (a root-relative in-app folder link) is honored after a
+    // correct login and preserved across a wrong guess, so a deep link or a
+    // post-restart refresh lands back on the folder it came from. An unsafe
+    // `next` (an absolute or protocol-relative URL) is dropped — login can't
+    // be turned into an open redirect.
+    #[tokio::test]
+    async fn login_honors_safe_next_and_rejects_open_redirects() {
+        let root = TmpRoot::new("login-next");
+        let app = app(&root, Permission::ReadWrite);
+        // axum has already percent-decoded the query, so `next` arrives as the
+        // literal in-app URL the browser is headed for.
+        let post = |pw: &str, next: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/login?next={next}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("password={pw}")))
+                .unwrap()
+        };
+
+        // Correct password + safe next: redirect straight to that folder.
+        let resp = send(&app, post(PASSWORD, "%2F%3Fpath%3DRoms")).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/?path=Roms");
+        assert!(resp.headers().contains_key(header::SET_COOKIE));
+
+        // Wrong password keeps the (re-encoded) next alongside the error flag.
+        let resp = send(&app, post("nope", "%2F%3Fpath%3DRoms")).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            resp.headers()[header::LOCATION],
+            "/login?e=1&next=%2F%3Fpath%3DRoms"
+        );
+
+        // Unsafe targets are ignored: a correct login falls back to Home.
+        for evil in ["https%3A%2F%2Fevil.com", "%2F%2Fevil.com", "%2F%5Cevil.com"] {
+            let resp = send(&app, post(PASSWORD, evil)).await;
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER, "next={evil}");
+            assert_eq!(resp.headers()[header::LOCATION], "/", "next={evil}");
+        }
     }
 
     // --- brute-force throttling (issue #27) --------------------------------
@@ -1313,5 +1358,22 @@ mod tests {
 
         let resp = send(&app, get_authed("/")).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // A deep link to a folder (the SPA's `?path=`) bounced to login must carry
+    // the original location as `next`, so the post-login redirect returns to
+    // that folder instead of Home. The bare `/` has nothing to carry.
+    #[tokio::test]
+    async fn index_redirect_preserves_the_deep_link_as_next() {
+        let root = TmpRoot::new("index-next");
+        let app = app(&root, Permission::ReadWrite);
+
+        let resp = send(&app, get("/?path=Roms%2FGameBoy")).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        // The whole `/?path=...` is percent-encoded into the `next` value.
+        assert_eq!(
+            resp.headers()[header::LOCATION],
+            "/login?next=%2F%3Fpath%3DRoms%252FGameBoy"
+        );
     }
 }
