@@ -422,6 +422,29 @@ async function doDelete() {
   try { await api('POST', '/api/delete', { paths }); toast('Deleted'); go(cwd); refreshDisk(); }
   catch (e) { toast(e.message, true); }
 }
+// Web-UI path (what the breadcrumbs show), not the server's filesystem path:
+// selectedPaths() is already cwd-relative, so a leading '/' makes it read as
+// an absolute path rooted at Home. Multiple selections copy one per line.
+async function doCopyPath() {
+  const paths = selectedPaths(); if (!paths.length) return;
+  const text = paths.map(p => '/' + p).join('\n');
+  const ok = await copyText(text);
+  toast(ok ? 'Copied path' + (paths.length > 1 ? 's' : '') : 'Copy failed', !ok);
+}
+// Clipboard write with a fallback for the plain-HTTP LAN case: the async
+// Clipboard API only exists in a secure context, so on http://<ip> it's
+// undefined and we drop to a hidden-textarea + execCommand('copy').
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  } catch { return false; }
+}
 function doCut() { clipboard = { mode: 'cut', paths: selectedPaths() }; toast('Cut ' + clipboard.paths.length + ' item(s)'); syncToolbar(); }
 function doCopy() { clipboard = { mode: 'copy', paths: selectedPaths() }; toast('Copied ' + clipboard.paths.length + ' item(s)'); syncToolbar(); }
 async function doPaste() {
@@ -752,6 +775,7 @@ function openMenu(x, y) {
     'sep',
     { label: '✂ Cut', fn: doCut, off: n < 1 || !w },
     { label: '⧉ Copy', fn: doCopy, off: n < 1 || !canWrite() },
+    { label: '📋 Copy Path', fn: doCopyPath, off: n < 1 },
     { label: '⤵ Paste', fn: doPaste, off: !clipboard || !w },
     'sep',
     { label: '🗑 Delete', fn: doDelete, off: n < 1 || !canDelete() || atVirtualRoot() },
