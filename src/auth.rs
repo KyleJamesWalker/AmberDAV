@@ -133,7 +133,7 @@ pub async fn login(
         return throttle::too_many_attempts(wait);
     }
 
-    if constant_time_eq(form.password.as_bytes(), state.info.password.as_bytes()) {
+    if state.info.password.verify(&form.password) {
         state.throttle.record_success(ip);
         let cookie = format!(
             "{COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}",

@@ -237,6 +237,19 @@ pub async fn get_settings(_: Session, State(state): State<AppState>) -> Response
                 serde_json::Value::Null
             },
         );
+        let has_hash = state
+            .settings
+            .password_hash
+            .as_deref()
+            .is_some_and(|h| !h.is_empty());
+        obj.insert(
+            "password_hash".to_string(),
+            if has_hash {
+                serde_json::Value::from("(hidden)")
+            } else {
+                serde_json::Value::Null
+            },
+        );
         // Authoritative multi-root flag (issue #76): the UI hides the write
         // affordances at the read-only virtual root. The raw root/roots
         // fields are pre-resolution and can't answer this.

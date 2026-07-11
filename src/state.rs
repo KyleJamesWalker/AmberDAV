@@ -176,7 +176,7 @@ impl MountTable {
 /// Server facts shown on the status page and startup banner.
 pub struct ServerInfo {
     pub port: u16,
-    pub password: String,
+    pub password: crate::password::PasswordMatcher,
     /// Set when the config file existed but could not be used (parse/read
     /// failure) — surfaced on the Status tab so a broken config is never
     /// invisible (issue #19).

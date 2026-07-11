@@ -35,7 +35,7 @@ pub enum DavFs {
 #[derive(Clone)]
 pub struct DavState {
     pub fs: DavFs,
-    pub password: Arc<str>,
+    pub password: Arc<crate::password::PasswordMatcher>,
     pub settings: SharedSettings,
     /// Per-IP auth-failure throttle, shared with the web login (one guess
     /// budget per client across both password surfaces — issue #27).
@@ -428,7 +428,7 @@ enum BasicAuth {
 /// Check `Authorization: Basic ...` against the password (username ignored).
 /// The password comparison runs in constant time so a guess can't be confirmed
 /// character-by-character through response timing (issue #27).
-fn check_auth(req: &Request, password: &str) -> BasicAuth {
+fn check_auth(req: &Request, password: &crate::password::PasswordMatcher) -> BasicAuth {
     let Some(value) = req.headers().get(header::AUTHORIZATION) else {
         return BasicAuth::Missing;
     };
@@ -444,11 +444,7 @@ fn check_auth(req: &Request, password: &str) -> BasicAuth {
     };
 
     match text.split_once(':') {
-        Some((_, pass))
-            if constant_time_eq::constant_time_eq(pass.as_bytes(), password.as_bytes()) =>
-        {
-            BasicAuth::Ok
-        }
+        Some((_, pass)) if password.verify(pass) => BasicAuth::Ok,
         _ => BasicAuth::Wrong,
     }
 }
@@ -596,7 +592,8 @@ mod tests {
     // challenge round-trip, which must never count against the throttle).
     #[test]
     fn basic_auth_accepts_only_the_exact_password() {
-        let check = |creds| check_auth(&req_with_basic(creds), "secret");
+        let matcher = crate::password::PasswordMatcher::Plain("secret".to_string());
+        let check = |creds| check_auth(&req_with_basic(creds), &matcher);
         assert_eq!(check(Some("user:secret")), BasicAuth::Ok);
         assert_eq!(check(Some(":secret")), BasicAuth::Ok);
         assert_eq!(check(Some("user:secres")), BasicAuth::Wrong);
@@ -612,7 +609,7 @@ mod tests {
             .header(header::AUTHORIZATION, "Basic not!base64@@")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(check_auth(&garbled, "secret"), BasicAuth::Wrong);
+        assert_eq!(check_auth(&garbled, &matcher), BasicAuth::Wrong);
     }
 
     // The full method × permission table. Every WebDAV write method must be

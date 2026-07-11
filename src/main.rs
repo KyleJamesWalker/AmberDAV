@@ -91,7 +91,8 @@ struct Effective {
     mounts: Vec<(String, String)>,
     port: u16,
     bind: String,
-    password: String,
+    password: crate::password::PasswordMatcher,
+    is_random: bool,
     /// Forced true for a random password — it must be shown somewhere, or it
     /// could never be discovered.
     display_password: bool,
@@ -248,16 +249,14 @@ fn effective(
         .unwrap_or_else(|| "0.0.0.0".to_string());
 
     // Fixed from config when non-empty, else a fresh random one per boot.
-    let random_password = settings
-        .password
-        .as_deref()
-        .map(str::is_empty)
-        .unwrap_or(true);
-    let password = settings
-        .password
-        .clone()
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(generate);
+    let (password, is_random) =
+        if let Some(hash) = settings.password_hash.clone().filter(|h| !h.is_empty()) {
+            (crate::password::PasswordMatcher::Hash(hash), false)
+        } else if let Some(plain) = settings.password.clone().filter(|p| !p.is_empty()) {
+            (crate::password::PasswordMatcher::Plain(plain), false)
+        } else {
+            (crate::password::PasswordMatcher::Plain(generate()), true)
+        };
 
     let bounce_enabled = settings.bounce_screen.enabled;
     let bounce_paths: Vec<PathBuf> = if bounce_enabled {
@@ -293,7 +292,8 @@ fn effective(
         port,
         bind,
         password,
-        display_password: random_password || settings.display_password,
+        is_random,
+        display_password: is_random || settings.display_password,
         bounce_enabled,
         bounce_paths,
     })
@@ -305,6 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // First thing, so the config-load diagnostics below already go through
     // the subscriber. The banner/QR stay plain println! (user-facing output).
     logging::init(cli.verbose);
+
     let config_path = config::config_path();
 
     // Handheld: keep auto-creating a default config on first run — the device
@@ -324,7 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parse error only when it is present, so the two never compete.
     let (file_settings, config_error) = config::load(&config_path);
     let config_error = config_error.or(config_write_error);
-    let settings = match cli.resolve(file_settings) {
+    let mut settings = match cli.resolve(file_settings) {
         Ok(s) => s,
         Err(msg) => {
             tracing::error!("{msg}");
@@ -332,6 +333,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
+
+    if let Some(mut plain) = cli.hash_password.clone() {
+        if plain.is_empty() {
+            match rpassword::prompt_password("Enter password to hash: ") {
+                Ok(p) => {
+                    plain = p;
+                }
+                Err(e) => {
+                    eprintln!("error: failed to read password: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        match password::hash(&plain) {
+            Ok(h) => {
+                if cli.save {
+                    settings.password_hash = Some(h);
+                    settings.password = None;
+                    if let Err(e) = config::save(&config_path, &settings) {
+                        eprintln!("error: failed to save config: {e}");
+                        std::process::exit(1);
+                    }
+                    println!("config: wrote {}", config_path.display());
+                } else {
+                    println!("{h}");
+                }
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("error: failed to hash password: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // --save: persist the fully-resolved config and exit. No server is started.
     if cli.save {
@@ -348,6 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port,
         bind,
         password,
+        is_random,
         display_password,
         bounce_enabled,
         bounce_paths,
@@ -471,7 +507,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings: settings.clone(),
         dav: DavState {
             fs: dav_fs,
-            password: Arc::from(password.as_str()),
+            password: Arc::new(password.clone()),
             settings: settings.clone(),
             throttle: auth_throttle.clone(),
         },
@@ -489,7 +525,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = router::router(state);
 
     // Password to surface (screen + sidecar), honoring the hidden-password rule.
-    let shown_password = display_password.then(|| password.clone());
+    let shown_password = match &password {
+        crate::password::PasswordMatcher::Plain(plain) if display_password => Some(plain.clone()),
+        _ => None,
+    };
 
     // Optional sidecar for external launchers / Decky. Honors the hidden-pw
     // rule. Written now and then kept fresh by a background task: Wi-Fi often
@@ -508,7 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    print_banner(ip, port, &root, &password);
+    print_banner(ip, port, &root, &password, is_random);
 
     // Bind BEFORE painting the device screen: a failed bind must not flash the
     // normal info screen (which implies the server is up) and then dump the
@@ -611,13 +650,25 @@ fn bind_error_message(bind: &str, port: u16, e: &std::io::Error) -> String {
     format!("cannot listen on {bind}:{port}: {e} — {hint}")
 }
 
-fn print_banner(ip: IpAddr, port: u16, root: &str, password: &str) {
+fn print_banner(
+    ip: IpAddr,
+    port: u16,
+    root: &str,
+    password: &crate::password::PasswordMatcher,
+    is_random: bool,
+) {
     let status_url = format!("http://{ip}:{port}/");
     println!("\n  amber-dav");
     println!("  serving:  {root}");
     println!("  status:   {status_url}");
     println!("  webdav:   http://{ip}:{port}{}", webdav::MOUNT);
-    println!("  password: {password}   (user: anything)");
+    if is_random {
+        if let crate::password::PasswordMatcher::Plain(plain) = password {
+            println!("  password: {plain}   (user: anything)");
+        }
+    } else {
+        println!("  password: [configured]   (user: anything)");
+    }
     // A loopback address only ever shows up here when the server is bound to
     // one (issue #59) — say so, or the URLs look broken from another device.
     if ip.is_loopback() {
@@ -723,8 +774,12 @@ mod tests {
         assert_eq!(e.root, ".");
         assert_eq!(e.port, 8080);
         assert_eq!(e.bind, "0.0.0.0");
-        assert_eq!(e.password, "gen-pw");
+        assert_eq!(
+            e.password,
+            crate::password::PasswordMatcher::Plain("gen-pw".to_string())
+        );
         assert!(e.display_password, "random password must be displayable");
+        assert!(e.is_random);
         assert!(!e.bounce_enabled);
         assert!(e.bounce_paths.is_empty());
 
@@ -733,11 +788,16 @@ mod tests {
             root: Some(String::new()),
             bind: Some(String::new()),
             password: Some(String::new()),
+            password_hash: Some(String::new()),
             ..config::Settings::default()
         };
         let e = eff(&s, || "gen2".to_string());
         assert_eq!((e.root.as_str(), e.bind.as_str()), (".", "0.0.0.0"));
-        assert_eq!(e.password, "gen2");
+        assert_eq!(
+            e.password,
+            crate::password::PasswordMatcher::Plain("gen2".to_string())
+        );
+        assert!(e.is_random);
     }
 
     // A configured password is used verbatim, never regenerated, and
@@ -753,11 +813,32 @@ mod tests {
             ..config::Settings::default()
         };
         let e = eff(&s, no_gen);
-        assert_eq!(e.password, "fixed");
+        assert_eq!(
+            e.password,
+            crate::password::PasswordMatcher::Plain("fixed".to_string())
+        );
+        assert!(!e.is_random);
         assert!(!e.display_password, "fixed password may stay hidden");
         assert_eq!(e.root, "/srv/files");
         assert_eq!(e.port, 9000);
         assert_eq!(e.bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn effective_hashed_password() {
+        let s = config::Settings {
+            password_hash: Some("$argon2id$v=19$m=65536,t=3,p=1$abc".to_string()),
+            display_password: true,
+            ..config::Settings::default()
+        };
+        let e = eff(&s, no_gen);
+        assert_eq!(
+            e.password,
+            crate::password::PasswordMatcher::Hash(
+                "$argon2id$v=19$m=65536,t=3,p=1$abc".to_string()
+            )
+        );
+        assert!(!e.is_random);
     }
 
     // Bounce paths resolve only when enabled: relative entries against the

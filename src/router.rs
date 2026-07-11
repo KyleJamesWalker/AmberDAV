@@ -195,13 +195,15 @@ mod tests {
             settings: settings.clone(),
             dav: DavState {
                 fs: webdav::DavFs::Single(webdav::build_handler(root.to_str().unwrap())),
-                password: Arc::from(PASSWORD),
+                password: Arc::new(crate::password::PasswordMatcher::Plain(
+                    PASSWORD.to_string(),
+                )),
                 settings,
                 throttle: throttle.clone(),
             },
             info: Arc::new(ServerInfo {
                 port: 8080,
-                password: PASSWORD.to_string(),
+                password: crate::password::PasswordMatcher::Plain(PASSWORD.to_string()),
                 config_error: None,
             }),
             throttle,
@@ -232,7 +234,9 @@ mod tests {
         let state = AppState {
             dav: DavState {
                 fs: webdav::build_multi_fs(&mounts),
-                password: Arc::from(PASSWORD),
+                password: Arc::new(crate::password::PasswordMatcher::Plain(
+                    PASSWORD.to_string(),
+                )),
                 settings: settings.clone(),
                 throttle: throttle.clone(),
             },
@@ -241,7 +245,7 @@ mod tests {
             settings,
             info: Arc::new(ServerInfo {
                 port: 8080,
-                password: PASSWORD.to_string(),
+                password: crate::password::PasswordMatcher::Plain(PASSWORD.to_string()),
                 config_error: None,
             }),
             throttle,
@@ -1263,6 +1267,23 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         // Still truthy so the Settings tab keeps showing "fixed code".
         assert_eq!(json["password"], "(hidden)");
+        assert_eq!(json["password_hash"], serde_json::Value::Null);
+
+        // Fixed password hash: redacted to a placeholder
+        let fixed_hash = super::router(state_with_settings(
+            &root.0,
+            Settings {
+                password_hash: Some(secret.to_string()),
+                ..Settings::default()
+            },
+        ));
+        let resp = send(&fixed_hash, get_authed("/api/settings")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(!body.contains(secret), "password_hash leaked: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["password_hash"], "(hidden)");
+        assert_eq!(json["password"], serde_json::Value::Null);
 
         // Random (per-boot) password: stays null, so the tab shows "random".
         let random = app(&root, Permission::ReadWrite);
@@ -1270,6 +1291,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
         assert_eq!(json["password"], serde_json::Value::Null);
+        assert_eq!(json["password_hash"], serde_json::Value::Null);
     }
 
     // The web UI needs to know the virtual root is read-only to hide the

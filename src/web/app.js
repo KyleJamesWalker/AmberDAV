@@ -947,7 +947,7 @@ async function loadSettings() {
     // favorite named "<b>roms" must render literally, like filenames do.
     const row = (k, v) => k + ': <b>' + escapeHtml(v) + '</b>';
     $('set-view').innerHTML = [
-      row('Password', s.password ? 'fixed code' : 'random (new each launch)'),
+      row('Password', s.password_hash ? 'fixed hash' : (s.password ? 'fixed code' : 'random (new each launch)')),
       row('Show code on screen', s.display_password ? 'yes' : 'no'),
       row('Permission', s.permission),
       row('Default folder', s.default_folder || '(Home)'),

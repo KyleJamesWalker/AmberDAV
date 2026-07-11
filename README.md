@@ -115,6 +115,31 @@ amber-dav --root /path/to/folder --port 8080 --bind 127.0.0.1
 amber-dav --help                        # full flag/env list
 ```
 
+### Running in Docker
+
+A multi-platform headless Docker image (supporting both `amd64` and `arm64`) is automatically built and published on every release to the GitHub Container Registry.
+
+```sh
+# Run the container, mounting the local directory to serve at /data
+docker run -d \
+  --name amber-dav \
+  -p 8080:8080 \
+  -v /path/to/local/folder:/data \
+  ghcr.io/kylejameswalker/amberdav:latest
+```
+
+The container runs as a non-root user (`amberdav`) and exposes port `8080`. You can configure the container using environment variables or CLI arguments:
+
+```sh
+docker run -d \
+  --name amber-dav \
+  -p 8080:8080 \
+  -v /path/to/local/folder:/data \
+  -e AMBERDAV_PERMISSION=read-only \
+  -e AMBERDAV_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...' \
+  ghcr.io/kylejameswalker/amberdav:latest
+```
+
 ## Install on Anbernic device
 
 The stock OS lists `*.sh` launchers from `Roms/APPS/` on the SD card. Copy the
