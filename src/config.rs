@@ -96,6 +96,9 @@ pub struct Settings {
     /// Fixed login password. `None`/absent → a random one is generated each boot.
     #[serde(default)]
     pub password: Option<String>,
+    /// Fixed login password hash (Argon2id). Overrides plain password.
+    #[serde(default)]
+    pub password_hash: Option<String>,
     /// Show the password on the device screen. Forced on when the password is
     /// random (otherwise it would be impossible to discover).
     #[serde(default = "default_true")]
@@ -149,6 +152,7 @@ impl Default for Settings {
         Settings {
             name: None,
             password: None,
+            password_hash: None,
             display_password: true,
             root: None,
             roots: None,
@@ -313,6 +317,10 @@ fn to_jsonc_pretty(s: &Settings) -> String {
   // Fixed login password. null = a fresh random code is generated each boot.
   "password": {password},
 
+  // Fixed login password hash (Argon2id). null = disabled. Overrides plain password.
+  // [env: AMBERDAV_PASSWORD_HASH]  [CLI: --password-hash]
+  "password_hash": {password_hash},
+
   // Show the password on the device screen. Forced on for a random password
   // (otherwise it could never be discovered); false hides a fixed one.
   "display_password": {display_password},
@@ -363,6 +371,7 @@ fn to_jsonc_pretty(s: &Settings) -> String {
 "#,
         name = json(&s.name),
         password = json(&s.password),
+        password_hash = json(&s.password_hash),
         display_password = json(&s.display_password),
         port = json(&s.port),
         bind = json(&s.bind),
@@ -432,6 +441,7 @@ mod tests {
         for key in [
             "name",
             "password",
+            "password_hash",
             "display_password",
             "root",
             "port",
@@ -469,6 +479,7 @@ mod tests {
         let custom = Settings {
             name: Some("Retro Flippy".to_string()),
             password: Some("li\"ttle\\Secr3t".to_string()),
+            password_hash: Some("$argon2id$v=19$m=65536,t=3,p=1$abc".to_string()),
             display_password: false,
             root: Some("/mnt/mmc".to_string()),
             roots: None,

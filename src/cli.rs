@@ -51,6 +51,13 @@ pub struct Cli {
     /// Fixed login password. [env: AMBERDAV_PASSWORD] [default: random per boot]
     #[arg(long, value_name = "PW")]
     password: Option<String>,
+    /// Fixed login password hash (Argon2id). [env: AMBERDAV_PASSWORD_HASH]
+    #[arg(long, value_name = "HASH")]
+    password_hash: Option<String>,
+    /// Hash a plaintext password into an Argon2id hash and exit. If no password is
+    /// provided, you will be prompted to enter it securely.
+    #[arg(long, value_name = "PLAIN", num_args = 0..=1, default_missing_value = "")]
+    pub hash_password: Option<String>,
     /// Show the password on the device screen. [env: AMBERDAV_DISPLAY_PASSWORD]
     #[arg(long = "display-password", overrides_with = "no_display_password")]
     display_password: bool,
@@ -186,6 +193,13 @@ impl Cli {
             .or_else(|| env_str("AMBERDAV_PASSWORD"))
         {
             s.password = Some(v);
+        }
+        if let Some(v) = self
+            .password_hash
+            .clone()
+            .or_else(|| env_str("AMBERDAV_PASSWORD_HASH"))
+        {
+            s.password_hash = Some(v);
         }
         if let Some(v) = flag_tristate(self.display_password, self.no_display_password)
             .or_else(|| env_bool("AMBERDAV_DISPLAY_PASSWORD"))
