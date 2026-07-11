@@ -1,0 +1,21 @@
+# Dockerfile for GHA CI Release - copies precompiled static binaries
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+
+# Create a non-root group and user
+RUN addgroup -S amberdav && adduser -S -G amberdav amberdav
+
+# Default directory to serve WebDAV files from
+RUN mkdir -p /data && chown -R amberdav:amberdav /data
+WORKDIR /data
+
+# Copy the pre-compiled static headless binary matching target architecture
+ARG TARGETARCH
+COPY dist/amber-dav-${TARGETARCH} /usr/local/bin/amber-dav
+RUN chmod +x /usr/local/bin/amber-dav
+
+USER amberdav
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/amber-dav"]
+CMD ["--root", "/data"]
