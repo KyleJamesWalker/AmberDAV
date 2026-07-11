@@ -249,21 +249,14 @@ fn effective(
         .unwrap_or_else(|| "0.0.0.0".to_string());
 
     // Fixed from config when non-empty, else a fresh random one per boot.
-    let (password, is_random) = if let Some(hash) = settings
-        .password_hash
-        .clone()
-        .filter(|h| !h.is_empty())
-    {
-        (crate::password::PasswordMatcher::Hash(hash), false)
-    } else if let Some(plain) = settings
-        .password
-        .clone()
-        .filter(|p| !p.is_empty())
-    {
-        (crate::password::PasswordMatcher::Plain(plain), false)
-    } else {
-        (crate::password::PasswordMatcher::Plain(generate()), true)
-    };
+    let (password, is_random) =
+        if let Some(hash) = settings.password_hash.clone().filter(|h| !h.is_empty()) {
+            (crate::password::PasswordMatcher::Hash(hash), false)
+        } else if let Some(plain) = settings.password.clone().filter(|p| !p.is_empty()) {
+            (crate::password::PasswordMatcher::Plain(plain), false)
+        } else {
+            (crate::password::PasswordMatcher::Plain(generate()), true)
+        };
 
     let bounce_enabled = settings.bounce_screen.enabled;
     let bounce_paths: Vec<PathBuf> = if bounce_enabled {
@@ -657,7 +650,13 @@ fn bind_error_message(bind: &str, port: u16, e: &std::io::Error) -> String {
     format!("cannot listen on {bind}:{port}: {e} — {hint}")
 }
 
-fn print_banner(ip: IpAddr, port: u16, root: &str, password: &crate::password::PasswordMatcher, is_random: bool) {
+fn print_banner(
+    ip: IpAddr,
+    port: u16,
+    root: &str,
+    password: &crate::password::PasswordMatcher,
+    is_random: bool,
+) {
     let status_url = format!("http://{ip}:{port}/");
     println!("\n  amber-dav");
     println!("  serving:  {root}");
@@ -775,7 +774,10 @@ mod tests {
         assert_eq!(e.root, ".");
         assert_eq!(e.port, 8080);
         assert_eq!(e.bind, "0.0.0.0");
-        assert_eq!(e.password, crate::password::PasswordMatcher::Plain("gen-pw".to_string()));
+        assert_eq!(
+            e.password,
+            crate::password::PasswordMatcher::Plain("gen-pw".to_string())
+        );
         assert!(e.display_password, "random password must be displayable");
         assert!(e.is_random);
         assert!(!e.bounce_enabled);
@@ -791,7 +793,10 @@ mod tests {
         };
         let e = eff(&s, || "gen2".to_string());
         assert_eq!((e.root.as_str(), e.bind.as_str()), (".", "0.0.0.0"));
-        assert_eq!(e.password, crate::password::PasswordMatcher::Plain("gen2".to_string()));
+        assert_eq!(
+            e.password,
+            crate::password::PasswordMatcher::Plain("gen2".to_string())
+        );
         assert!(e.is_random);
     }
 
@@ -808,7 +813,10 @@ mod tests {
             ..config::Settings::default()
         };
         let e = eff(&s, no_gen);
-        assert_eq!(e.password, crate::password::PasswordMatcher::Plain("fixed".to_string()));
+        assert_eq!(
+            e.password,
+            crate::password::PasswordMatcher::Plain("fixed".to_string())
+        );
         assert!(!e.is_random);
         assert!(!e.display_password, "fixed password may stay hidden");
         assert_eq!(e.root, "/srv/files");
@@ -826,7 +834,9 @@ mod tests {
         let e = eff(&s, no_gen);
         assert_eq!(
             e.password,
-            crate::password::PasswordMatcher::Hash("$argon2id$v=19$m=65536,t=3,p=1$abc".to_string())
+            crate::password::PasswordMatcher::Hash(
+                "$argon2id$v=19$m=65536,t=3,p=1$abc".to_string()
+            )
         );
         assert!(!e.is_random);
     }

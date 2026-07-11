@@ -444,9 +444,7 @@ fn check_auth(req: &Request, password: &crate::password::PasswordMatcher) -> Bas
     };
 
     match text.split_once(':') {
-        Some((_, pass)) if password.verify(pass) => {
-            BasicAuth::Ok
-        }
+        Some((_, pass)) if password.verify(pass) => BasicAuth::Ok,
         _ => BasicAuth::Wrong,
     }
 }
