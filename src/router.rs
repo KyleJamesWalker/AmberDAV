@@ -195,13 +195,13 @@ mod tests {
             settings: settings.clone(),
             dav: DavState {
                 fs: webdav::DavFs::Single(webdav::build_handler(root.to_str().unwrap())),
-                password: Arc::from(PASSWORD),
+                password: Arc::new(crate::password::PasswordMatcher::Plain(PASSWORD.to_string())),
                 settings,
                 throttle: throttle.clone(),
             },
             info: Arc::new(ServerInfo {
                 port: 8080,
-                password: PASSWORD.to_string(),
+                password: crate::password::PasswordMatcher::Plain(PASSWORD.to_string()),
                 config_error: None,
             }),
             throttle,
@@ -232,7 +232,7 @@ mod tests {
         let state = AppState {
             dav: DavState {
                 fs: webdav::build_multi_fs(&mounts),
-                password: Arc::from(PASSWORD),
+                password: Arc::new(crate::password::PasswordMatcher::Plain(PASSWORD.to_string())),
                 settings: settings.clone(),
                 throttle: throttle.clone(),
             },
@@ -241,7 +241,7 @@ mod tests {
             settings,
             info: Arc::new(ServerInfo {
                 port: 8080,
-                password: PASSWORD.to_string(),
+                password: crate::password::PasswordMatcher::Plain(PASSWORD.to_string()),
                 config_error: None,
             }),
             throttle,
