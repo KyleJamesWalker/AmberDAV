@@ -135,7 +135,7 @@ docker run -d \
   --name amber-dav \
   -p 8080:8080 \
   -v /path/to/local/folder:/data \
-  -e AMBERDAV_PERMISSION=read-only \
+  -e AMBERDAV_PERMISSION=read_only \
   -e AMBERDAV_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...' \
   ghcr.io/kylejameswalker/amberdav:latest
 ```
