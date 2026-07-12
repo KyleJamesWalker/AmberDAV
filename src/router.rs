@@ -1692,5 +1692,19 @@ mod tests {
             .unwrap();
         let resp = send(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+
+        // 5. WebDAV access under None permission without proxy auth: should be rejected
+        std::fs::write(root.0.join("a.txt"), b"abc").unwrap();
+        let resp = send(&app, dav("GET", "/dav/a.txt", Some(PASSWORD), "")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 6. API list access under None permission: should be rejected
+        let req = Request::builder()
+            .uri("/api/list")
+            .header(header::COOKIE, format!("sid={SESSION}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

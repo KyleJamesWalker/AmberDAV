@@ -163,6 +163,9 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
     }
 
     if !authed_by_proxy {
+        if permission == crate::config::Permission::None {
+            return (StatusCode::FORBIDDEN, "access denied\n").into_response();
+        }
         if let Some(wait) = state.throttle.retry_after(ip, now) {
             return throttle::too_many_attempts(wait);
         }

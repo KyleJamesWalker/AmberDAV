@@ -115,9 +115,11 @@ impl FromRequestParts<AppState> for Session {
         }
 
         if is_authed(&parts.headers, &state.session) {
-            Ok(Session {
-                permission: state.permission(),
-            })
+            let permission = state.permission();
+            if permission == crate::config::Permission::None {
+                return Err((StatusCode::FORBIDDEN, "access denied").into_response());
+            }
+            Ok(Session { permission })
         } else {
             Err((StatusCode::UNAUTHORIZED, "authentication required").into_response())
         }
