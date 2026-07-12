@@ -1416,6 +1416,7 @@ mod tests {
                 group_permissions: [("admins".to_string(), Permission::ReadOnly)]
                     .into_iter()
                     .collect(),
+                logout_url: None,
             },
             ..Settings::default()
         };
@@ -1448,6 +1449,7 @@ mod tests {
                 group_permissions: [("admins".to_string(), Permission::ReadOnly)]
                     .into_iter()
                     .collect(),
+                logout_url: None,
             },
             ..Settings::default()
         };
@@ -1493,6 +1495,7 @@ mod tests {
                 group_permissions: [("admins".to_string(), Permission::ReadOnly)]
                     .into_iter()
                     .collect(),
+                logout_url: None,
             },
             ..Settings::default()
         };
@@ -1521,5 +1524,34 @@ mod tests {
         let resp = send(&app, req).await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(resp.headers()[header::LOCATION], "/?path=Roms");
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_logout_redirects_to_custom_url() {
+        let root = TmpRoot::new("proxy-logout");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: std::collections::BTreeMap::new(),
+                logout_url: Some(
+                    "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
+                        .to_string(),
+                ),
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // Accessing /logout redirects to the configured custom logout_url
+        let resp = send(&app, get("/logout")).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            resp.headers()[header::LOCATION],
+            "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
+        );
     }
 }
