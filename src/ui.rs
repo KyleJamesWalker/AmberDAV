@@ -259,9 +259,13 @@ pub async fn public_name(State(state): State<AppState>) -> Response {
 /// only needs fixed-vs-random — so a fixed password is replaced with a masked
 /// placeholder (still truthy for the UI) and a random one stays `null`
 /// (issue #27 / review §2.21).
-pub async fn get_settings(_: Session, State(state): State<AppState>) -> Response {
+pub async fn get_settings(session: Session, State(state): State<AppState>) -> Response {
     let mut value = serde_json::to_value(&*state.settings).expect("settings serialize");
     if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "permission".to_string(),
+            serde_json::to_value(session.permission).unwrap(),
+        );
         let fixed = state
             .settings
             .password
