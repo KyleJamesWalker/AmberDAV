@@ -57,6 +57,60 @@ pub(crate) fn determine_proxy_permission(
     res
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProxyAuthOutcome {
+    None,
+    Success(crate::config::Permission),
+    UntrustedProxy(std::net::IpAddr),
+}
+
+pub(crate) fn resolve_proxy_permission(
+    headers: &HeaderMap,
+    ip: &std::net::IpAddr,
+    settings: &crate::config::Settings,
+) -> ProxyAuthOutcome {
+    if !settings.proxy_auth.enabled {
+        return ProxyAuthOutcome::None;
+    }
+
+    let Some(user_hdr) = headers.get(&settings.proxy_auth.user_header) else {
+        return ProxyAuthOutcome::None;
+    };
+
+    let Ok(user) = user_hdr.to_str() else {
+        return ProxyAuthOutcome::None;
+    };
+
+    if user.is_empty() {
+        return ProxyAuthOutcome::None;
+    }
+
+    let ip_str = ip.to_string();
+    let is_trusted = settings.proxy_auth.trusted_proxies.is_empty()
+        || settings
+            .proxy_auth
+            .trusted_proxies
+            .iter()
+            .any(|p| p == &ip_str);
+
+    if !is_trusted {
+        return ProxyAuthOutcome::UntrustedProxy(*ip);
+    }
+
+    let groups = headers
+        .get(&settings.proxy_auth.groups_header)
+        .and_then(|g| g.to_str().ok())
+        .unwrap_or("");
+
+    let permission = determine_proxy_permission(
+        groups,
+        &settings.proxy_auth.group_permissions,
+        settings.proxy_auth.default_permission,
+    );
+
+    ProxyAuthOutcome::Success(permission)
+}
+
 fn permission_value(p: crate::config::Permission) -> u32 {
     match p {
         crate::config::Permission::None => 0,
@@ -77,41 +131,16 @@ impl FromRequestParts<AppState> for Session {
                 .map(|ci| ci.0),
         );
 
-        if state.settings.proxy_auth.enabled {
-            if let Some(user_hdr) = parts.headers.get(&state.settings.proxy_auth.user_header) {
-                let ip_str = ip.to_string();
-                let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
-                    || state
-                        .settings
-                        .proxy_auth
-                        .trusted_proxies
-                        .iter()
-                        .any(|p| p == &ip_str);
-
-                if !is_trusted {
-                    tracing::warn!("Rejecting proxy auth from untrusted IP: {ip_str}");
-                    return Err((StatusCode::UNAUTHORIZED, "untrusted proxy IP").into_response());
-                }
-
-                if let Ok(user) = user_hdr.to_str() {
-                    if !user.is_empty() {
-                        let groups = parts
-                            .headers
-                            .get(&state.settings.proxy_auth.groups_header)
-                            .and_then(|g| g.to_str().ok())
-                            .unwrap_or("");
-                        let permission = determine_proxy_permission(
-                            groups,
-                            &state.settings.proxy_auth.group_permissions,
-                            state.settings.proxy_auth.default_permission,
-                        );
-                        if permission == crate::config::Permission::None {
-                            return Err((StatusCode::FORBIDDEN, "access denied").into_response());
-                        }
-                        return Ok(Session { permission });
-                    }
-                }
+        match resolve_proxy_permission(&parts.headers, &ip, &state.settings) {
+            ProxyAuthOutcome::Success(crate::config::Permission::None) => {
+                return Err((StatusCode::FORBIDDEN, "access denied").into_response());
             }
+            ProxyAuthOutcome::Success(permission) => return Ok(Session { permission }),
+            ProxyAuthOutcome::UntrustedProxy(ip) => {
+                tracing::warn!("Rejecting proxy auth from untrusted IP: {ip}");
+                return Err((StatusCode::UNAUTHORIZED, "untrusted proxy IP").into_response());
+            }
+            ProxyAuthOutcome::None => {}
         }
 
         if is_authed(&parts.headers, &state.session) {
@@ -354,6 +383,82 @@ mod tests {
         assert_eq!(
             super::determine_proxy_permission("unknown", &map, Permission::ReadOnly),
             Permission::ReadOnly
+        );
+    }
+
+    #[test]
+    fn test_resolve_proxy_permission() {
+        use crate::config::{Permission, ProxyAuthSettings, Settings};
+        use std::net::IpAddr;
+
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+
+        // 1. Proxy auth disabled
+        let settings_disabled = Settings {
+            proxy_auth: ProxyAuthSettings {
+                enabled: false,
+                ..ProxyAuthSettings::default()
+            },
+            ..Settings::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Remote-User", "bob".parse().unwrap());
+        assert_eq!(
+            super::resolve_proxy_permission(&headers, &ip, &settings_disabled),
+            super::ProxyAuthOutcome::None
+        );
+
+        // 2. Proxy auth enabled, missing user header
+        let settings_enabled = Settings {
+            proxy_auth: ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec!["192.168.1.50".to_string()],
+                group_permissions: [("admins".to_string(), Permission::ReadWriteDelete)]
+                    .into_iter()
+                    .collect(),
+                default_permission: Permission::ReadOnly,
+                ..ProxyAuthSettings::default()
+            },
+            ..Settings::default()
+        };
+        let headers_no_user = HeaderMap::new();
+        assert_eq!(
+            super::resolve_proxy_permission(&headers_no_user, &ip, &settings_enabled),
+            super::ProxyAuthOutcome::None
+        );
+
+        // 3. Proxy auth enabled, user header empty
+        let mut headers_empty_user = HeaderMap::new();
+        headers_empty_user.insert("Remote-User", "".parse().unwrap());
+        assert_eq!(
+            super::resolve_proxy_permission(&headers_empty_user, &ip, &settings_enabled),
+            super::ProxyAuthOutcome::None
+        );
+
+        // 4. Proxy auth enabled, untrusted proxy IP
+        let untrusted_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut headers_valid = HeaderMap::new();
+        headers_valid.insert("Remote-User", "bob".parse().unwrap());
+        assert_eq!(
+            super::resolve_proxy_permission(&headers_valid, &untrusted_ip, &settings_enabled),
+            super::ProxyAuthOutcome::UntrustedProxy(untrusted_ip)
+        );
+
+        // 5. Proxy auth enabled, trusted IP, default permission (no groups)
+        assert_eq!(
+            super::resolve_proxy_permission(&headers_valid, &ip, &settings_enabled),
+            super::ProxyAuthOutcome::Success(Permission::ReadOnly)
+        );
+
+        // 6. Proxy auth enabled, trusted IP, group mapped permission
+        let mut headers_groups = HeaderMap::new();
+        headers_groups.insert("Remote-User", "bob".parse().unwrap());
+        headers_groups.insert("Remote-Groups", "admins".parse().unwrap());
+        assert_eq!(
+            super::resolve_proxy_permission(&headers_groups, &ip, &settings_enabled),
+            super::ProxyAuthOutcome::Success(Permission::ReadWriteDelete)
         );
     }
 }

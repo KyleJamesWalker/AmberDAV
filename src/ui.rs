@@ -134,39 +134,18 @@ pub async fn index(
     let mut authed = crate::auth::is_authed(&headers, &state.session);
     let mut is_denied = false;
 
-    if !authed && state.settings.proxy_auth.enabled {
-        if let Some(user_hdr) = headers.get(&state.settings.proxy_auth.user_header) {
-            let ip_str = ip.to_string();
-            let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
-                || state
-                    .settings
-                    .proxy_auth
-                    .trusted_proxies
-                    .iter()
-                    .any(|p| p == &ip_str);
-
-            if is_trusted {
-                if let Ok(user) = user_hdr.to_str() {
-                    if !user.is_empty() {
-                        let groups = headers
-                            .get(&state.settings.proxy_auth.groups_header)
-                            .and_then(|g| g.to_str().ok())
-                            .unwrap_or("");
-                        let permission = crate::auth::determine_proxy_permission(
-                            groups,
-                            &state.settings.proxy_auth.group_permissions,
-                            state.settings.proxy_auth.default_permission,
-                        );
-                        if permission == crate::config::Permission::None {
-                            is_denied = true;
-                        } else {
-                            authed = true;
-                        }
-                    }
-                }
-            } else {
-                tracing::warn!("Rejecting proxy auth index access from untrusted IP: {ip_str}");
+    if !authed {
+        match crate::auth::resolve_proxy_permission(&headers, &ip, &state.settings) {
+            crate::auth::ProxyAuthOutcome::Success(crate::config::Permission::None) => {
+                is_denied = true;
             }
+            crate::auth::ProxyAuthOutcome::Success(_) => {
+                authed = true;
+            }
+            crate::auth::ProxyAuthOutcome::UntrustedProxy(ip) => {
+                tracing::warn!("Rejecting proxy auth index access from untrusted IP: {ip}");
+            }
+            crate::auth::ProxyAuthOutcome::None => {}
         }
     }
 
@@ -203,37 +182,16 @@ pub async fn login_page(
     let mut authed = crate::auth::is_authed(&headers, &state.session);
     let mut is_denied = false;
 
-    if !authed && state.settings.proxy_auth.enabled {
-        if let Some(user_hdr) = headers.get(&state.settings.proxy_auth.user_header) {
-            let ip_str = ip.to_string();
-            let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
-                || state
-                    .settings
-                    .proxy_auth
-                    .trusted_proxies
-                    .iter()
-                    .any(|p| p == &ip_str);
-
-            if is_trusted {
-                if let Ok(user) = user_hdr.to_str() {
-                    if !user.is_empty() {
-                        let groups = headers
-                            .get(&state.settings.proxy_auth.groups_header)
-                            .and_then(|g| g.to_str().ok())
-                            .unwrap_or("");
-                        let permission = crate::auth::determine_proxy_permission(
-                            groups,
-                            &state.settings.proxy_auth.group_permissions,
-                            state.settings.proxy_auth.default_permission,
-                        );
-                        if permission == crate::config::Permission::None {
-                            is_denied = true;
-                        } else {
-                            authed = true;
-                        }
-                    }
-                }
+    if !authed {
+        match crate::auth::resolve_proxy_permission(&headers, &ip, &state.settings) {
+            crate::auth::ProxyAuthOutcome::Success(crate::config::Permission::None) => {
+                is_denied = true;
             }
+            crate::auth::ProxyAuthOutcome::Success(_) => {
+                authed = true;
+            }
+            crate::auth::ProxyAuthOutcome::UntrustedProxy(_)
+            | crate::auth::ProxyAuthOutcome::None => {}
         }
     }
 
