@@ -1417,6 +1417,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 logout_url: None,
+                default_permission: Permission::ReadOnly,
             },
             ..Settings::default()
         };
@@ -1450,6 +1451,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 logout_url: None,
+                default_permission: Permission::ReadOnly,
             },
             ..Settings::default()
         };
@@ -1468,7 +1470,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["permission"], "read_only");
 
-        // 2. Query settings with user NOT in admins -> should fall back to read_write_delete
+        // 2. Query settings with user NOT in admins -> should fall back to default_permission (read_only)
         let req = Request::builder()
             .uri("/api/settings")
             .header("Remote-User", "someuser")
@@ -1479,7 +1481,36 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["permission"], "read_write_delete");
+        assert_eq!(v["permission"], "read_only");
+
+        // 3. Query settings with explicit custom default_permission (read_write)
+        let settings_custom = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::ReadWrite,
+            },
+            ..Settings::default()
+        };
+        let app_custom = app_with_settings(&root, settings_custom);
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "users")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app_custom, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["permission"], "read_write");
     }
 
     #[tokio::test]
@@ -1496,6 +1527,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 logout_url: None,
+                default_permission: Permission::ReadOnly,
             },
             ..Settings::default()
         };
@@ -1541,6 +1573,7 @@ mod tests {
                     "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
                         .to_string(),
                 ),
+                default_permission: Permission::ReadOnly,
             },
             ..Settings::default()
         };
