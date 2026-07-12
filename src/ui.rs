@@ -170,6 +170,10 @@ pub async fn index(
         }
     }
 
+    if !authed && state.settings.permission == crate::config::Permission::None {
+        is_denied = true;
+    }
+
     if is_denied {
         (
             axum::http::StatusCode::FORBIDDEN,
@@ -231,6 +235,10 @@ pub async fn login_page(
                 }
             }
         }
+    }
+
+    if !authed && state.settings.permission == crate::config::Permission::None {
+        is_denied = true;
     }
 
     if is_denied {

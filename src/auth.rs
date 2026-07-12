@@ -213,6 +213,9 @@ pub async fn login(
     Query(query): Query<LoginQuery>,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    if state.settings.permission == crate::config::Permission::None {
+        return (StatusCode::FORBIDDEN, "login disabled").into_response();
+    }
     let now = Instant::now();
     if let Some(wait) = state.throttle.retry_after(ip, now) {
         return throttle::too_many_attempts(wait);
