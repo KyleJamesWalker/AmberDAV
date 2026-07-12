@@ -24,7 +24,7 @@ jobs:
       - name: Delete PR Docker tags
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
-          package-name: ${{ env.PACKAGE_NAME }}
+          package: ${{ env.PACKAGE_NAME }}
           delete-tags: |
             pr-${{ github.event.pull_request.number }}
             sha-${{ github.event.pull_request.head.sha }}
