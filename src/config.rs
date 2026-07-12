@@ -87,6 +87,45 @@ pub struct BounceScreen {
     pub folders: Vec<String>,
 }
 
+fn default_user_header() -> String {
+    "Remote-User".to_string()
+}
+fn default_groups_header() -> String {
+    "Remote-Groups".to_string()
+}
+
+/// Proxy authentication settings (Proxy Auth) e.g. Authelia/Authentik/Keycloak.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyAuthSettings {
+    /// Trust headers for authentication and permissions.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Header containing the authenticated username.
+    #[serde(default = "default_user_header")]
+    pub user_header: String,
+    /// Header containing the authenticated user's groups.
+    #[serde(default = "default_groups_header")]
+    pub groups_header: String,
+    /// IPs/Subnets of trusted proxies. If empty, all proxies are trusted.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// Map of group names to permission levels.
+    #[serde(default)]
+    pub group_permissions: BTreeMap<String, Permission>,
+}
+
+impl Default for ProxyAuthSettings {
+    fn default() -> Self {
+        ProxyAuthSettings {
+            enabled: false,
+            user_header: default_user_header(),
+            groups_header: default_groups_header(),
+            trusted_proxies: Vec::new(),
+            group_permissions: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     /// Human-readable device name shown in the browser tab title.
@@ -127,6 +166,9 @@ pub struct Settings {
     /// Allowed file operations.
     #[serde(default = "default_permission")]
     pub permission: Permission,
+    /// Proxy authentication settings (Proxy Auth) e.g. Authelia/Authentik/Keycloak.
+    #[serde(default)]
+    pub proxy_auth: ProxyAuthSettings,
     /// Burn-in "DVD bounce" screensaver configuration.
     #[serde(default)]
     pub bounce_screen: BounceScreen,
@@ -161,6 +203,7 @@ impl Default for Settings {
             default_folder: String::new(),
             favorites: Vec::new(),
             permission: Permission::ReadWrite,
+            proxy_auth: ProxyAuthSettings::default(),
             bounce_screen: BounceScreen::default(),
             connection_file: None,
             exit_keys: default_exit_keys(),
@@ -360,6 +403,20 @@ fn to_jsonc_pretty(s: &Settings) -> String {
   // external launchers and Decky. null = not written.
   "connection_file": {connection_file},
 
+  // Proxy authentication settings (e.g. for Authelia or Authentik behind a reverse proxy).
+  // enabled: true to trust headers for authentication and permission routing.
+  // user_header: header holding authenticated username (default: "Remote-User").
+  // groups_header: header holding comma-separated groups (default: "Remote-Groups").
+  // trusted_proxies: list of proxy IP addresses whose headers can be trusted (empty = trust any IP).
+  // group_permissions: maps group names to their respective permissions.
+  "proxy_auth": {{
+    "enabled": {proxy_auth_enabled},
+    "user_header": {proxy_auth_user_header},
+    "groups_header": {proxy_auth_groups_header},
+    "trusted_proxies": {proxy_auth_trusted_proxies},
+    "group_permissions": {proxy_auth_group_permissions}
+  }},
+
   // evdev key codes for the on-device controls; any listed code triggers.
   // exit_keys quit the app (354 = Anbernic menu button, 315 = Steam Deck Menu),
   // blank_keys blank the screen (304 = A), bounce_keys toggle the screensaver
@@ -380,6 +437,11 @@ fn to_jsonc_pretty(s: &Settings) -> String {
         bounce_enabled = json(&s.bounce_screen.enabled),
         bounce_folders = json(&s.bounce_screen.folders),
         connection_file = json(&s.connection_file),
+        proxy_auth_enabled = json(&s.proxy_auth.enabled),
+        proxy_auth_user_header = json(&s.proxy_auth.user_header),
+        proxy_auth_groups_header = json(&s.proxy_auth.groups_header),
+        proxy_auth_trusted_proxies = json(&s.proxy_auth.trusted_proxies),
+        proxy_auth_group_permissions = json(&s.proxy_auth.group_permissions),
         exit_keys = keys(&s.exit_keys),
         blank_keys = keys(&s.blank_keys),
         bounce_keys = keys(&s.bounce_keys),
@@ -497,6 +559,7 @@ mod tests {
                 },
             ],
             permission: Permission::ReadWriteDelete,
+            proxy_auth: ProxyAuthSettings::default(),
             bounce_screen: BounceScreen {
                 enabled: true,
                 folders: vec!["Roms/GBA/Imgs".to_string()],

@@ -25,14 +25,88 @@ const SESSION_COOKIE_MAX_AGE_SECS: u32 = 86_400;
 
 /// Extracted only when the request carries a valid session cookie; otherwise
 /// rejects with 401 (for `/api/*` fetch calls).
-pub struct Session;
+pub struct Session {
+    pub permission: crate::config::Permission,
+}
+
+pub(crate) fn determine_proxy_permission(
+    groups_header: &str,
+    group_map: &std::collections::BTreeMap<String, crate::config::Permission>,
+    default_perm: crate::config::Permission,
+) -> crate::config::Permission {
+    let mut highest = None;
+    for group in groups_header.split(',') {
+        let group = group.trim();
+        if let Some(&perm) = group_map.get(group) {
+            match (highest, perm) {
+                (None, p) => highest = Some(p),
+                (Some(h), p) => {
+                    if permission_value(p) > permission_value(h) {
+                        highest = Some(p);
+                    }
+                }
+            }
+        }
+    }
+    highest.unwrap_or(default_perm)
+}
+
+fn permission_value(p: crate::config::Permission) -> u32 {
+    match p {
+        crate::config::Permission::ReadOnly => 1,
+        crate::config::Permission::ReadWrite => 2,
+        crate::config::Permission::ReadWriteDelete => 3,
+    }
+}
 
 impl FromRequestParts<AppState> for Session {
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+        let ip = throttle::client_ip(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0),
+        );
+
+        if state.settings.proxy_auth.enabled {
+            if let Some(user_hdr) = parts.headers.get(&state.settings.proxy_auth.user_header) {
+                let ip_str = ip.to_string();
+                let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
+                    || state
+                        .settings
+                        .proxy_auth
+                        .trusted_proxies
+                        .iter()
+                        .any(|p| p == &ip_str);
+
+                if !is_trusted {
+                    return Err((StatusCode::UNAUTHORIZED, "untrusted proxy IP").into_response());
+                }
+
+                if let Ok(user) = user_hdr.to_str() {
+                    if !user.is_empty() {
+                        let groups = parts
+                            .headers
+                            .get(&state.settings.proxy_auth.groups_header)
+                            .and_then(|g| g.to_str().ok())
+                            .unwrap_or("");
+                        let permission = determine_proxy_permission(
+                            groups,
+                            &state.settings.proxy_auth.group_permissions,
+                            state.settings.permission,
+                        );
+                        return Ok(Session { permission });
+                    }
+                }
+            }
+        }
+
         if is_authed(&parts.headers, &state.session) {
-            Ok(Session)
+            Ok(Session {
+                permission: state.permission(),
+            })
         } else {
             Err((StatusCode::UNAUTHORIZED, "authentication required").into_response())
         }
@@ -233,5 +307,31 @@ mod tests {
         assert_eq!(cookie_value(None, "sid"), None);
         // Must not match a cookie whose name merely ends with the target.
         assert_eq!(cookie_value(Some("xsid=nope"), "sid"), None);
+    }
+
+    #[test]
+    fn test_determine_proxy_permission() {
+        use crate::config::Permission;
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("admins".to_string(), Permission::ReadWriteDelete);
+        map.insert("users".to_string(), Permission::ReadWrite);
+        map.insert("guests".to_string(), Permission::ReadOnly);
+
+        assert_eq!(
+            super::determine_proxy_permission("guests", &map, Permission::ReadOnly),
+            Permission::ReadOnly
+        );
+        assert_eq!(
+            super::determine_proxy_permission("guests, users", &map, Permission::ReadOnly),
+            Permission::ReadWrite
+        );
+        assert_eq!(
+            super::determine_proxy_permission("users, admins, guests", &map, Permission::ReadOnly),
+            Permission::ReadWriteDelete
+        );
+        assert_eq!(
+            super::determine_proxy_permission("unknown", &map, Permission::ReadOnly),
+            Permission::ReadOnly
+        );
     }
 }

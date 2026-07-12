@@ -177,8 +177,12 @@ pub struct MkdirBody {
     name: String,
 }
 
-pub async fn mkdir(_: Session, State(s): State<AppState>, Json(b): Json<MkdirBody>) -> Response {
-    if !s.permission().can_write() {
+pub async fn mkdir(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<MkdirBody>,
+) -> Response {
+    if !session.permission.can_write() {
         return forbidden();
     }
     if s.mounts.is_virtual_root(&b.path) {
@@ -205,8 +209,12 @@ pub struct PathsBody {
     paths: Vec<String>,
 }
 
-pub async fn delete(_: Session, State(s): State<AppState>, Json(b): Json<PathsBody>) -> Response {
-    if !s.permission().can_delete() {
+pub async fn delete(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<PathsBody>,
+) -> Response {
+    if !session.permission.can_delete() {
         return forbidden();
     }
     for p in &b.paths {
@@ -251,8 +259,12 @@ pub struct RenameBody {
     name: String,
 }
 
-pub async fn rename(_: Session, State(s): State<AppState>, Json(b): Json<RenameBody>) -> Response {
-    if !s.permission().can_write() {
+pub async fn rename(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<RenameBody>,
+) -> Response {
+    if !session.permission.can_write() {
         return forbidden();
     }
     if s.mounts.is_virtual_root(&b.path) {
@@ -432,8 +444,12 @@ async fn plan_transfer(
     Ok(jobs)
 }
 
-pub async fn move_(_: Session, State(s): State<AppState>, Json(b): Json<TransferBody>) -> Response {
-    if !s.permission().can_write() {
+pub async fn move_(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<TransferBody>,
+) -> Response {
+    if !session.permission.can_write() {
         return forbidden();
     }
     if s.mounts.is_virtual_root(&b.dest) {
@@ -503,8 +519,12 @@ fn cross_device(e: &std::io::Error) -> bool {
     }
 }
 
-pub async fn copy(_: Session, State(s): State<AppState>, Json(b): Json<TransferBody>) -> Response {
-    if !s.permission().can_write() {
+pub async fn copy(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<TransferBody>,
+) -> Response {
+    if !session.permission.can_write() {
         return forbidden();
     }
     if s.mounts.is_virtual_root(&b.dest) {
@@ -768,7 +788,7 @@ where
 }
 
 pub async fn upload(
-    _: Session,
+    session: Session,
     State(s): State<AppState>,
     Query(q): Query<UploadQuery>,
     body: Body,
@@ -776,7 +796,7 @@ pub async fn upload(
     if s.mounts.is_virtual_root(&q.path) {
         return forbidden();
     }
-    if !s.permission().can_write() {
+    if !session.permission.can_write() {
         return forbidden();
     }
     let Some(name) = safe_name(&q.name) else {
