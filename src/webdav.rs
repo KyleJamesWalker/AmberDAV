@@ -121,28 +121,60 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
             .map(|ci| ci.0),
     );
     let now = Instant::now();
-    if let Some(wait) = state.throttle.retry_after(ip, now) {
-        return throttle::too_many_attempts(wait);
+
+    let mut permission = state.settings.permission;
+    let mut authed_by_proxy = false;
+
+    if state.settings.proxy_auth.enabled {
+        if let Some(user_hdr) = req.headers().get(&state.settings.proxy_auth.user_header) {
+            let ip_str = ip.to_string();
+            let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
+                || state.settings.proxy_auth.trusted_proxies.iter().any(|p| p == &ip_str);
+            
+            if !is_trusted {
+                return (StatusCode::UNAUTHORIZED, "untrusted proxy IP\n").into_response();
+            }
+
+            if let Ok(user) = user_hdr.to_str() {
+                if !user.is_empty() {
+                    let groups = req.headers().get(&state.settings.proxy_auth.groups_header)
+                        .and_then(|g| g.to_str().ok())
+                        .unwrap_or("");
+                    permission = crate::auth::determine_proxy_permission(
+                        groups,
+                        &state.settings.proxy_auth.group_permissions,
+                        state.settings.permission,
+                    );
+                    authed_by_proxy = true;
+                }
+            }
+        }
     }
 
-    match check_auth(&req, &state.password) {
-        BasicAuth::Ok => state.throttle.record_success(ip),
-        outcome @ (BasicAuth::Missing | BasicAuth::Wrong) => {
-            if outcome == BasicAuth::Wrong {
-                state.throttle.record_failure(ip, now);
+    if !authed_by_proxy {
+        if let Some(wait) = state.throttle.retry_after(ip, now) {
+            return throttle::too_many_attempts(wait);
+        }
+
+        match check_auth(&req, &state.password) {
+            BasicAuth::Ok => state.throttle.record_success(ip),
+            outcome @ (BasicAuth::Missing | BasicAuth::Wrong) => {
+                if outcome == BasicAuth::Wrong {
+                    state.throttle.record_failure(ip, now);
+                }
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::WWW_AUTHENTICATE, r#"Basic realm="amber-dav""#)],
+                    "Authentication required\n",
+                )
+                    .into_response();
             }
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, r#"Basic realm="amber-dav""#)],
-                "Authentication required\n",
-            )
-                .into_response();
         }
     }
 
     // Enforce the permission level on WebDAV write/delete methods, matching the
     // JSON API (otherwise read-only could be bypassed via the mount).
-    if !method_allowed(req.method().as_str(), state.settings.permission) {
+    if !method_allowed(req.method().as_str(), permission) {
         return (StatusCode::FORBIDDEN, "operation not permitted\n").into_response();
     }
 
