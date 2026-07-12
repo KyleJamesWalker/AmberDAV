@@ -48,7 +48,9 @@ pub(crate) fn determine_proxy_permission(
             }
         }
     }
-    highest.unwrap_or(default_perm)
+    let res = highest.unwrap_or(default_perm);
+    tracing::debug!("Proxy auth group permission resolution: header={:?}, resolved={:?}", groups_header, res);
+    res
 }
 
 fn permission_value(p: crate::config::Permission) -> u32 {
