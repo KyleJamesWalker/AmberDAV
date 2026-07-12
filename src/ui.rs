@@ -81,10 +81,47 @@ fn cached_asset(
 /// The redirect carries the original location (the SPA's `?path=` folder) as
 /// `next` so a deep link or a post-restart refresh returns to the same folder
 /// after the password is re-entered, instead of dropping back to Home.
-pub async fn index(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
-    if crate::auth::is_authed(&headers, &state.session) {
+pub async fn index(
+    State(state): State<AppState>,
+    crate::throttle::ClientIp(ip): crate::throttle::ClientIp,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let mut authed = crate::auth::is_authed(&headers, &state.session);
+
+    if !authed && state.settings.proxy_auth.enabled {
+        if let Some(user_hdr) = headers.get(&state.settings.proxy_auth.user_header) {
+            let ip_str = ip.to_string();
+            let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
+                || state
+                    .settings
+                    .proxy_auth
+                    .trusted_proxies
+                    .iter()
+                    .any(|p| p == &ip_str);
+
+            if is_trusted {
+                if let Ok(user) = user_hdr.to_str() {
+                    if !user.is_empty() {
+                        authed = true;
+                    }
+                }
+            } else {
+                tracing::warn!("Rejecting proxy auth index access from untrusted IP: {ip_str}");
+            }
+        }
+    }
+
+    if authed {
         cached_asset(&headers, &APP_ETAG, "text/html; charset=utf-8", APP_HTML)
     } else {
+        if state.settings.proxy_auth.enabled {
+            let header_keys: Vec<String> = headers.keys().map(|k| k.to_string()).collect();
+            tracing::info!(
+                "Redirecting to login. Incoming headers present: {:?}",
+                header_keys
+            );
+        }
         Redirect::to(&crate::auth::login_redirect(&uri)).into_response()
     }
 }
