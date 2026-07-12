@@ -1570,8 +1570,7 @@ mod tests {
                 trusted_proxies: vec![],
                 group_permissions: std::collections::BTreeMap::new(),
                 logout_url: Some(
-                    "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
-                        .to_string(),
+                    "https://auth.example.com/logout?rd=https://amber.example.com".to_string(),
                 ),
                 default_permission: Permission::ReadOnly,
             },
@@ -1584,7 +1583,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             resp.headers()[header::LOCATION],
-            "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
+            "https://auth.example.com/logout?rd=https://amber.example.com"
         );
     }
 

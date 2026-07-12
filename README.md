@@ -353,7 +353,7 @@ amber-dav --root /mnt/media --password secret --permission read_only --save
       "blocked_users": "none"
     },
     // Optional redirect URL when logging out under proxy authentication.
-    "logout_url": "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com",
+    "logout_url": "https://auth.example.com/logout?rd=https://amber.example.com",
     // Fallback permission level for proxy auth users when no groups match (default: "read_only"). Can be set to "none" to deny access.
     "default_permission": "read_only"
   }

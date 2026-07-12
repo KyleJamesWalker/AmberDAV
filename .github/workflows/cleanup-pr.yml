@@ -1,0 +1,32 @@
+name: Cleanup PR Images
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cleanup:
+    name: Cleanup Docker tags for closed PR
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Downcase repository name for GHCR compat
+        run: |
+          echo "REPO_LOWER=${GITHUB_REPOSITORY,,}" >> ${GITHUB_ENV}
+
+      - name: Extract package name
+        run: |
+          REPO_NAME=$(echo "${{ env.REPO_LOWER }}" | cut -d'/' -f2)
+          echo "PACKAGE_NAME=${REPO_NAME}" >> ${GITHUB_ENV}
+
+      - name: Delete PR Docker tags
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          package-name: ${{ env.PACKAGE_NAME }}
+          delete-tags: |
+            pr-${{ github.event.pull_request.number }}
+            sha-${{ github.event.pull_request.head.sha }}
+          delete-untagged: true
+          token: ${{ secrets.GITHUB_TOKEN }}
