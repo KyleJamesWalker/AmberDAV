@@ -126,13 +126,46 @@ pub async fn index(
     }
 }
 
-pub async fn login_page(headers: HeaderMap) -> Response {
-    cached_asset(
-        &headers,
-        &LOGIN_ETAG,
-        "text/html; charset=utf-8",
-        LOGIN_HTML,
-    )
+pub async fn login_page(
+    State(state): State<AppState>,
+    crate::throttle::ClientIp(ip): crate::throttle::ClientIp,
+    axum::extract::Query(query): axum::extract::Query<crate::auth::LoginQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let mut authed = crate::auth::is_authed(&headers, &state.session);
+
+    if !authed && state.settings.proxy_auth.enabled {
+        if let Some(user_hdr) = headers.get(&state.settings.proxy_auth.user_header) {
+            let ip_str = ip.to_string();
+            let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
+                || state
+                    .settings
+                    .proxy_auth
+                    .trusted_proxies
+                    .iter()
+                    .any(|p| p == &ip_str);
+
+            if is_trusted {
+                if let Ok(user) = user_hdr.to_str() {
+                    if !user.is_empty() {
+                        authed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if authed {
+        let dest = crate::auth::safe_redirect(query.next.as_deref()).unwrap_or("/");
+        Redirect::to(dest).into_response()
+    } else {
+        cached_asset(
+            &headers,
+            &LOGIN_ETAG,
+            "text/html; charset=utf-8",
+            LOGIN_HTML,
+        )
+    }
 }
 
 /// The SPA's external stylesheet and script. Both are public — they hold no

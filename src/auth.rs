@@ -150,7 +150,7 @@ pub struct LoginForm {
 /// folder routing).
 #[derive(serde::Deserialize, Default)]
 pub struct LoginQuery {
-    next: Option<String>,
+    pub(crate) next: Option<String>,
 }
 
 /// Percent-encode `s` for use as a query-string value: everything but the
@@ -190,7 +190,7 @@ pub fn login_redirect(uri: &Uri) -> String {
 /// redirect: only same-origin, root-relative paths are accepted. Protocol-
 /// relative (`//evil.com`) and backslash-smuggled (`/\evil.com`) forms — which
 /// browsers treat as absolute — are rejected, as is anything not starting `/`.
-fn safe_redirect(next: Option<&str>) -> Option<&str> {
+pub(crate) fn safe_redirect(next: Option<&str>) -> Option<&str> {
     let n = next?;
     (n.starts_with('/') && !n.starts_with("//") && !n.starts_with("/\\")).then_some(n)
 }
