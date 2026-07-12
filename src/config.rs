@@ -112,6 +112,9 @@ pub struct ProxyAuthSettings {
     /// Map of group names to permission levels.
     #[serde(default)]
     pub group_permissions: BTreeMap<String, Permission>,
+    /// Optional redirect URL when logging out under proxy authentication.
+    #[serde(default)]
+    pub logout_url: Option<String>,
 }
 
 impl Default for ProxyAuthSettings {
@@ -122,6 +125,7 @@ impl Default for ProxyAuthSettings {
             groups_header: default_groups_header(),
             trusted_proxies: Vec::new(),
             group_permissions: BTreeMap::new(),
+            logout_url: None,
         }
     }
 }
@@ -409,12 +413,14 @@ fn to_jsonc_pretty(s: &Settings) -> String {
   // groups_header: header holding comma-separated groups (default: "Remote-Groups").
   // trusted_proxies: list of proxy IP addresses whose headers can be trusted (empty = trust any IP).
   // group_permissions: maps group names to their respective permissions.
+  // logout_url: optional URL to redirect to when logging out (e.g. Authelia logout portal).
   "proxy_auth": {{
     "enabled": {proxy_auth_enabled},
     "user_header": {proxy_auth_user_header},
     "groups_header": {proxy_auth_groups_header},
     "trusted_proxies": {proxy_auth_trusted_proxies},
-    "group_permissions": {proxy_auth_group_permissions}
+    "group_permissions": {proxy_auth_group_permissions},
+    "logout_url": {proxy_auth_logout_url}
   }},
 
   // evdev key codes for the on-device controls; any listed code triggers.
@@ -442,6 +448,7 @@ fn to_jsonc_pretty(s: &Settings) -> String {
         proxy_auth_groups_header = json(&s.proxy_auth.groups_header),
         proxy_auth_trusted_proxies = json(&s.proxy_auth.trusted_proxies),
         proxy_auth_group_permissions = json(&s.proxy_auth.group_permissions),
+        proxy_auth_logout_url = json(&s.proxy_auth.logout_url),
         exit_keys = keys(&s.exit_keys),
         blank_keys = keys(&s.blank_keys),
         bounce_keys = keys(&s.bounce_keys),
