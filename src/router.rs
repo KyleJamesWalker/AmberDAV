@@ -217,6 +217,10 @@ mod tests {
         super::router(state_for(&root.0, permission))
     }
 
+    fn app_with_settings(root: &TmpRoot, settings: Settings) -> Router {
+        super::router(state_with_settings(&root.0, settings))
+    }
+
     /// Multi-root `AppState` over two scratch mounts named `one` and `two`,
     /// wired exactly as `main()` does it (canonical roots, per-mount DAV
     /// handlers, synthesized virtual root).
@@ -1397,5 +1401,82 @@ mod tests {
             resp.headers()[header::LOCATION],
             "/login?next=%2F%3Fpath%3DRoms%252FGameBoy"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_index_access_bypasses_redirect() {
+        let root = TmpRoot::new("proxy-index");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Without proxy header: redirects to login.
+        let resp = send(&app, get("/")).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        // 2. With proxy header from trusted proxy (empty list means all trusted): logs in.
+        let req = Request::builder()
+            .uri("/")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_settings_returns_resolved_session_permission() {
+        let root = TmpRoot::new("proxy-settings");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Query settings with user belonging to admins -> should resolve to read_only
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "admins")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["permission"], "read_only");
+
+        // 2. Query settings with user NOT in admins -> should fall back to read_write_delete
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "users")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["permission"], "read_write_delete");
     }
 }
