@@ -19,6 +19,50 @@ use crate::{auth::Session, input::InputUpdate, state::AppState};
 
 const APP_HTML: &str = include_str!("web/app.html");
 const LOGIN_HTML: &str = include_str!("web/login.html");
+const DENIED_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Access Denied</title>
+  <style>
+    body {
+      background: #121214;
+      color: #e4e4e7;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .card {
+      background: #1a1a1e;
+      padding: 2.5rem;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      text-align: center;
+      max-width: 400px;
+    }
+    h1 {
+      color: #ef4444;
+      font-size: 1.8rem;
+      margin-top: 0;
+    }
+    p {
+      color: #a1a1aa;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Access Denied</h1>
+    <p>You do not have permission to access AmberDAV. Please contact your system administrator.</p>
+  </div>
+</body>
+</html>"#;
 // The SPA's CSS and JS live in their own files so each concern diffs on its
 // own and CI can lint app.js. Still embedded — no build step.
 const APP_CSS: &str = include_str!("web/app.css");
@@ -88,31 +132,34 @@ pub async fn index(
     headers: HeaderMap,
 ) -> Response {
     let mut authed = crate::auth::is_authed(&headers, &state.session);
+    let mut is_denied = false;
 
-    if !authed && state.settings.proxy_auth.enabled {
-        if let Some(user_hdr) = headers.get(&state.settings.proxy_auth.user_header) {
-            let ip_str = ip.to_string();
-            let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
-                || state
-                    .settings
-                    .proxy_auth
-                    .trusted_proxies
-                    .iter()
-                    .any(|p| p == &ip_str);
-
-            if is_trusted {
-                if let Ok(user) = user_hdr.to_str() {
-                    if !user.is_empty() {
-                        authed = true;
-                    }
-                }
-            } else {
-                tracing::warn!("Rejecting proxy auth index access from untrusted IP: {ip_str}");
+    if !authed {
+        match crate::auth::resolve_proxy_permission(&headers, &ip, &state.settings) {
+            crate::auth::ProxyAuthOutcome::Success(crate::config::Permission::None) => {
+                is_denied = true;
             }
+            crate::auth::ProxyAuthOutcome::Success(_) => {
+                authed = true;
+            }
+            crate::auth::ProxyAuthOutcome::UntrustedProxy(ip) => {
+                tracing::warn!("Rejecting proxy auth index access from untrusted IP: {ip}");
+            }
+            crate::auth::ProxyAuthOutcome::None => {}
         }
     }
 
-    if authed {
+    if !authed && state.settings.permission == crate::config::Permission::None {
+        is_denied = true;
+    }
+
+    if is_denied {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::response::Html(DENIED_HTML),
+        )
+            .into_response()
+    } else if authed {
         cached_asset(&headers, &APP_ETAG, "text/html; charset=utf-8", APP_HTML)
     } else {
         if state.settings.proxy_auth.enabled {
@@ -126,13 +173,49 @@ pub async fn index(
     }
 }
 
-pub async fn login_page(headers: HeaderMap) -> Response {
-    cached_asset(
-        &headers,
-        &LOGIN_ETAG,
-        "text/html; charset=utf-8",
-        LOGIN_HTML,
-    )
+pub async fn login_page(
+    State(state): State<AppState>,
+    crate::throttle::ClientIp(ip): crate::throttle::ClientIp,
+    axum::extract::Query(query): axum::extract::Query<crate::auth::LoginQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let mut authed = crate::auth::is_authed(&headers, &state.session);
+    let mut is_denied = false;
+
+    if !authed {
+        match crate::auth::resolve_proxy_permission(&headers, &ip, &state.settings) {
+            crate::auth::ProxyAuthOutcome::Success(crate::config::Permission::None) => {
+                is_denied = true;
+            }
+            crate::auth::ProxyAuthOutcome::Success(_) => {
+                authed = true;
+            }
+            crate::auth::ProxyAuthOutcome::UntrustedProxy(_)
+            | crate::auth::ProxyAuthOutcome::None => {}
+        }
+    }
+
+    if !authed && state.settings.permission == crate::config::Permission::None {
+        is_denied = true;
+    }
+
+    if is_denied {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::response::Html(DENIED_HTML),
+        )
+            .into_response()
+    } else if authed {
+        let dest = crate::auth::safe_redirect(query.next.as_deref()).unwrap_or("/");
+        Redirect::to(dest).into_response()
+    } else {
+        cached_asset(
+            &headers,
+            &LOGIN_ETAG,
+            "text/html; charset=utf-8",
+            LOGIN_HTML,
+        )
+    }
 }
 
 /// The SPA's external stylesheet and script. Both are public — they hold no
@@ -152,7 +235,7 @@ pub async fn app_js(headers: HeaderMap) -> Response {
 }
 
 /// Connection details for the Status tab (session-gated).
-pub async fn info(_: Session, State(state): State<AppState>) -> Response {
+pub async fn info(session: Session, State(state): State<AppState>) -> Response {
     let info = &state.info;
     let ip = crate::state::current_ip();
     let screen = state
@@ -188,6 +271,7 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         "dav": format!("http://{}:{}{}", ip, info.port, crate::webdav::MOUNT),
         "root": root_display,
         "screen": screen,
+        "permission": session.permission,
         // Free/total bytes of the filesystem holding the served root — null
         // when unreportable, and the UI hides the gauge (issue #43).
         "disk_free": disk.map(|(free, _)| free),
@@ -258,9 +342,13 @@ pub async fn public_name(State(state): State<AppState>) -> Response {
 /// only needs fixed-vs-random — so a fixed password is replaced with a masked
 /// placeholder (still truthy for the UI) and a random one stays `null`
 /// (issue #27 / review §2.21).
-pub async fn get_settings(_: Session, State(state): State<AppState>) -> Response {
+pub async fn get_settings(session: Session, State(state): State<AppState>) -> Response {
     let mut value = serde_json::to_value(&*state.settings).expect("settings serialize");
     if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "permission".to_string(),
+            serde_json::to_value(session.permission).unwrap(),
+        );
         let fixed = state
             .settings
             .password

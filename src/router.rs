@@ -217,6 +217,10 @@ mod tests {
         super::router(state_for(&root.0, permission))
     }
 
+    fn app_with_settings(root: &TmpRoot, settings: Settings) -> Router {
+        super::router(state_with_settings(&root.0, settings))
+    }
+
     /// Multi-root `AppState` over two scratch mounts named `one` and `two`,
     /// wired exactly as `main()` does it (canonical roots, per-mount DAV
     /// handlers, synthesized virtual root).
@@ -1397,5 +1401,310 @@ mod tests {
             resp.headers()[header::LOCATION],
             "/login?next=%2F%3Fpath%3DRoms%252FGameBoy"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_index_access_bypasses_redirect() {
+        let root = TmpRoot::new("proxy-index");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::ReadOnly,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Without proxy header: redirects to login.
+        let resp = send(&app, get("/")).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        // 2. With proxy header from trusted proxy (empty list means all trusted): logs in.
+        let req = Request::builder()
+            .uri("/")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_settings_returns_resolved_session_permission() {
+        let root = TmpRoot::new("proxy-settings");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::ReadOnly,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Query settings with user belonging to admins -> should resolve to read_only
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "admins")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["permission"], "read_only");
+
+        // 2. Query settings with user NOT in admins -> should fall back to default_permission (read_only)
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "users")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["permission"], "read_only");
+
+        // 3. Query settings with explicit custom default_permission (read_write)
+        let settings_custom = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::ReadWrite,
+            },
+            ..Settings::default()
+        };
+        let app_custom = app_with_settings(&root, settings_custom);
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "users")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app_custom, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["permission"], "read_write");
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_login_redirects_when_authenticated() {
+        let root = TmpRoot::new("proxy-login-redirect");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::ReadOnly,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Visit /login without headers: serves login page (200 OK)
+        let resp = send(&app, get("/login")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 2. Visit /login with valid proxy header: redirects to /
+        let req = Request::builder()
+            .uri("/login")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/");
+
+        // 3. Visit /login with valid proxy header + next: redirects to next
+        let req = Request::builder()
+            .uri("/login?next=%2F%3Fpath%3DRoms")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/?path=Roms");
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_logout_redirects_to_custom_url() {
+        let root = TmpRoot::new("proxy-logout");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: std::collections::BTreeMap::new(),
+                logout_url: Some(
+                    "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
+                        .to_string(),
+                ),
+                default_permission: Permission::ReadOnly,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // Accessing /logout redirects to the configured custom logout_url
+        let resp = send(&app, get("/logout")).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            resp.headers()[header::LOCATION],
+            "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_none_permission_denies_access() {
+        let root = TmpRoot::new("proxy-deny");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("blocked".to_string(), Permission::None)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::None,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Visit / with valid user but no groups -> resolves to default_permission (None) -> 403 Forbidden
+        let req = Request::builder()
+            .uri("/")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 2. Visit /login with user belonging to blocked group -> resolves to None -> 403 Forbidden
+        let req = Request::builder()
+            .uri("/login")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "blocked")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 3. Request API endpoint with None permission -> 403 Forbidden
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn top_level_none_permission_disables_login_page() {
+        let root = TmpRoot::new("top-level-none");
+        let settings = Settings {
+            permission: Permission::None,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::None,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Visiting / without headers: yields 403 Forbidden with Access Denied directly (no redirect)
+        let resp = send(&app, get("/")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 2. Visiting GET /login: yields 403 Forbidden with Access Denied
+        let resp = send(&app, get("/login")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 3. POST /login: yields 403 Forbidden
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("password=any"))
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 4. Visiting with valid headers: still works normally (resolves to ReadOnly)
+        let req = Request::builder()
+            .uri("/")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "admins")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 5. WebDAV access under None permission without proxy auth: should be rejected
+        std::fs::write(root.0.join("a.txt"), b"abc").unwrap();
+        let resp = send(&app, dav("GET", "/dav/a.txt", Some(PASSWORD), "")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 6. API list access under None permission: should be rejected
+        let req = Request::builder()
+            .uri("/api/list")
+            .header(header::COOKIE, format!("sid={SESSION}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

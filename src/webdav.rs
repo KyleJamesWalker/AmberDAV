@@ -125,41 +125,25 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
     let mut permission = state.settings.permission;
     let mut authed_by_proxy = false;
 
-    if state.settings.proxy_auth.enabled {
-        if let Some(user_hdr) = req.headers().get(&state.settings.proxy_auth.user_header) {
-            let ip_str = ip.to_string();
-            let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
-                || state
-                    .settings
-                    .proxy_auth
-                    .trusted_proxies
-                    .iter()
-                    .any(|p| p == &ip_str);
-
-            if !is_trusted {
-                tracing::warn!("Rejecting proxy auth from untrusted IP: {ip_str}");
-                return (StatusCode::UNAUTHORIZED, "untrusted proxy IP\n").into_response();
-            }
-
-            if let Ok(user) = user_hdr.to_str() {
-                if !user.is_empty() {
-                    let groups = req
-                        .headers()
-                        .get(&state.settings.proxy_auth.groups_header)
-                        .and_then(|g| g.to_str().ok())
-                        .unwrap_or("");
-                    permission = crate::auth::determine_proxy_permission(
-                        groups,
-                        &state.settings.proxy_auth.group_permissions,
-                        state.settings.permission,
-                    );
-                    authed_by_proxy = true;
-                }
-            }
+    match crate::auth::resolve_proxy_permission(req.headers(), &ip, &state.settings) {
+        crate::auth::ProxyAuthOutcome::Success(crate::config::Permission::None) => {
+            return (StatusCode::FORBIDDEN, "access denied\n").into_response();
         }
+        crate::auth::ProxyAuthOutcome::Success(perm) => {
+            permission = perm;
+            authed_by_proxy = true;
+        }
+        crate::auth::ProxyAuthOutcome::UntrustedProxy(ip) => {
+            tracing::warn!("Rejecting proxy auth from untrusted IP: {ip}");
+            return (StatusCode::UNAUTHORIZED, "untrusted proxy IP\n").into_response();
+        }
+        crate::auth::ProxyAuthOutcome::None => {}
     }
 
     if !authed_by_proxy {
+        if permission == crate::config::Permission::None {
+            return (StatusCode::FORBIDDEN, "access denied\n").into_response();
+        }
         if let Some(wait) = state.throttle.retry_after(ip, now) {
             return throttle::too_many_attempts(wait);
         }
