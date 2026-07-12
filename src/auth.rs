@@ -49,7 +49,11 @@ pub(crate) fn determine_proxy_permission(
         }
     }
     let res = highest.unwrap_or(default_perm);
-    tracing::debug!("Proxy auth group permission resolution: header={:?}, resolved={:?}", groups_header, res);
+    tracing::debug!(
+        "Proxy auth group permission resolution: header={:?}, resolved={:?}",
+        groups_header,
+        res
+    );
     res
 }
 
