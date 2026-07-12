@@ -352,7 +352,9 @@ amber-dav --root /mnt/media --password secret --permission read_only --save
       "guests": "read_only"
     },
     // Optional redirect URL when logging out under proxy authentication.
-    "logout_url": "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
+    "logout_url": "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com",
+    // Fallback permission level for proxy auth users when no groups match (default: "read_only").
+    "default_permission": "read_only"
   }
 }
 ```
