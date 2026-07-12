@@ -259,6 +259,7 @@ one place, the highest layer wins:
 | Default folder | `--default-folder <path>` | `AMBERDAV_DEFAULT_FOLDER` | `default_folder` |
 | Sidebar favorites | — | — | `favorites` |
 | Permission | `--permission <level>` | `AMBERDAV_PERMISSION` | `permission` |
+| Proxy Auth | — | — | `proxy_auth` |
 | Screensaver on | `--bounce-screen` / `--no-bounce-screen` | `AMBERDAV_BOUNCE_SCREEN` | `bounce_screen.enabled` |
 | Screensaver folders | `--bounce-folders <a,b,…>` | `AMBERDAV_BOUNCE_FOLDERS` | `bounce_screen.folders` |
 | Connection file | `--connection-file <path>` | `AMBERDAV_CONNECTION_FILE` | `connection_file` |
@@ -337,6 +338,19 @@ amber-dav --root /mnt/media --password secret --permission read_only --save
     // Files or folders to draw images from. Folders are scanned recursively.
     // Relative entries resolve against the served root; absolute paths work too.
     "folders": ["Roms/GBA/Imgs", "Roms/SNES/Imgs"]
+  },
+
+  // Proxy authentication settings (e.g. for Authelia or Authentik behind a reverse proxy).
+  "proxy_auth": {
+    "enabled": true,
+    "user_header": "Remote-User",
+    "groups_header": "Remote-Groups",
+    "trusted_proxies": ["127.0.0.1"],
+    "group_permissions": {
+      "admins": "read_write_delete",
+      "users": "read_write",
+      "guests": "read_only"
+    }
   }
 }
 ```
