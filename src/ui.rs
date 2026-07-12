@@ -152,7 +152,7 @@ pub async fn app_js(headers: HeaderMap) -> Response {
 }
 
 /// Connection details for the Status tab (session-gated).
-pub async fn info(_: Session, State(state): State<AppState>) -> Response {
+pub async fn info(session: Session, State(state): State<AppState>) -> Response {
     let info = &state.info;
     let ip = crate::state::current_ip();
     let screen = state
@@ -188,6 +188,7 @@ pub async fn info(_: Session, State(state): State<AppState>) -> Response {
         "dav": format!("http://{}:{}{}", ip, info.port, crate::webdav::MOUNT),
         "root": root_display,
         "screen": screen,
+        "permission": session.permission,
         // Free/total bytes of the filesystem holding the served root — null
         // when unreportable, and the UI hides the gauge (issue #43).
         "disk_free": disk.map(|(free, _)| free),
