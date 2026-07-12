@@ -329,7 +329,7 @@ amber-dav --root /mnt/media --password secret --permission read_only --save
     { "name": "Screenshots", "path": "Roms/Imgs" }
   ],
 
-  // Allowed operations: "read_only" | "read_write" | "read_write_delete".
+  // Allowed operations: "none" | "read_only" | "read_write" | "read_write_delete".
   "permission": "read_write_delete",
 
   // Burn-in screensaver (see Controls). Toggled on-device with the X button.
@@ -349,11 +349,12 @@ amber-dav --root /mnt/media --password secret --permission read_only --save
     "group_permissions": {
       "admins": "read_write_delete",
       "users": "read_write",
-      "guests": "read_only"
+      "guests": "read_only",
+      "blocked_users": "none"
     },
     // Optional redirect URL when logging out under proxy authentication.
     "logout_url": "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com",
-    // Fallback permission level for proxy auth users when no groups match (default: "read_only").
+    // Fallback permission level for proxy auth users when no groups match (default: "read_only"). Can be set to "none" to deny access.
     "default_permission": "read_only"
   }
 }
@@ -370,6 +371,7 @@ never silently ignored.
 
 | Level | Read / browse | Create / upload / rename / move | Delete |
 |-------|:---:|:---:|:---:|
+| `none` | ❌ | ❌ | ❌ |
 | `read_only` | ✅ | ❌ | ❌ |
 | `read_write` | ✅ | ✅ | ❌ |
 | `read_write_delete` | ✅ | ✅ | ✅ |
