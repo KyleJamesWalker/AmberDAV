@@ -137,6 +137,7 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
                     .any(|p| p == &ip_str);
 
             if !is_trusted {
+                tracing::warn!("Rejecting proxy auth from untrusted IP: {ip_str}");
                 return (StatusCode::UNAUTHORIZED, "untrusted proxy IP\n").into_response();
             }
 
