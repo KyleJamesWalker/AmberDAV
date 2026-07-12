@@ -1479,4 +1479,47 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["permission"], "read_write_delete");
     }
+
+    #[tokio::test]
+    async fn proxy_auth_login_redirects_when_authenticated() {
+        let root = TmpRoot::new("proxy-login-redirect");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Visit /login without headers: serves login page (200 OK)
+        let resp = send(&app, get("/login")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 2. Visit /login with valid proxy header: redirects to /
+        let req = Request::builder()
+            .uri("/login")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/");
+
+        // 3. Visit /login with valid proxy header + next: redirects to next
+        let req = Request::builder()
+            .uri("/login?next=%2F%3Fpath%3DRoms")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/?path=Roms");
+    }
 }
