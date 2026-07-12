@@ -19,6 +19,50 @@ use crate::{auth::Session, input::InputUpdate, state::AppState};
 
 const APP_HTML: &str = include_str!("web/app.html");
 const LOGIN_HTML: &str = include_str!("web/login.html");
+const DENIED_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Access Denied</title>
+  <style>
+    body {
+      background: #121214;
+      color: #e4e4e7;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .card {
+      background: #1a1a1e;
+      padding: 2.5rem;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      text-align: center;
+      max-width: 400px;
+    }
+    h1 {
+      color: #ef4444;
+      font-size: 1.8rem;
+      margin-top: 0;
+    }
+    p {
+      color: #a1a1aa;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Access Denied</h1>
+    <p>You do not have permission to access AmberDAV. Please contact your system administrator.</p>
+  </div>
+</body>
+</html>"#;
 // The SPA's CSS and JS live in their own files so each concern diffs on its
 // own and CI can lint app.js. Still embedded — no build step.
 const APP_CSS: &str = include_str!("web/app.css");
@@ -88,6 +132,7 @@ pub async fn index(
     headers: HeaderMap,
 ) -> Response {
     let mut authed = crate::auth::is_authed(&headers, &state.session);
+    let mut is_denied = false;
 
     if !authed && state.settings.proxy_auth.enabled {
         if let Some(user_hdr) = headers.get(&state.settings.proxy_auth.user_header) {
@@ -103,7 +148,20 @@ pub async fn index(
             if is_trusted {
                 if let Ok(user) = user_hdr.to_str() {
                     if !user.is_empty() {
-                        authed = true;
+                        let groups = headers
+                            .get(&state.settings.proxy_auth.groups_header)
+                            .and_then(|g| g.to_str().ok())
+                            .unwrap_or("");
+                        let permission = crate::auth::determine_proxy_permission(
+                            groups,
+                            &state.settings.proxy_auth.group_permissions,
+                            state.settings.proxy_auth.default_permission,
+                        );
+                        if permission == crate::config::Permission::None {
+                            is_denied = true;
+                        } else {
+                            authed = true;
+                        }
                     }
                 }
             } else {
@@ -112,7 +170,13 @@ pub async fn index(
         }
     }
 
-    if authed {
+    if is_denied {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::response::Html(DENIED_HTML),
+        )
+            .into_response()
+    } else if authed {
         cached_asset(&headers, &APP_ETAG, "text/html; charset=utf-8", APP_HTML)
     } else {
         if state.settings.proxy_auth.enabled {
@@ -133,6 +197,7 @@ pub async fn login_page(
     headers: HeaderMap,
 ) -> Response {
     let mut authed = crate::auth::is_authed(&headers, &state.session);
+    let mut is_denied = false;
 
     if !authed && state.settings.proxy_auth.enabled {
         if let Some(user_hdr) = headers.get(&state.settings.proxy_auth.user_header) {
@@ -148,14 +213,33 @@ pub async fn login_page(
             if is_trusted {
                 if let Ok(user) = user_hdr.to_str() {
                     if !user.is_empty() {
-                        authed = true;
+                        let groups = headers
+                            .get(&state.settings.proxy_auth.groups_header)
+                            .and_then(|g| g.to_str().ok())
+                            .unwrap_or("");
+                        let permission = crate::auth::determine_proxy_permission(
+                            groups,
+                            &state.settings.proxy_auth.group_permissions,
+                            state.settings.proxy_auth.default_permission,
+                        );
+                        if permission == crate::config::Permission::None {
+                            is_denied = true;
+                        } else {
+                            authed = true;
+                        }
                     }
                 }
             }
         }
     }
 
-    if authed {
+    if is_denied {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::response::Html(DENIED_HTML),
+        )
+            .into_response()
+    } else if authed {
         let dest = crate::auth::safe_redirect(query.next.as_deref()).unwrap_or("/");
         Redirect::to(dest).into_response()
     } else {

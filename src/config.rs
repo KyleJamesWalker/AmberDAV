@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 // The shared `Read` prefix reads naturally as an escalating capability ladder.
 #[allow(clippy::enum_variant_names)]
 pub enum Permission {
+    #[value(name = "none")]
+    None,
     #[value(name = "read_only")]
     ReadOnly,
     #[value(name = "read_write")]
@@ -31,7 +33,7 @@ pub enum Permission {
 impl Permission {
     /// Create/modify (mkdir, upload, rename, move, copy, WebDAV writes).
     pub fn can_write(self) -> bool {
-        self != Permission::ReadOnly
+        self != Permission::ReadOnly && self != Permission::None
     }
     /// Delete / remove.
     pub fn can_delete(self) -> bool {

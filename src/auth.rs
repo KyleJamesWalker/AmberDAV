@@ -59,6 +59,7 @@ pub(crate) fn determine_proxy_permission(
 
 fn permission_value(p: crate::config::Permission) -> u32 {
     match p {
+        crate::config::Permission::None => 0,
         crate::config::Permission::ReadOnly => 1,
         crate::config::Permission::ReadWrite => 2,
         crate::config::Permission::ReadWriteDelete => 3,
@@ -104,6 +105,9 @@ impl FromRequestParts<AppState> for Session {
                             &state.settings.proxy_auth.group_permissions,
                             state.settings.proxy_auth.default_permission,
                         );
+                        if permission == crate::config::Permission::None {
+                            return Err((StatusCode::FORBIDDEN, "access denied").into_response());
+                        }
                         return Ok(Session { permission });
                     }
                 }

@@ -153,6 +153,9 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
                         &state.settings.proxy_auth.group_permissions,
                         state.settings.proxy_auth.default_permission,
                     );
+                    if permission == crate::config::Permission::None {
+                        return (StatusCode::FORBIDDEN, "access denied\n").into_response();
+                    }
                     authed_by_proxy = true;
                 }
             }
