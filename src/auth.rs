@@ -82,6 +82,7 @@ impl FromRequestParts<AppState> for Session {
                         .any(|p| p == &ip_str);
 
                 if !is_trusted {
+                    tracing::warn!("Rejecting proxy auth from untrusted IP: {ip_str}");
                     return Err((StatusCode::UNAUTHORIZED, "untrusted proxy IP").into_response());
                 }
 
