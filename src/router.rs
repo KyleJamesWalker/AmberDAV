@@ -1587,4 +1587,57 @@ mod tests {
             "https://auth.home.pocketsquirrel.com/logout?rd=https://amber.home.pocketsquirrel.com"
         );
     }
+
+    #[tokio::test]
+    async fn proxy_auth_none_permission_denies_access() {
+        let root = TmpRoot::new("proxy-deny");
+        let settings = Settings {
+            permission: Permission::ReadWriteDelete,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("blocked".to_string(), Permission::None)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::None,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Visit / with valid user but no groups -> resolves to default_permission (None) -> 403 Forbidden
+        let req = Request::builder()
+            .uri("/")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 2. Visit /login with user belonging to blocked group -> resolves to None -> 403 Forbidden
+        let req = Request::builder()
+            .uri("/login")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "blocked")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 3. Request API endpoint with None permission -> 403 Forbidden
+        let req = Request::builder()
+            .uri("/api/settings")
+            .header("Remote-User", "someuser")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
 }
