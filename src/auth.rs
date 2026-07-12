@@ -238,9 +238,15 @@ pub async fn login(
 }
 
 /// Clear the session cookie.
-pub async fn logout() -> Response {
+pub async fn logout(State(state): State<AppState>) -> Response {
     let cookie = format!("{COOKIE}=; Path=/; HttpOnly; Max-Age=0");
-    ([(header::SET_COOKIE, cookie)], Redirect::to("/login")).into_response()
+    let dest = state
+        .settings
+        .proxy_auth
+        .logout_url
+        .as_deref()
+        .unwrap_or("/login");
+    ([(header::SET_COOKIE, cookie)], Redirect::to(dest)).into_response()
 }
 
 #[cfg(test)]
