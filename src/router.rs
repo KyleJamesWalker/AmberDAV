@@ -1640,4 +1640,57 @@ mod tests {
         let resp = send(&app, req).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
+
+    #[tokio::test]
+    async fn top_level_none_permission_disables_login_page() {
+        let root = TmpRoot::new("top-level-none");
+        let settings = Settings {
+            permission: Permission::None,
+            proxy_auth: crate::config::ProxyAuthSettings {
+                enabled: true,
+                user_header: "Remote-User".to_string(),
+                groups_header: "Remote-Groups".to_string(),
+                trusted_proxies: vec![],
+                group_permissions: [("admins".to_string(), Permission::ReadOnly)]
+                    .into_iter()
+                    .collect(),
+                logout_url: None,
+                default_permission: Permission::None,
+            },
+            ..Settings::default()
+        };
+        let app = app_with_settings(&root, settings);
+
+        // 1. Visiting / without headers: yields 403 Forbidden with Access Denied directly (no redirect)
+        let resp = send(&app, get("/")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 2. Visiting GET /login: yields 403 Forbidden with Access Denied
+        let resp = send(&app, get("/login")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_string(resp).await;
+        assert!(body.contains("Access Denied"));
+
+        // 3. POST /login: yields 403 Forbidden
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("password=any"))
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 4. Visiting with valid headers: still works normally (resolves to ReadOnly)
+        let req = Request::builder()
+            .uri("/")
+            .header("Remote-User", "someuser")
+            .header("Remote-Groups", "admins")
+            .body(Body::empty())
+            .unwrap();
+        let resp = send(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }
