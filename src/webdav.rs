@@ -151,7 +151,7 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
                     permission = crate::auth::determine_proxy_permission(
                         groups,
                         &state.settings.proxy_auth.group_permissions,
-                        state.settings.permission,
+                        state.settings.proxy_auth.default_permission,
                     );
                     authed_by_proxy = true;
                 }

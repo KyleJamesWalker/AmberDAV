@@ -102,7 +102,7 @@ impl FromRequestParts<AppState> for Session {
                         let permission = determine_proxy_permission(
                             groups,
                             &state.settings.proxy_auth.group_permissions,
-                            state.settings.permission,
+                            state.settings.proxy_auth.default_permission,
                         );
                         return Ok(Session { permission });
                     }
