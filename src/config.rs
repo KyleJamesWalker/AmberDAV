@@ -94,6 +94,10 @@ fn default_groups_header() -> String {
     "Remote-Groups".to_string()
 }
 
+fn default_proxy_permission() -> Permission {
+    Permission::ReadOnly
+}
+
 /// Proxy authentication settings (Proxy Auth) e.g. Authelia/Authentik/Keycloak.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyAuthSettings {
@@ -115,6 +119,9 @@ pub struct ProxyAuthSettings {
     /// Optional redirect URL when logging out under proxy authentication.
     #[serde(default)]
     pub logout_url: Option<String>,
+    /// Default permission level for proxy auth users when no groups match.
+    #[serde(default = "default_proxy_permission")]
+    pub default_permission: Permission,
 }
 
 impl Default for ProxyAuthSettings {
@@ -126,6 +133,7 @@ impl Default for ProxyAuthSettings {
             trusted_proxies: Vec::new(),
             group_permissions: BTreeMap::new(),
             logout_url: None,
+            default_permission: default_proxy_permission(),
         }
     }
 }
@@ -414,13 +422,15 @@ fn to_jsonc_pretty(s: &Settings) -> String {
   // trusted_proxies: list of proxy IP addresses whose headers can be trusted (empty = trust any IP).
   // group_permissions: maps group names to their respective permissions.
   // logout_url: optional URL to redirect to when logging out (e.g. Authelia logout portal).
+  // default_permission: default permission for proxy users if no groups match (default: "read_only").
   "proxy_auth": {{
     "enabled": {proxy_auth_enabled},
     "user_header": {proxy_auth_user_header},
     "groups_header": {proxy_auth_groups_header},
     "trusted_proxies": {proxy_auth_trusted_proxies},
     "group_permissions": {proxy_auth_group_permissions},
-    "logout_url": {proxy_auth_logout_url}
+    "logout_url": {proxy_auth_logout_url},
+    "default_permission": {proxy_auth_default_permission}
   }},
 
   // evdev key codes for the on-device controls; any listed code triggers.
@@ -449,6 +459,7 @@ fn to_jsonc_pretty(s: &Settings) -> String {
         proxy_auth_trusted_proxies = json(&s.proxy_auth.trusted_proxies),
         proxy_auth_group_permissions = json(&s.proxy_auth.group_permissions),
         proxy_auth_logout_url = json(&s.proxy_auth.logout_url),
+        proxy_auth_default_permission = json(&s.proxy_auth.default_permission),
         exit_keys = keys(&s.exit_keys),
         blank_keys = keys(&s.blank_keys),
         bounce_keys = keys(&s.bounce_keys),
