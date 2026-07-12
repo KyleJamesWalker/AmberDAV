@@ -129,15 +129,22 @@ pub async fn route(State(state): State<DavState>, req: Request) -> Response {
         if let Some(user_hdr) = req.headers().get(&state.settings.proxy_auth.user_header) {
             let ip_str = ip.to_string();
             let is_trusted = state.settings.proxy_auth.trusted_proxies.is_empty()
-                || state.settings.proxy_auth.trusted_proxies.iter().any(|p| p == &ip_str);
-            
+                || state
+                    .settings
+                    .proxy_auth
+                    .trusted_proxies
+                    .iter()
+                    .any(|p| p == &ip_str);
+
             if !is_trusted {
                 return (StatusCode::UNAUTHORIZED, "untrusted proxy IP\n").into_response();
             }
 
             if let Ok(user) = user_hdr.to_str() {
                 if !user.is_empty() {
-                    let groups = req.headers().get(&state.settings.proxy_auth.groups_header)
+                    let groups = req
+                        .headers()
+                        .get(&state.settings.proxy_auth.groups_header)
                         .and_then(|g| g.to_str().ok())
                         .unwrap_or("");
                     permission = crate::auth::determine_proxy_permission(

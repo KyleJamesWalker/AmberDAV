@@ -177,7 +177,11 @@ pub struct MkdirBody {
     name: String,
 }
 
-pub async fn mkdir(session: Session, State(s): State<AppState>, Json(b): Json<MkdirBody>) -> Response {
+pub async fn mkdir(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<MkdirBody>,
+) -> Response {
     if !session.permission.can_write() {
         return forbidden();
     }
@@ -205,7 +209,11 @@ pub struct PathsBody {
     paths: Vec<String>,
 }
 
-pub async fn delete(session: Session, State(s): State<AppState>, Json(b): Json<PathsBody>) -> Response {
+pub async fn delete(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<PathsBody>,
+) -> Response {
     if !session.permission.can_delete() {
         return forbidden();
     }
@@ -251,7 +259,11 @@ pub struct RenameBody {
     name: String,
 }
 
-pub async fn rename(session: Session, State(s): State<AppState>, Json(b): Json<RenameBody>) -> Response {
+pub async fn rename(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<RenameBody>,
+) -> Response {
     if !session.permission.can_write() {
         return forbidden();
     }
@@ -432,7 +444,11 @@ async fn plan_transfer(
     Ok(jobs)
 }
 
-pub async fn move_(session: Session, State(s): State<AppState>, Json(b): Json<TransferBody>) -> Response {
+pub async fn move_(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<TransferBody>,
+) -> Response {
     if !session.permission.can_write() {
         return forbidden();
     }
@@ -503,7 +519,11 @@ fn cross_device(e: &std::io::Error) -> bool {
     }
 }
 
-pub async fn copy(session: Session, State(s): State<AppState>, Json(b): Json<TransferBody>) -> Response {
+pub async fn copy(
+    session: Session,
+    State(s): State<AppState>,
+    Json(b): Json<TransferBody>,
+) -> Response {
     if !session.permission.can_write() {
         return forbidden();
     }
