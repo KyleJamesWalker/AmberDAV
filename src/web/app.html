@@ -12,8 +12,9 @@
   The :root palette in app.css is hand-mirrored in src/canvas.rs (the on-device
   connection screen): change one, change both.
 
-  Script TOC in app.js (search for "// ----"): file type helpers · icons · helpers ·
-  visible set (hidden filter) + sorting · rendering · navigation / selection ·
+  Script TOC in app.js (search for "// ----"): item identity · file type helpers ·
+  icons · helpers · visible set (hidden filter) + sorting ·
+  recursive search (Enter in the filter box) · rendering · navigation / selection ·
   actions · preview modal (navigable gallery) · text editor · uploads (XHR;
   folders via webkitdirectory picker + webkitGetAsEntry drop traversal) ·
   context menu · touch (select mode + long-press menu) ·
@@ -70,7 +71,7 @@
         <button class="tbtn" id="t-refresh">↻</button>
         <span class="spacer"></span>
         <input class="tfilter" id="t-filter" type="search" placeholder="Filter ( / )"
-               title="Filter this folder by name — press / to focus, Esc to clear"
+               title="Filter this folder by name — press / to focus, Enter to search subfolders too (*.srm globs), Esc to clear"
                autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
         <span class="tcount" id="t-count"></span>
         <button class="tbtn" id="t-select" title="Select mode: tap rows to toggle them (multi-select without Ctrl/Shift)">☑ Select</button>
@@ -79,6 +80,12 @@
           <button id="v-list" class="on" title="List view">≣</button>
           <button id="v-grid" title="Grid view">▦</button>
         </span>
+      </div>
+      <!-- Recursive-search results banner: what was searched, where, and how
+           complete the answer is. Hidden while a plain folder is listed. -->
+      <div class="sbar" id="sbar" style="display:none;">
+        <span class="sb-text" id="sb-text"></span>
+        <button class="tbtn" id="sb-clear" title="Back to the folder listing (Esc)">✕ Clear</button>
       </div>
       <div class="listwrap" id="listwrap"></div>
       <div class="drop" id="drop"><div>⬇ Drop to upload here</div></div>
