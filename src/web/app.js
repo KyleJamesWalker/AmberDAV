@@ -3,13 +3,13 @@ let entries = [];                 // raw listing from the API
 let view = [];                    // entries actually shown (hidden filtered + sorted)
 let showHidden = false;           // include dotfiles (e.g. macOS "._" sidecars)
 let filterText = '';              // toolbar filter (client-side name match)
-let selection = new Set();        // selected names in cwd
+let selection = new Set();        // selected item paths (rel from Home)
 let selectMode = false;           // touch multi-select: taps toggle, checkboxes shown
 let clipboard = null;             // { mode:'cut'|'copy', paths:[fullpath...] }
 let viewMode = 'list';            // 'list' | 'grid'
 let sortKey = 'name', sortDir = 1;
 let lastIndex = null;             // for shift-range selection
-const rowEls = new Map();         // name → row/card element, for selection-only updates (issue #41)
+const rowEls = new Map();         // item path → row/card element, for selection-only updates (issue #41)
 let perm = 'read_write';          // live permission level from settings
 let multiRoot = false;            // server has named mounts: '' is a read-only mount listing
 let defaultFolder = '';           // folder to open after login
@@ -18,6 +18,14 @@ let editing = null;               // entry currently open in the text editor
 const $ = (id) => document.getElementById(id);
 const join = (dir, name) => dir ? dir + '/' + name : name;
 const enc = encodeURIComponent;
+
+// ---- item identity ----
+// Entries from /api/list belong to cwd; hits from /api/find carry their own
+// `parent`, so a result set spans folders and two hits can share a name.
+// Everything that identifies an item — the selection, rowEls, the sort anchor,
+// every URL built from it — therefore keys on the *path*, never the name.
+const parentOf = (e) => e.parent !== undefined ? e.parent : cwd;
+const pathOf = (e) => join(parentOf(e), e.name);
 
 // ---- URL <-> folder routing (deep links, back/forward, login survival) ----
 // The current folder lives in the address bar as `?path=<folder>`, so it can
@@ -59,12 +67,12 @@ function typeOf(name, dir) {
 // ---- icons ----
 const ICON_DIR = '<svg class="ic dir" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>';
 const ICON_FILE = '<svg class="ic file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
-const rawUrl = (e) => '/api/raw?path=' + enc(join(cwd, e.name));
+const rawUrl = (e) => '/api/raw?path=' + enc(pathOf(e));
 // Server-side downscaled thumbnail (issue #28): the grid no longer pulls the
 // full original per 128 px cell. One fixed width — the largest cell at 2x
 // DPR — so the list and grid views share a single browser-cache entry per
 // file instead of re-fetching per size.
-const thumbUrl = (e) => '/api/thumb?path=' + enc(join(cwd, e.name)) + '&w=256';
+const thumbUrl = (e) => '/api/thumb?path=' + enc(pathOf(e)) + '&w=256';
 // Build the generic file icon as a DOM node, used as a thumbnail fallback.
 function fileIcon() { const d = document.createElement('div'); d.innerHTML = ICON_FILE; return d.firstChild; }
 // A thumbnail failed: first retry once with the original via /api/raw —
@@ -114,10 +122,15 @@ async function api(method, url, body) {
 // straight to sortView(), which keeps operating on the already-narrowed view.
 function rebuild() {
   const base = showHidden ? entries.slice() : entries.filter(e => !e.name.startsWith('.'));
-  const q = filterText.trim().toLowerCase();
+  // In search mode the server already applied the pattern (which may be a
+  // glob the substring test would reject), so the local filter stands down —
+  // `entries` *is* the match set.
+  const q = inSearch() ? '' : filterText.trim().toLowerCase();
   view = q ? base.filter(e => e.name.toLowerCase().includes(q)) : base;
-  // "N of M" while filtering (M = what the folder would show unfiltered).
-  $('t-count').textContent = q ? view.length + ' of ' + base.length : '';
+  // "N of M" while filtering (M = what the folder would show unfiltered);
+  // the plain hit count while searching (the banner carries the detail).
+  $('t-count').textContent = inSearch() ? view.length + ' found'
+    : (q ? view.length + ' of ' + base.length : '');
   sortView();
   render();
 }
@@ -128,10 +141,126 @@ function setFilter(text) { filterText = text; $('t-filter').value = text; }
 
 // Filter and hidden-toggle changes reshuffle `view` indices and can hide
 // selected rows, so they drop the selection (same policy as t-hidden).
+// Typing also leaves search results: the box means "filter this folder"
+// again, and the parked listing is right there, so the switch is instant.
 function applyFilter(text) {
   filterText = text;
+  exitSearch();
   selection = new Set(); lastIndex = null;
   rebuild(); syncToolbar();
+}
+
+// ---- recursive search (Enter in the filter box) ----
+// The filter box narrows the current folder as you type; Enter hands the same
+// text to /api/find, which walks every folder below cwd. Results replace the
+// listing until cleared — the folder's own entries are parked rather than
+// refetched, so returning to them costs nothing.
+// One request is one page: the server stops at its own caps (it is walking an
+// SD card, or a Steam Deck home directory with a million entries in it) and
+// hands back a cursor. `searchCursor` set means the walk paused with more tree
+// left — the banner's Continue button resumes it and appends the next page.
+let searchQ = '';                 // active pattern; '' = plain folder listing
+let searchRoot = '';              // folder the active search was launched from
+let parkedEntries = null;         // the cwd listing, held while results show
+let searchToken = 0;              // discards a superseded search response
+let searchCursor = null;          // resume point, or null when nothing is left
+let searchScanned = 0;            // entries examined, accumulated over pages
+let searchLimit = null;           // which cap paused the last page
+let searchBusy = false;           // a page is in flight (Continue is disabled)
+
+const inSearch = () => searchQ !== '';
+
+// How complete the answer is. A paused walk says so plainly: silence would
+// read as "that's all there is", which is the one thing a search must never
+// imply when it stopped early.
+function searchNote() {
+  const n = entries.length;
+  const bits = [n + (n === 1 ? ' match' : ' matches'),
+                'scanned ' + searchScanned.toLocaleString() + ' items'];
+  if (searchBusy) bits.push('searching…');
+  else if (searchCursor) bits.push('paused — Continue to search further');
+  else if (searchLimit === 'depth') bits.push('some folders were nested too deeply to search');
+  return bits.join(' · ');
+}
+
+// Fetch one page. `cursor` null starts fresh (replacing any results); a cursor
+// appends the next page and keeps the selection, since the rows already shown
+// do not move.
+async function fetchSearchPage(q, root, cursor) {
+  const stok = ++searchToken, ntok = navToken;
+  searchBusy = true;
+  if (cursor) renderSearchBar(); else $('t-count').textContent = 'searching…';
+  let res;
+  try {
+    res = await api('GET', '/api/find?path=' + enc(root) + '&q=' + enc(q)
+                    + (cursor ? '&after=' + enc(cursor) : ''));
+  } catch (e) {
+    searchBusy = false;
+    if (stok === searchToken) { toast(e.message, true); renderSearchBar(); rebuild(); }
+    return;
+  }
+  searchBusy = false;
+  // A newer search, or any navigation, owns the UI now.
+  if (stok !== searchToken || ntok !== navToken) return;
+  if (cursor) {
+    entries = entries.concat(res.hits);
+    searchScanned += res.scanned;
+  } else {
+    if (!inSearch()) parkedEntries = entries;   // first search: park the listing
+    searchQ = q; searchRoot = root;
+    entries = res.hits;
+    searchScanned = res.scanned;
+    selection = new Set(); lastIndex = null;
+  }
+  searchCursor = res.cursor || null;
+  searchLimit = res.limit || null;
+  renderSearchBar(); rebuild(); syncToolbar();
+}
+
+function runSearch(pattern) {
+  const q = pattern.trim();
+  // Enter on an empty box means "stop searching", not "match everything".
+  if (!q) { if (exitSearch()) { rebuild(); syncToolbar(); } return; }
+  return fetchSearchPage(q, cwd, null);
+}
+
+function continueSearch() {
+  if (!inSearch() || !searchCursor || searchBusy) return;
+  return fetchSearchPage(searchQ, searchRoot, searchCursor);
+}
+
+// Drop the results and put the parked folder listing back. Returns true when
+// there was a search to leave, so callers can skip a needless repaint.
+function exitSearch() {
+  if (!inSearch()) return false;
+  searchQ = ''; searchRoot = ''; searchCursor = null; searchLimit = null; searchScanned = 0;
+  entries = parkedEntries || []; parkedEntries = null;
+  selection = new Set(); lastIndex = null;
+  renderSearchBar();
+  return true;
+}
+
+function renderSearchBar() {
+  const bar = $('sbar');
+  if (!inSearch()) { bar.style.display = 'none'; return; }
+  $('sb-text').textContent =
+    '🔍 "' + searchQ + '" in ' + (searchRoot ? '/' + searchRoot : 'Home') + ' — ' + searchNote();
+  const more = $('sb-more');
+  more.style.display = searchCursor ? '' : 'none';
+  more.disabled = searchBusy;
+  bar.style.display = '';
+}
+
+// Jump from a hit to the folder that holds it, keeping it selected — the
+// "where is this?" answer, and the way back to the write actions.
+async function doReveal() {
+  const path = [...selection][0]; if (!path) return;
+  const e = view.find(x => pathOf(x) === path); if (!e) return;
+  await go(parentOf(e));
+  selection = new Set([path]);
+  const idx = view.findIndex(x => pathOf(x) === path);
+  lastIndex = idx >= 0 ? idx : null;      // -1 = hidden by the dotfile toggle
+  syncSelection(); syncToolbar();
 }
 function sortView() {
   view.sort((a, b) => {
@@ -174,13 +303,13 @@ function renderCrumbs() {
 }
 
 function attachRowEvents(el, e, idx) {
-  rowEls.set(e.name, el);         // selection updates re-style this element in place
+  rowEls.set(pathOf(e), el);      // selection updates re-style this element in place
   el.dataset.idx = idx;           // lets the long-press recognizer map element → view[idx]
   // In select mode every click/tap toggles — double-click open is off, like
   // iOS Files; use the Open button (or leave select mode) to enter folders.
   el.onclick = (ev) => { if (!selectMode && ev.detail >= 2) { onRowOpen(e); return; } onRowClick(ev, e, idx); };
   el.oncontextmenu = (ev) => { ev.preventDefault();
-    if (!selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; syncSelection(); syncToolbar(); }
+    if (!selection.has(pathOf(e))) { selection = new Set([pathOf(e)]); lastIndex = idx; syncSelection(); syncToolbar(); }
     openMenu(ev.clientX, ev.clientY); };
   // Drag-to-move (issue #44): every row drags; folder rows accept drops.
   el.draggable = canWriteHere();
@@ -196,9 +325,14 @@ function attachRowEvents(el, e, idx) {
 function render() { rowEls.clear(); viewMode === 'grid' ? renderGrid() : renderList(); }
 
 // Empty-state text: distinguish "this folder is empty" from "the filter
-// matched nothing" so an active filter can't read as an empty folder.
-const emptyHtml = () =>
-  `<div class="empty">${filterText.trim() ? '— no matches —' : '— empty —'}</div>`;
+// matched nothing" so an active filter can't read as an empty folder — and, on
+// a paused search, from "nothing found *so far*", which is not the same claim
+// as "nothing is there".
+function emptyHtml() {
+  const msg = inSearch() && searchCursor ? '— nothing yet — press Continue to search further —'
+    : (inSearch() || filterText.trim() ? '— no matches —' : '— empty —');
+  return `<div class="empty">${msg}</div>`;
+}
 
 // Selection-only repaint (issue #41): toggle the `sel` class on the existing
 // rows/cards instead of rebuilding the whole DOM — in a 3,000-entry folder a
@@ -206,8 +340,13 @@ const emptyHtml = () =>
 // render() remains for anything that changes row content or order (listing,
 // sort, view mode, the select-mode checkboxes).
 function syncSelection() {
-  rowEls.forEach((el, name) => el.classList.toggle('sel', selection.has(name)));
+  rowEls.forEach((el, path) => el.classList.toggle('sel', selection.has(path)));
 }
+
+// The folder a search hit lives in, shown on the row so a flat result set
+// still says *where* each match is. '' (a hit at the search root's own level)
+// reads as Home, matching the breadcrumbs.
+const rowPathLabel = (e) => parentOf(e) || 'Home';
 
 function renderList() {
   const arrow = (k) => sortKey === k ? `<span class="arrow">${sortDir>0?'▲':'▼'}</span>` : '';
@@ -224,13 +363,14 @@ function renderList() {
   const tb = $('rows');
   view.forEach((e, idx) => {
     const tr = document.createElement('tr');
-    if (selection.has(e.name)) tr.classList.add('sel');
+    if (selection.has(pathOf(e))) tr.classList.add('sel');
     const icon = e.dir ? ICON_DIR : (isImg(e)
       ? `<img class="thumb" loading="lazy" src="${thumbUrl(e)}" data-raw="${rawUrl(e)}" onerror="thumbFail(this)">`
       : ICON_FILE);
     const ck = selectMode ? '<span class="ck">✓</span>' : '';
+    const rp = inSearch() ? `<span class="rpath">${escapeHtml(rowPathLabel(e))}</span>` : '';
     tr.innerHTML =
-      `<td class="name">${ck}${icon}<span class="nm">${escapeHtml(e.name)}</span></td>` +
+      `<td class="name">${ck}${icon}<span class="nm">${escapeHtml(e.name)}</span>${rp}</td>` +
       `<td class="size">${e.dir ? '' : humanSize(e.size)}</td>` +
       `<td class="type">${typeOf(e.name, e.dir)}</td>` +
       `<td class="date">${fmtDate(e.modified)}</td>`;
@@ -244,12 +384,13 @@ function renderGrid() {
   if (!view.length) { wrap.innerHTML = emptyHtml(); return; }
   const grid = document.createElement('div'); grid.className = 'grid';
   view.forEach((e, idx) => {
-    const card = document.createElement('div'); card.className = 'gcard' + (selection.has(e.name) ? ' sel' : '');
+    const card = document.createElement('div'); card.className = 'gcard' + (selection.has(pathOf(e)) ? ' sel' : '');
     const inner = e.dir ? ICON_DIR : (isImg(e)
       ? `<img loading="lazy" src="${thumbUrl(e)}" data-raw="${rawUrl(e)}" onerror="thumbFail(this)">`
       : ICON_FILE);
     const ck = selectMode ? '<span class="ck">✓</span>' : '';
-    card.innerHTML = `${ck}<div class="gthumb">${inner}</div><div class="gname">${escapeHtml(e.name)}</div>`;
+    const rp = inSearch() ? `<div class="gpath">${escapeHtml(rowPathLabel(e))}</div>` : '';
+    card.innerHTML = `${ck}<div class="gthumb">${inner}</div><div class="gname">${escapeHtml(e.name)}</div>${rp}`;
     attachRowEvents(card, e, idx);
     grid.appendChild(card);
   });
@@ -262,9 +403,9 @@ function setSort(k) {
   // anchor is an index into `view`, so re-sorting under it would silently
   // re-point it at whatever row landed there and the next shift-click would
   // select a wrong contiguous range (issue #41).
-  const anchor = lastIndex !== null && view[lastIndex] ? view[lastIndex].name : null;
+  const anchor = lastIndex !== null && view[lastIndex] ? pathOf(view[lastIndex]) : null;
   sortView();
-  lastIndex = anchor !== null ? view.findIndex(e => e.name === anchor) : null;
+  lastIndex = anchor !== null ? view.findIndex(e => pathOf(e) === anchor) : null;
   if (lastIndex === -1) lastIndex = null;
   render();
 }
@@ -279,7 +420,11 @@ function canDelete() { return perm === 'read_write_delete'; }
 // server (issue #76), so every write affordance is disabled there. Copying a
 // whole mount stays allowed (pasting it *inside* a mount works).
 function atVirtualRoot() { return multiRoot && !cwd; }
-function canWriteHere() { return canWrite() && !atVirtualRoot(); }
+// Search results are read-and-navigate only: the rows come from many folders,
+// so "the current folder" — the destination a new folder, an upload, a paste
+// or a rename would land in — is ambiguous. Reveal a hit (or open its folder)
+// to get the write affordances back.
+function canWriteHere() { return canWrite() && !atVirtualRoot() && !inSearch(); }
 
 function syncToolbar() {
   const n = selection.size, w = canWriteHere();
@@ -291,8 +436,8 @@ function syncToolbar() {
   $('t-dl').disabled = n < 1;   // download (read) always allowed
   $('t-rename').disabled = n !== 1 || !w;
   $('t-cut').disabled = n < 1 || !w;
-  $('t-copy').disabled = n < 1 || !canWrite();
-  $('t-del').disabled = n < 1 || !canDelete() || atVirtualRoot();
+  $('t-copy').disabled = n < 1 || !canWrite() || inSearch();
+  $('t-del').disabled = n < 1 || !canDelete() || atVirtualRoot() || inSearch();
   $('t-paste').disabled = !clipboard || !w;
 }
 
@@ -312,6 +457,11 @@ async function go(path, push = true) {
   // Entering a different folder clears the filter; a refresh of the same
   // folder (t-refresh, post-mutation reloads) keeps it active.
   if (changed) setFilter('');
+  // Any navigation ends a search: the listing below replaces the results, so
+  // the parked entries are dropped rather than restored.
+  searchQ = ''; searchRoot = ''; searchCursor = null; searchLimit = null;
+  searchScanned = 0; parkedEntries = null;
+  renderSearchBar();
   if (push && changed) history.pushState({ path }, '', urlForPath(path));
   cwd = path; selection = new Set(); lastIndex = null;
   try {
@@ -324,29 +474,36 @@ async function go(path, push = true) {
   }
   renderCrumbs(); rebuild(); syncToolbar();
 }
+// Refresh means "redo what is on screen": re-run the active search, otherwise
+// re-list the current folder.
+function doRefresh() { inSearch() ? runSearch(searchQ) : go(cwd); }
+
 function onRowClick(ev, e, idx) {
+  const p = pathOf(e);
   if (selectMode) {               // touch multi-select: every tap toggles (issue #31)
-    selection.has(e.name) ? selection.delete(e.name) : selection.add(e.name); lastIndex = idx;
+    selection.has(p) ? selection.delete(p) : selection.add(p); lastIndex = idx;
   } else if (ev.shiftKey && lastIndex !== null) {
     const [lo, hi] = [Math.min(lastIndex, idx), Math.max(lastIndex, idx)];
-    selection = new Set(); for (let i = lo; i <= hi; i++) selection.add(view[i].name);
+    selection = new Set(); for (let i = lo; i <= hi; i++) selection.add(pathOf(view[i]));
   } else if (ev.ctrlKey || ev.metaKey) {
-    selection.has(e.name) ? selection.delete(e.name) : selection.add(e.name); lastIndex = idx;
-  } else { selection = new Set([e.name]); lastIndex = idx; }
+    selection.has(p) ? selection.delete(p) : selection.add(p); lastIndex = idx;
+  } else { selection = new Set([p]); lastIndex = idx; }
   syncSelection(); syncToolbar();
 }
 function onRowOpen(e) {
-  if (e.dir) go(join(cwd, e.name));
+  if (e.dir) go(pathOf(e));
   else if (previewable(e)) openPreview(e);
-  else downloadPaths([join(cwd, e.name)]);
+  else downloadPaths([pathOf(e)]);
 }
 
 // ---- actions ----
-function selectedPaths() { return [...selection].map(n => join(cwd, n)); }
+// The selection already holds paths, and `view` is what can be selected —
+// including search hits, which live outside cwd.
+function selectedPaths() { return [...selection]; }
+const selectedEntries = () => view.filter(e => selection.has(pathOf(e)));
 function doOpen() {
-  const names = [...selection]; if (names.length !== 1) return;
-  const e = entries.find(x => x.name === names[0]);
-  if (e) onRowOpen(e);
+  const sel = selectedEntries(); if (sel.length !== 1) return;
+  onRowOpen(sel[0]);
 }
 function downloadPaths(paths) {
   paths.forEach((p, i) => setTimeout(() => {
@@ -363,11 +520,8 @@ function downloadZip(paths) {
 }
 // Single file → direct download; folders or multiple items → a zip.
 function doDownload() {
-  const names = [...selection]; if (!names.length) return;
-  if (names.length === 1) {
-    const e = entries.find(x => x.name === names[0]);
-    if (e && !e.dir) { downloadPaths([join(cwd, e.name)]); return; }
-  }
+  const sel = selectedEntries(); if (!sel.length) return;
+  if (sel.length === 1 && !sel[0].dir) { downloadPaths([pathOf(sel[0])]); return; }
   toast('Preparing zip…');
   downloadZip(selectedPaths());
 }
@@ -402,7 +556,7 @@ async function doNewFile() {
   const q = filterText.trim().toLowerCase();
   if (q && !name.toLowerCase().includes(q)) setFilter('');
   await go(cwd);
-  selection = new Set([name]);
+  selection = new Set([join(cwd, name)]);
   const idx = view.findIndex(e => e.name === name);
   lastIndex = idx >= 0 ? idx : null;       // -1 = dotfile hidden by the toggle
   syncSelection(); syncToolbar();
@@ -411,9 +565,10 @@ async function doNewFile() {
   openEditor({ name });
 }
 async function doRename() {
-  const cur = [...selection][0]; if (!cur) return;
+  const path = [...selection][0]; if (!path) return;
+  const cur = path.split('/').pop();
   const name = prompt('Rename to:', cur); if (!name || name === cur) return;
-  try { await api('POST', '/api/rename', { path: join(cwd, cur), name }); toast('Renamed'); go(cwd); }
+  try { await api('POST', '/api/rename', { path, name }); toast('Renamed'); go(cwd); }
   catch (e) { toast(e.message, true); }
 }
 async function doDelete() {
@@ -477,13 +632,13 @@ async function doPaste() {
 // them and the drop falls through to the upload path. HTML5 DnD never fires
 // from touch, so phones keep Cut/Paste + long-press unchanged.
 const DRAG_TYPE = 'application/x-amberdav-move';
-let dragNames = null;               // names being dragged; null = not our drag
+let dragNames = null;               // paths being dragged; null = not our drag
 
 function dragStart(ev, e, el) {
   if (!canWriteHere()) { ev.preventDefault(); return; }
   // Dragging a selected row carries the whole selection; dragging an
   // unselected row moves just that row (the selection is left alone).
-  dragNames = selection.has(e.name) ? [...selection] : [e.name];
+  dragNames = selection.has(pathOf(e)) ? [...selection] : [pathOf(e)];
   ev.dataTransfer.setData(DRAG_TYPE, JSON.stringify(dragNames));
   ev.dataTransfer.effectAllowed = 'move';
   el.classList.add('dragging');
@@ -493,7 +648,7 @@ function dragEnd(el) { dragNames = null; el.classList.remove('dragging'); }
 // A folder row is a valid target unless it is itself being dragged (folder
 // into itself). Deeper cases (same-location no-ops, symlinked aliases) are
 // validated server-side by plan_transfer before anything is touched.
-function validRowTarget(e) { return !!dragNames && e.dir && !dragNames.includes(e.name); }
+function validRowTarget(e) { return !!dragNames && e.dir && !dragNames.includes(pathOf(e)); }
 
 function dragOverFolder(ev, e, el) {
   if (!validRowTarget(e)) return;   // no preventDefault → browser shows "no drop"
@@ -505,13 +660,13 @@ function dropOnFolder(ev, e, el) {
   if (!validRowTarget(e)) return;
   ev.preventDefault(); ev.stopPropagation();
   el.classList.remove('droptgt');
-  moveDragged(join(cwd, e.name));
+  moveDragged(pathOf(e));
 }
 
 async function moveDragged(dest) {
   const names = dragNames; dragNames = null;
   if (!names || !names.length) return;
-  const body = { srcs: names.map(n => join(cwd, n)), dest };
+  const body = { srcs: names, dest };
   try {
     try { await api('POST', '/api/move', body); }
     catch (e) {
@@ -536,9 +691,10 @@ let previewList = [], previewIdx = -1, previewToken = 0;
 const TEXT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 
 function openPreview(e) {
-  // Gallery = all previewable items currently shown, in display order.
+  // Gallery = all previewable items currently shown, in display order (a
+  // search result set spans folders, so the gallery does too).
   previewList = view.filter(previewable);
-  previewIdx = previewList.findIndex(x => x.name === e.name);
+  previewIdx = previewList.findIndex(x => pathOf(x) === pathOf(e));
   if (previewIdx < 0) { previewList = [e]; previewIdx = 0; }
   $('modal').classList.add('show');
   showPreviewAt(previewIdx);
@@ -551,14 +707,14 @@ function navigatePreview(delta) {
 async function showPreviewAt(i) {
   const e = previewList[i]; if (!e) return;
   const token = ++previewToken;                 // guards against stale async text loads
-  const p = join(cwd, e.name);
+  const p = pathOf(e);
   const url = '/api/raw?path=' + enc(p);
   $('mtitle').textContent = e.name;
   $('mcount').textContent = previewList.length > 1 ? (i + 1) + ' / ' + previewList.length : '';
   $('mdl').href = '/api/download?path=' + enc(p);
   // Offer in-place editing for text files when writable.
   const medit = $('medit');
-  if (isTxt(e) && canWrite()) { medit.style.display = ''; medit.onclick = (ev) => { ev.preventDefault(); closePreview(); openEditor(e); }; }
+  if (isTxt(e) && canWriteHere()) { medit.style.display = ''; medit.onclick = (ev) => { ev.preventDefault(); closePreview(); openEditor(e); }; }
   else medit.style.display = 'none';
   const body = $('mbody'); body.innerHTML = '<div class="note">Loading…</div>';
   if (isImg(e)) body.innerHTML = `<img src="${url}">`;
@@ -586,7 +742,7 @@ function confirmDiscard() {
   return !editorDirty() || confirm('Discard unsaved changes to ' + editing.name + '?');
 }
 async function openEditor(e) {
-  if (!canWrite()) { toast('Read-only — editing is disabled', true); return; }
+  if (!canWriteHere()) { toast('Read-only — editing is disabled', true); return; }
   if (!confirmDiscard()) return;
   editing = e; edBaseline = null;
   $('ed-title').textContent = e.name;
@@ -596,7 +752,7 @@ async function openEditor(e) {
   // cache:'no-cache' revalidates rather than trusting heuristic freshness, so
   // re-opening a file just edited in-app loads the new bytes (issue #104).
   try {
-    const r = await fetch('/api/raw?path=' + enc(join(cwd, e.name)), { cache: 'no-cache' });
+    const r = await fetch('/api/raw?path=' + enc(pathOf(e)), { cache: 'no-cache' });
     if (r.status === 401) { gotoLogin(); return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
     area.value = await r.text(); edBaseline = area.value; area.disabled = false; area.focus();
@@ -604,11 +760,14 @@ async function openEditor(e) {
 }
 async function saveEditor() {
   if (!editing) return;
-  const name = editing.name, text = $('ed-area').value;
+  // Write back to the file's own folder, which the upload endpoint takes
+  // separately from the name (always cwd today — the editor is unreachable
+  // from search results — but derived from the entry rather than assumed).
+  const name = editing.name, dir = parentOf(editing), text = $('ed-area').value;
   try {
     // Saving rewrites the file being edited on purpose → overwrite=true
     // (without it the server now 409s instead of replacing an existing file).
-    const r = await fetch('/api/upload?path=' + enc(cwd) + '&name=' + enc(name) + '&overwrite=true',
+    const r = await fetch('/api/upload?path=' + enc(dir) + '&name=' + enc(name) + '&overwrite=true',
                           { method: 'PUT', body: text });
     if (r.status === 401) { gotoLogin(); return; }
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
@@ -764,7 +923,7 @@ function openMenu(x, y) {
   const m = $('menu'); const n = selection.size;
   const w = canWriteHere();
   // The single selected entry, if exactly one — used to gate text editing.
-  const selEntry = n === 1 ? view.find(e => e.name === [...selection][0]) : null;
+  const selEntry = n === 1 ? view.find(e => pathOf(e) === [...selection][0]) : null;
   const canEdit = !!(selEntry && isTxt(selEntry) && w);
   const items = [
     { label: '＋ New Folder', fn: doMkdir, off: !w },
@@ -772,20 +931,23 @@ function openMenu(x, y) {
     { label: '⬆ Upload Files', fn: () => $('filepick').click(), off: !w },
     { label: '⬆ Upload Folder', fn: () => $('dirpick').click(), off: !w },
     { label: '⬇ Download Selected', fn: doDownload, off: n < 1 },
+    // Only meaningful for a search hit, which is the one case where a row is
+    // not in the folder the breadcrumbs point at.
+    { label: '📍 Reveal in Folder', fn: doReveal, off: !inSearch() || n !== 1 },
     'sep',
     { label: '✂ Cut', fn: doCut, off: n < 1 || !w },
-    { label: '⧉ Copy', fn: doCopy, off: n < 1 || !canWrite() },
+    { label: '⧉ Copy', fn: doCopy, off: n < 1 || !canWrite() || inSearch() },
     { label: '📋 Copy Path', fn: doCopyPath, off: n < 1 },
     { label: '⤵ Paste', fn: doPaste, off: !clipboard || !w },
     'sep',
-    { label: '🗑 Delete', fn: doDelete, off: n < 1 || !canDelete() || atVirtualRoot() },
+    { label: '🗑 Delete', fn: doDelete, off: n < 1 || !canDelete() || atVirtualRoot() || inSearch() },
     { label: '✎ Rename', fn: doRename, off: n !== 1 || !w },
     { label: '📝 Edit', fn: () => openEditor(selEntry), off: !canEdit },
     'sep',
     // Select mode is reachable from a long-press too, so the flow on a phone
     // is: long-press → "Select Items" → tap the rest → long-press → action.
     { label: selectMode ? '☑ Done Selecting' : '☑ Select Items', fn: () => setSelectMode(!selectMode) },
-    { label: '↻ Refresh', fn: () => go(cwd) },
+    { label: '↻ Refresh', fn: doRefresh },
   ];
   m.innerHTML = '';
   for (const it of items) {
@@ -827,7 +989,7 @@ function fireLP() {
     const idx = +row.dataset.idx, e = view[idx];
     // Same rule as right-click: pressing outside the selection refocuses it,
     // pressing inside keeps the multi-selection for a bulk action.
-    if (e && !selection.has(e.name)) { selection = new Set([e.name]); lastIndex = idx; syncSelection(); syncToolbar(); }
+    if (e && !selection.has(pathOf(e))) { selection = new Set([pathOf(e)]); lastIndex = idx; syncSelection(); syncToolbar(); }
   } else { selection = new Set(); syncSelection(); syncToolbar(); }   // background press, like blank-space right-click
   openMenu(x, y);
 }
@@ -1054,21 +1216,30 @@ $('t-open').onclick = doOpen;
 $('t-dl').onclick = doDownload;
 $('t-rename').onclick = doRename;
 $('t-cut').onclick = doCut; $('t-copy').onclick = doCopy; $('t-paste').onclick = doPaste;
-$('t-del').onclick = doDelete; $('t-refresh').onclick = () => go(cwd);
+$('t-del').onclick = doDelete; $('t-refresh').onclick = doRefresh;
+$('sb-clear').onclick = () => { if (exitSearch()) { rebuild(); syncToolbar(); } $('t-filter').focus(); };
+$('sb-more').onclick = continueSearch;
 $('v-list').onclick = () => setView('list'); $('v-grid').onclick = () => setView('grid');
 $('t-select').onclick = () => setSelectMode(!selectMode);
 $('t-hidden').onclick = () => { showHidden = !showHidden; $('t-hidden').classList.toggle('on', showHidden);
   selection = new Set(); lastIndex = null; rebuild(); syncToolbar(); };
 $('t-filter').oninput = () => applyFilter($('t-filter').value);
 $('t-filter').onkeydown = (e) => {
-  // Esc: clear the filter and hand focus back to the list. Stop it here so
-  // the document-level Esc (close preview/menu) doesn't also fire, and
-  // preventDefault so type=search's native clear doesn't race our state.
+  // Esc: clear the filter (and any search results) and hand focus back to the
+  // list. Stop it here so the document-level Esc (close preview/menu) doesn't
+  // also fire, and preventDefault so type=search's native clear doesn't race
+  // our state.
   if (e.key === 'Escape') {
     e.preventDefault(); e.stopPropagation();
-    if (filterText) { setFilter(''); applyFilter(''); }
+    if (filterText || inSearch()) { setFilter(''); applyFilter(''); }
     $('t-filter').blur();
-  } else if (e.key === 'Enter') { e.preventDefault(); $('t-filter').blur(); }
+  } else if (e.key === 'Enter') {
+    // Enter widens the same text from "filter this folder" to "search every
+    // folder below it" — the one thing the client-side filter cannot do.
+    e.preventDefault();
+    runSearch($('t-filter').value);
+    $('t-filter').blur();
+  }
 };
 $('ed-save').onclick = saveEditor;
 $('ed-close').onclick = requestCloseEditor;
@@ -1096,7 +1267,14 @@ document.addEventListener('keydown', (e) => {
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveEditor(); }
     return;
   }
-  if (e.key === 'Escape') { closePreview(); closeMenu(); return; }
+  if (e.key === 'Escape') {
+    const overlay = $('modal').classList.contains('show') || $('menu').style.display === 'block';
+    closePreview(); closeMenu();
+    // With nothing overlaying the list, Esc leaves the search results — the
+    // same thing it does when the filter box has focus.
+    if (!overlay && inSearch()) { setFilter(''); applyFilter(''); }
+    return;
+  }
   if ($('modal').classList.contains('show')) {
     if (e.key === 'ArrowRight') { e.preventDefault(); navigatePreview(1); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); navigatePreview(-1); }
@@ -1161,6 +1339,7 @@ main.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0
 main.addEventListener('drop', async (e) => { e.preventDefault(); dragDepth = 0; $('drop').classList.remove('show');
   if (!canWrite()) { toast('Read-only — uploads are disabled', true); return; }
   if (atVirtualRoot()) { toast('The root lists the shared mounts — open one to upload', true); return; }
+  if (inSearch()) { toast('Search results span folders — clear the search to upload', true); return; }
   // Folder-aware path: snapshot the entries *synchronously* — the
   // DataTransferItemList is gone after the first await — then traverse
   // directories recursively. A dropped folder used to surface as a useless

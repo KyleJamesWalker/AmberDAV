@@ -22,6 +22,15 @@ the system `libSDL2` (present on SteamOS and the Anbernic stock OS).
   sortable columns, shift-click range select, right-click context menu (new
   folder, upload, download, cut/copy/paste, delete, rename), drag-and-drop upload
   with a progress bar, and zip download of folders or multi-selections.
+  The toolbar box filters the current folder as you type; **Enter searches every
+  subfolder below it** (`find -name` over HTTP — plain text matches any part of a
+  name, `*` and `?` glob against the whole name, e.g. `*.srm`). Results show each
+  match's folder and can be opened, previewed, downloaded, zipped, or revealed in
+  place. A search runs one bounded page per request and pauses rather than
+  running unbounded on slow storage; **Continue** picks it up exactly where it
+  stopped, so trees far larger than any single page — a Steam Deck's
+  `compatdata`, with a whole Windows filesystem per Proton prefix — are
+  searchable to the end.
 - **WebDAV server** — mount the device as a network drive from any WebDAV
   client (Finder, Windows Explorer, `rclone`, etc.) at
   `http://<device-ip>:8080/dav` (also browsable directly in a web browser).

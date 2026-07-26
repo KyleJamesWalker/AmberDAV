@@ -103,6 +103,20 @@
   .tfilter::placeholder { color: var(--dim); }
   .tcount { color: var(--dim); font-family: var(--mono); font-size: .72rem; white-space: nowrap; }
 
+  /* recursive-search results banner + the per-hit folder path */
+  .sbar {
+    display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+    padding: .5rem 1.2rem; background: var(--amber-soft);
+    border-bottom: 1px solid var(--amber-hair);
+  }
+  .sb-text { flex: 1; min-width: 0; font-family: var(--mono); font-size: .76rem; color: var(--amber); }
+  .rpath, .gpath {
+    font-family: var(--mono); font-size: .72rem; color: var(--dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .rpath { margin-left: auto; padding-left: .8rem; flex: none; max-width: 45%; }
+  .gpath { max-width: 100%; text-align: center; }
+
   .listwrap { flex: 1; min-height: 0; overflow: auto; }
 
   /* list view */

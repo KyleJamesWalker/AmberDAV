@@ -70,7 +70,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 | `src/config.rs` | JSONC `config.json` schema + platform location, load/save, permission levels |
 | `src/auth.rs` | session-cookie login for the web UI (`Session` extractor, login/logout) |
 | `src/ui.rs` | **web** handlers: landing/login pages, `/api/info`, `/api/settings`, the live-input SSE stream (despite the name, this is the browser UI — "the UI" elsewhere can mean the device screen) |
-| `src/files.rs` | JSON file API (list/upload/download/zip/raw/thumb/rename/move/copy/delete) + `safe_name`/`confine` (textual segment checks live in `state.rs`), HTTP Range, thumbnail disk cache |
+| `src/files.rs` | JSON file API (list/find/upload/download/zip/raw/thumb/rename/move/copy/delete) + `safe_name`/`confine` (textual segment checks live in `state.rs`), HTTP Range, thumbnail disk cache |
 | `src/webdav.rs` | `dav-server` bridged into axum + HTTP Basic auth + the `method_allowed` permission gate |
 | `src/update.rs` | self-update: GitHub Releases check/apply, SHA256 verification, per-shape asset mapping |
 | `src/password.rs` | per-boot password generator (unambiguous charset) |
@@ -116,6 +116,15 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
   extracted into pure, host-testable functions instead (`display::select`,
   `display::pick_wayland_socket`, `sdl::driver_candidates`, `canvas`,
   `bounce`). Verify via the cfg'd test suites, not by trying to run a sink.
+- **`/api/find` sorts each directory on purpose**, unlike `/api/list`. The sort
+  is what makes the walk deterministic, which is what makes "continue after this
+  path" (the `after`/`cursor` paging behind the UI's Continue button) a defined
+  position rather than a guess. Don't "optimize" it away by mirroring the
+  unsorted-listing rationale (issue #58) — that reasoning does not apply here.
+- **An item's identity in `app.js` is its path, not its name.** The selection,
+  `rowEls`, the sort anchor and every URL key on `pathOf(entry)`, because
+  `/api/find` results span folders and two hits can share a name. A listing
+  entry has no `parent` and falls back to `cwd`; a hit carries its own.
 - **Permission enforcement lives in two places** that must stay in sync:
   `files.rs` per-handler `can_write`/`can_delete` checks, and
   `webdav.rs::method_allowed` for the WebDAV methods. Adding a write surface to
