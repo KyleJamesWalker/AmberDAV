@@ -116,6 +116,11 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
   extracted into pure, host-testable functions instead (`display::select`,
   `display::pick_wayland_socket`, `sdl::driver_candidates`, `canvas`,
   `bounce`). Verify via the cfg'd test suites, not by trying to run a sink.
+- **`/api/find` sorts each directory on purpose**, unlike `/api/list`. The sort
+  is what makes the walk deterministic, which is what makes "continue after this
+  path" (the `after`/`cursor` paging behind the UI's Continue button) a defined
+  position rather than a guess. Don't "optimize" it away by mirroring the
+  unsorted-listing rationale (issue #58) — that reasoning does not apply here.
 - **An item's identity in `app.js` is its path, not its name.** The selection,
   `rowEls`, the sort anchor and every URL key on `pathOf(entry)`, because
   `/api/find` results span folders and two hits can share a name. A listing
