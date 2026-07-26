@@ -109,6 +109,17 @@ struct Entry {
     modified: i64,
 }
 
+/// Modification time as Unix epoch milliseconds, `0` when the filesystem
+/// cannot report one — the shape `/api/list` and `/api/find` hand the client,
+/// which does the formatting.
+fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQuery>) -> Response {
     let rel = q.path.unwrap_or_default();
 
@@ -146,17 +157,11 @@ pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQue
         let Ok(meta) = ent.metadata().await else {
             continue;
         };
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
         entries.push(Entry {
             name: ent.file_name().to_string_lossy().into_owned(),
             dir: meta.is_dir(),
             size: meta.len(),
-            modified,
+            modified: mtime_ms(&meta),
         });
     }
 
@@ -167,6 +172,228 @@ pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQue
     // comparison (~120k transient allocations for a 5,000-entry folder on
     // the A53). Entries arrive in readdir order — assume nothing about it.
     Json(entries).into_response()
+}
+
+// --- find -------------------------------------------------------------------
+
+/// Caps on one recursive search. The walk reads an SD card behind a handheld
+/// CPU, so it is bounded four ways instead of trusted to finish: the client
+/// gets a usable prefix plus `truncated`, never an open-ended stall. Every cap
+/// is a stop, not an error — partial results beat a spinner that never ends.
+const FIND_MAX_HITS: usize = 500;
+const FIND_MAX_SCANNED: usize = 50_000;
+const FIND_MAX_DEPTH: usize = 24;
+const FIND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Deserialize)]
+pub struct FindQuery {
+    /// Folder to search under; empty = the served root (in multi-root mode,
+    /// every mount).
+    path: Option<String>,
+    /// The name pattern — see [`name_matches`].
+    q: String,
+}
+
+/// One match. `parent` is the rel path of the containing folder (`""` = the
+/// search root's own level), so `parent/name` is a path every other endpoint
+/// already accepts — the UI reuses download/preview/zip on hits unchanged.
+#[derive(Serialize)]
+struct Hit {
+    parent: String,
+    name: String,
+    dir: bool,
+    size: u64,
+    /// Unix epoch milliseconds, like [`Entry::modified`].
+    modified: i64,
+}
+
+#[derive(Serialize)]
+struct FindResult {
+    hits: Vec<Hit>,
+    /// True when a cap stopped the walk: `hits` is a prefix of the matches,
+    /// not all of them.
+    truncated: bool,
+    /// Which cap fired — `"results"`, `"entries"`, `"time"`, or `"depth"`;
+    /// `None` when the whole subtree was searched.
+    limit: Option<&'static str>,
+    /// Directory entries examined, reported so the UI can say how much of the
+    /// tree the answer covers.
+    scanned: usize,
+}
+
+/// True when `name` matches the search pattern `pat`.
+///
+/// A pattern with no wildcard is a case-insensitive **substring** test —
+/// identical to the web UI's in-folder filter, so typing a few letters means
+/// the same thing at any depth. A pattern containing `*` or `?` is matched as
+/// a **glob against the whole name**, `find -name` style (`*.srm`,
+/// `save?.dat`). There is no escape syntax: `*` and `?` are always wildcards,
+/// which keeps the rule explainable on a device with no shell. Both modes
+/// ignore case — the content here is mixed-case ROM dumps and save files, so
+/// `-iname` is what anyone actually wants.
+fn name_matches(pat: &str, name: &str) -> bool {
+    let pat = pat.to_lowercase();
+    let name = name.to_lowercase();
+    if pat.contains('*') || pat.contains('?') {
+        let pat: Vec<char> = pat.chars().collect();
+        let name: Vec<char> = name.chars().collect();
+        glob_match(&pat, &name)
+    } else {
+        name.contains(&pat)
+    }
+}
+
+/// Whole-string glob: `*` matches any run of characters (including none), `?`
+/// exactly one. Backtracking is limited to the most recent `*`, which is all a
+/// single-star-class glob needs and keeps a pathological pattern from blowing
+/// up the walk. Compares `char`s, not bytes, so a multi-byte name can't be
+/// split mid-character.
+fn glob_match(pat: &[char], name: &[char]) -> bool {
+    let (mut p, mut n) = (0, 0);
+    // The last `*` seen and how much of `name` it had consumed — where we
+    // resume when a literal run further along turns out not to match.
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        if p < pat.len() && (pat[p] == '?' || pat[p] == name[n]) {
+            p += 1;
+            n += 1;
+        } else if p < pat.len() && pat[p] == '*' {
+            star = Some((p, n));
+            p += 1;
+        } else if let Some((sp, sn)) = star {
+            // Let the `*` swallow one more character and retry after it.
+            p = sp + 1;
+            n = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    // Trailing `*`s may match nothing; anything else left over is a miss.
+    pat[p..].iter().all(|c| *c == '*')
+}
+
+/// Append `name` to a rel folder path (`""` = the root level).
+fn join_rel(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Recursive name search under `path` — the tree-wide counterpart to the web
+/// UI's in-folder filter (`find -name`, over HTTP). Matches directories as
+/// well as files, and reports each hit's containing folder so the client can
+/// act on it or navigate there.
+///
+/// Entries are described by `DirEntry::metadata`, which does not traverse
+/// symlinks — so a hit renders exactly as the same entry does in its folder's
+/// `/api/list`, and a symlinked directory is never recursed into. That is
+/// `find`'s own default, and it is what keeps a cycle (`a/link -> a`) from
+/// looping forever — the trap issue #113 documents for the ZIP walker.
+/// Containment therefore needs no per-entry `confine`: the walk only ever
+/// descends into real directories below an already-confined root, so it cannot
+/// leave the served tree.
+pub async fn find(_: Session, State(s): State<AppState>, Query(q): Query<FindQuery>) -> Response {
+    let pat = q.q.trim();
+    if pat.is_empty() {
+        return bad("empty search");
+    }
+    let rel = q.path.unwrap_or_default();
+
+    // Search roots as (absolute dir, its rel path, depth). The multi-root
+    // virtual root has no filesystem path of its own, so a search there fans
+    // out across every mount, each rooted at its own name.
+    let mut stack: Vec<(PathBuf, String, usize)> = Vec::new();
+    if s.mounts.is_virtual_root(&rel) {
+        for (name, root) in s.mounts.mounts() {
+            stack.push((root.clone(), name.clone(), 0));
+        }
+    } else {
+        let Some((mount_root, dir)) = s.mounts.resolve(&rel) else {
+            return bad("invalid path");
+        };
+        let dir = match confine(mount_root, &dir).await {
+            Ok(p) => p,
+            Err(e) => return io_err(e),
+        };
+        // Normalize the request path the way the resolver does (drop empty and
+        // `.` segments) so every `parent` we hand back is in the canonical
+        // form the client's own paths use.
+        let base_rel = rel
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect::<Vec<_>>()
+            .join("/");
+        stack.push((dir, base_rel, 0));
+    }
+
+    let started = std::time::Instant::now();
+    let mut hits: Vec<Hit> = Vec::new();
+    let mut scanned = 0usize;
+    let mut limit: Option<&'static str> = None;
+
+    'walk: while let Some((dir, dir_rel, depth)) = stack.pop() {
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            // An unreadable subdirectory is skipped, not fatal: one bad
+            // permission bit mid-tree must not discard the hits found
+            // everywhere else.
+            Err(_) => continue,
+        };
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            scanned += 1;
+            if scanned >= FIND_MAX_SCANNED {
+                limit = Some("entries");
+                break 'walk;
+            }
+            if started.elapsed() >= FIND_DEADLINE {
+                limit = Some("time");
+                break 'walk;
+            }
+            let name = ent.file_name().to_string_lossy().into_owned();
+            // Unreadable entry: skip it, exactly as `list` does.
+            let Ok(meta) = ent.metadata().await else {
+                continue;
+            };
+            if name_matches(pat, &name) {
+                hits.push(Hit {
+                    parent: dir_rel.clone(),
+                    name: name.clone(),
+                    dir: meta.is_dir(),
+                    size: meta.len(),
+                    modified: mtime_ms(&meta),
+                });
+                if hits.len() >= FIND_MAX_HITS {
+                    limit = Some("results");
+                    break 'walk;
+                }
+            }
+            // `is_dir()` is false for a symlink to a directory (the metadata
+            // above does not traverse), which is what stops the recursion at
+            // links.
+            if meta.is_dir() {
+                if depth + 1 > FIND_MAX_DEPTH {
+                    // Too deep to follow: flag the answer as partial but keep
+                    // searching the rest of the tree.
+                    limit = Some("depth");
+                    continue;
+                }
+                stack.push((ent.path(), join_rel(&dir_rel, &name), depth + 1));
+            }
+        }
+    }
+
+    // Deliberately unsorted, like `/api/list` (issue #58): the client re-sorts
+    // every listing by the user's chosen column anyway.
+    Json(FindResult {
+        hits,
+        truncated: limit.is_some(),
+        limit,
+        scanned,
+    })
+    .into_response()
 }
 
 // --- mkdir / delete / rename ------------------------------------------------
@@ -2528,5 +2755,70 @@ mod tests {
         store_thumb(&dir, "k.jpg", b"payload2").await;
         assert_eq!(std::fs::read(dir.join("k.jpg")).unwrap(), b"payload2");
         assert!(part_files(&dir).is_empty(), "no temp litter");
+    }
+
+    // --- find: the name matcher --------------------------------------------
+
+    // A wildcard-free pattern is the same case-insensitive substring test the
+    // toolbar filter has always applied — typing a few letters must mean the
+    // same thing whether it searches one folder or the whole tree.
+    #[test]
+    fn plain_pattern_is_a_substring_match() {
+        assert!(name_matches("save", "save01.srm"));
+        assert!(name_matches("save", "MySaveFile"));
+        assert!(name_matches("SAVE", "my save.dat"));
+        assert!(name_matches(".srm", "pokemon.srm"));
+        // Substring, so an extension query also matches mid-name — the reason
+        // the glob form exists.
+        assert!(name_matches(".srm", "notes.srm.bak"));
+        assert!(!name_matches("save", "pokemon.gb"));
+        // A whole-name pattern still matches the whole name.
+        assert!(name_matches("pokemon.gb", "pokemon.gb"));
+    }
+
+    // A pattern carrying `*` or `?` switches to a whole-name glob, which is
+    // what makes `*.srm` mean "ends in .srm" rather than "contains .srm".
+    #[test]
+    fn wildcard_pattern_is_a_whole_name_glob() {
+        assert!(name_matches("*.srm", "pokemon.srm"));
+        assert!(!name_matches("*.srm", "notes.srm.bak"));
+        assert!(name_matches("save*.srm", "save01.srm"));
+        assert!(!name_matches("save*.srm", "01save.srm"));
+        assert!(name_matches("save?.dat", "save1.dat"));
+        assert!(!name_matches("save?.dat", "save12.dat"));
+        assert!(name_matches("*save*", "my save file"));
+        assert!(name_matches("*", "anything"));
+        // Case-insensitive in glob mode too.
+        assert!(name_matches("*.SRM", "pokemon.srm"));
+        // A bare word is not a glob, so it does NOT have to match the whole
+        // name — but with a wildcard present, anchoring applies.
+        assert!(!name_matches("save*", "my save"));
+    }
+
+    // Glob edge cases the backtracking loop has to get right: stars that must
+    // match nothing, repeated stars, and a `?` that has no character left.
+    #[test]
+    fn glob_edges() {
+        let g = |p: &str, n: &str| {
+            glob_match(
+                &p.chars().collect::<Vec<_>>(),
+                &n.chars().collect::<Vec<_>>(),
+            )
+        };
+        assert!(g("*", ""));
+        assert!(g("**", "ab"));
+        assert!(g("a*", "a"));
+        assert!(g("*a", "a"));
+        assert!(g("a*b*c", "abc"));
+        assert!(g("a*b*c", "axxbyyc"));
+        assert!(!g("a*b*c", "abd"));
+        assert!(!g("?", ""));
+        assert!(g("?", "a"));
+        assert!(!g("a", ""));
+        assert!(!g("", "a"));
+        assert!(g("", ""));
+        // Multi-byte names are compared by character, so `?` is one glyph.
+        assert!(g("?.txt", "é.txt"));
+        assert!(g("*é*", "café.txt"));
     }
 }

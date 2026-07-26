@@ -69,6 +69,7 @@ async fn access_log(req: Request, next: Next) -> Response {
 /// GET  /api/name          -   device name for the browser tab title (public)
 /// GET  /api/info          S   connection info for the Status tab
 /// GET  /api/list          S   read
+/// GET  /api/find          S   read; recursive name search under a folder
 /// GET  /api/download      S   read
 /// GET  /api/zip           S   read
 /// GET  /api/raw           S   read; HTTP Range + conditional cache validators
@@ -101,6 +102,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/info", get(ui::info))
         .route("/api/name", get(ui::public_name))
         .route("/api/list", get(files::list))
+        .route("/api/find", get(files::find))
         .route("/api/download", get(files::download))
         .route("/api/zip", get(files::zip))
         .route("/api/raw", get(files::raw))
@@ -326,6 +328,7 @@ mod tests {
 
         for uri in [
             "/api/list",
+            "/api/find?q=secret",
             "/api/info",
             "/api/settings",
             "/api/download?path=secret.txt",
@@ -978,6 +981,202 @@ mod tests {
             .unwrap();
         assert_eq!(send(&app, upload).await.status(), StatusCode::BAD_REQUEST);
         assert!(!outside.0.join("pwn.txt").exists());
+    }
+
+    // --- find (recursive name search) ----------------------------------------
+
+    /// GET /api/find and parse the JSON result.
+    async fn find_json(app: &Router, uri: &str) -> serde_json::Value {
+        let resp = send(app, get_authed(uri)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        serde_json::from_str(&body_string(resp).await).unwrap()
+    }
+
+    /// The hits as sorted `parent/name` strings — the walk order is
+    /// deliberately arbitrary (the client sorts), so assertions can't depend
+    /// on it.
+    fn hit_paths(json: &serde_json::Value) -> Vec<String> {
+        let mut paths: Vec<String> = json["hits"]
+            .as_array()
+            .expect("hits is an array")
+            .iter()
+            .map(|h| {
+                let parent = h["parent"].as_str().unwrap();
+                let name = h["name"].as_str().unwrap();
+                if parent.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{parent}/{name}")
+                }
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// `root/a.txt`, `root/saves/{save01.srm, notes.txt}`,
+    /// `root/saves/deep/save02.srm`, `root/other/save03.srm`.
+    fn find_tree(root: &TmpRoot) {
+        std::fs::write(root.0.join("a.txt"), b"a").unwrap();
+        std::fs::create_dir(root.0.join("saves")).unwrap();
+        std::fs::write(root.0.join("saves/save01.srm"), b"1").unwrap();
+        std::fs::write(root.0.join("saves/notes.txt"), b"n").unwrap();
+        std::fs::create_dir(root.0.join("saves/deep")).unwrap();
+        std::fs::write(root.0.join("saves/deep/save02.srm"), b"2").unwrap();
+        std::fs::create_dir(root.0.join("other")).unwrap();
+        std::fs::write(root.0.join("other/save03.srm"), b"3").unwrap();
+    }
+
+    // The whole point of the endpoint: matches come from every level below the
+    // search root, each carrying the folder it lives in so the client can act
+    // on it or navigate there.
+    #[tokio::test]
+    async fn find_walks_subfolders_and_reports_parents() {
+        let root = TmpRoot::new("find-walk");
+        find_tree(&root);
+        let app = app(&root, Permission::ReadOnly);
+
+        let json = find_json(&app, "/api/find?q=save").await;
+        assert_eq!(
+            hit_paths(&json),
+            vec![
+                "other/save03.srm",
+                "saves",
+                "saves/deep/save02.srm",
+                "saves/save01.srm",
+            ]
+        );
+        // A completed walk says so, and reports how much it looked at.
+        assert_eq!(json["truncated"], false);
+        assert_eq!(json["limit"], serde_json::Value::Null);
+        assert!(json["scanned"].as_u64().unwrap() >= 7);
+
+        // Searching a subfolder confines the walk to it, and the parents stay
+        // full paths from the served root (what every other endpoint takes).
+        let json = find_json(&app, "/api/find?q=save&path=saves").await;
+        assert_eq!(
+            hit_paths(&json),
+            vec!["saves/deep/save02.srm", "saves/save01.srm"]
+        );
+    }
+
+    // A pattern with wildcards anchors to the whole name, so `*.srm` means
+    // "ends in .srm" — the `find -name` behavior a plain substring can't give.
+    #[tokio::test]
+    async fn find_wildcard_pattern_anchors_to_the_whole_name() {
+        let root = TmpRoot::new("find-glob");
+        find_tree(&root);
+        std::fs::write(root.0.join("saves/save04.srm.bak"), b"4").unwrap();
+        let app = app(&root, Permission::ReadOnly);
+
+        let json = find_json(&app, "/api/find?q=*.srm").await;
+        assert_eq!(
+            hit_paths(&json),
+            vec![
+                "other/save03.srm",
+                "saves/deep/save02.srm",
+                "saves/save01.srm",
+            ]
+        );
+        // The substring form does match the .bak — that's the difference.
+        let json = find_json(&app, "/api/find?q=.srm").await;
+        assert!(hit_paths(&json).contains(&"saves/save04.srm.bak".to_string()));
+    }
+
+    // Folders match too (`find` tests every entry), and a hit carries the
+    // metadata the listing rows need to render.
+    #[tokio::test]
+    async fn find_matches_directories_with_listing_metadata() {
+        let root = TmpRoot::new("find-dirs");
+        find_tree(&root);
+        let app = app(&root, Permission::ReadOnly);
+
+        let json = find_json(&app, "/api/find?q=saves").await;
+        let hits = json["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["name"], "saves");
+        assert_eq!(hits[0]["parent"], "");
+        assert_eq!(hits[0]["dir"], true);
+
+        let json = find_json(&app, "/api/find?q=save01").await;
+        let hit = &json["hits"].as_array().unwrap()[0];
+        assert_eq!(hit["dir"], false);
+        assert_eq!(hit["size"], 1);
+        assert!(hit["modified"].as_i64().unwrap() > 0);
+    }
+
+    // The search path is a path surface like any other: traversal is refused
+    // before the walk starts, and an empty pattern is refused rather than
+    // matching (and returning) the entire tree.
+    #[tokio::test]
+    async fn find_rejects_traversal_and_an_empty_pattern() {
+        let outside = TmpRoot::new("find-outside");
+        std::fs::write(outside.0.join("secret.txt"), b"top secret").unwrap();
+        let root = TmpRoot::new("find-traversal");
+        let app = app(&root, Permission::ReadOnly);
+
+        let sibling = outside.0.file_name().unwrap().to_str().unwrap().to_string();
+        for uri in [
+            format!("/api/find?q=secret&path=..%2F{sibling}"),
+            "/api/find?q=secret&path=%2E%2E".to_string(),
+        ] {
+            let resp = send(&app, get_authed(&uri)).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = body_string(resp).await;
+            assert!(!body.contains("secret.txt"), "{uri} leaked the file");
+        }
+
+        for uri in ["/api/find?q=", "/api/find?q=%20%20"] {
+            let resp = send(&app, get_authed(uri)).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    // A symlinked directory is described but never descended into, so a cycle
+    // (`saves/loop -> saves`) terminates instead of walking forever — the trap
+    // issue #113 documents for the ZIP walker.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn find_does_not_descend_symlinked_directories() {
+        let root = TmpRoot::new("find-symlink");
+        find_tree(&root);
+        std::os::unix::fs::symlink(root.0.join("saves"), root.0.join("saves/loop")).unwrap();
+        let app = app(&root, Permission::ReadOnly);
+
+        // One hit per real file: the cycle contributes no duplicates.
+        let json = find_json(&app, "/api/find?q=save01").await;
+        assert_eq!(hit_paths(&json), vec!["saves/save01.srm"]);
+
+        // The link itself is still a findable entry, described exactly as
+        // /api/list describes it in its own folder: metadata does not traverse
+        // symlinks, so `dir` is false for a link — same row, same behavior.
+        let json = find_json(&app, "/api/find?q=loop").await;
+        let hits = json["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["parent"], "saves");
+        assert_eq!(hits[0]["dir"], false);
+    }
+
+    // Multi-root: the virtual root has no filesystem path, so a search there
+    // fans out across every mount, each hit rooted at its mount name.
+    #[tokio::test]
+    async fn find_from_the_virtual_root_searches_every_mount() {
+        let one = TmpRoot::new("find-vroot-one");
+        let two = TmpRoot::new("find-vroot-two");
+        std::fs::write(one.0.join("save01.srm"), b"1").unwrap();
+        std::fs::create_dir(two.0.join("sub")).unwrap();
+        std::fs::write(two.0.join("sub/save02.srm"), b"2").unwrap();
+        let app = multi_app(&one, &two, Permission::ReadOnly);
+
+        let json = find_json(&app, "/api/find?q=save&path=").await;
+        assert_eq!(
+            hit_paths(&json),
+            vec!["one/save01.srm", "two/sub/save02.srm"]
+        );
+
+        // Naming a mount confines the search to it.
+        let json = find_json(&app, "/api/find?q=save&path=two").await;
+        assert_eq!(hit_paths(&json), vec!["two/sub/save02.srm"]);
     }
 
     // --- files handlers over the wire ---------------------------------------
