@@ -155,59 +155,85 @@ function applyFilter(text) {
 // text to /api/find, which walks every folder below cwd. Results replace the
 // listing until cleared — the folder's own entries are parked rather than
 // refetched, so returning to them costs nothing.
+// One request is one page: the server stops at its own caps (it is walking an
+// SD card, or a Steam Deck home directory with a million entries in it) and
+// hands back a cursor. `searchCursor` set means the walk paused with more tree
+// left — the banner's Continue button resumes it and appends the next page.
 let searchQ = '';                 // active pattern; '' = plain folder listing
 let searchRoot = '';              // folder the active search was launched from
-let searchNote = '';              // completeness summary for the banner
 let parkedEntries = null;         // the cwd listing, held while results show
 let searchToken = 0;              // discards a superseded search response
+let searchCursor = null;          // resume point, or null when nothing is left
+let searchScanned = 0;            // entries examined, accumulated over pages
+let searchLimit = null;           // which cap paused the last page
+let searchBusy = false;           // a page is in flight (Continue is disabled)
 
 const inSearch = () => searchQ !== '';
 
-// How complete the answer is: the hit count, plus which server-side cap cut
-// the walk short (the caps exist because this reads an SD card — see
-// files.rs::find). Silence about a truncated result would read as "that's all
-// there is", which is the one thing a search must never imply.
-function searchSummary(res) {
-  const n = res.hits.length;
-  const bits = [n + (n === 1 ? ' match' : ' matches')];
-  if (res.truncated) bits.push({
-    results: 'stopped at the first ' + n + ' — narrow the pattern',
-    entries: 'stopped after scanning ' + res.scanned.toLocaleString() + ' items',
-    time: 'stopped after 5s — search a smaller folder',
-    depth: 'some folders were nested too deeply to search',
-  }[res.limit] || 'incomplete');
-  else if (res.scanned) bits.push('scanned ' + res.scanned.toLocaleString() + ' items');
+// How complete the answer is. A paused walk says so plainly: silence would
+// read as "that's all there is", which is the one thing a search must never
+// imply when it stopped early.
+function searchNote() {
+  const n = entries.length;
+  const bits = [n + (n === 1 ? ' match' : ' matches'),
+                'scanned ' + searchScanned.toLocaleString() + ' items'];
+  if (searchBusy) bits.push('searching…');
+  else if (searchCursor) bits.push('paused — Continue to search further');
+  else if (searchLimit === 'depth') bits.push('some folders were nested too deeply to search');
   return bits.join(' · ');
 }
 
-async function runSearch(pattern) {
+// Fetch one page. `cursor` null starts fresh (replacing any results); a cursor
+// appends the next page and keeps the selection, since the rows already shown
+// do not move.
+async function fetchSearchPage(q, root, cursor) {
+  const stok = ++searchToken, ntok = navToken;
+  searchBusy = true;
+  if (cursor) renderSearchBar(); else $('t-count').textContent = 'searching…';
+  let res;
+  try {
+    res = await api('GET', '/api/find?path=' + enc(root) + '&q=' + enc(q)
+                    + (cursor ? '&after=' + enc(cursor) : ''));
+  } catch (e) {
+    searchBusy = false;
+    if (stok === searchToken) { toast(e.message, true); renderSearchBar(); rebuild(); }
+    return;
+  }
+  searchBusy = false;
+  // A newer search, or any navigation, owns the UI now.
+  if (stok !== searchToken || ntok !== navToken) return;
+  if (cursor) {
+    entries = entries.concat(res.hits);
+    searchScanned += res.scanned;
+  } else {
+    if (!inSearch()) parkedEntries = entries;   // first search: park the listing
+    searchQ = q; searchRoot = root;
+    entries = res.hits;
+    searchScanned = res.scanned;
+    selection = new Set(); lastIndex = null;
+  }
+  searchCursor = res.cursor || null;
+  searchLimit = res.limit || null;
+  renderSearchBar(); rebuild(); syncToolbar();
+}
+
+function runSearch(pattern) {
   const q = pattern.trim();
   // Enter on an empty box means "stop searching", not "match everything".
   if (!q) { if (exitSearch()) { rebuild(); syncToolbar(); } return; }
-  const root = cwd;
-  const stok = ++searchToken, ntok = navToken;
-  $('t-count').textContent = 'searching…';
-  let res;
-  try {
-    res = await api('GET', '/api/find?path=' + enc(root) + '&q=' + enc(q));
-  } catch (e) {
-    if (stok === searchToken) { toast(e.message, true); rebuild(); }
-    return;
-  }
-  // A newer search, or any navigation, owns the UI now.
-  if (stok !== searchToken || ntok !== navToken) return;
-  if (!inSearch()) parkedEntries = entries;   // first search: park the listing
-  searchQ = q; searchRoot = root; searchNote = searchSummary(res);
-  entries = res.hits;
-  selection = new Set(); lastIndex = null;
-  renderSearchBar(); rebuild(); syncToolbar();
+  return fetchSearchPage(q, cwd, null);
+}
+
+function continueSearch() {
+  if (!inSearch() || !searchCursor || searchBusy) return;
+  return fetchSearchPage(searchQ, searchRoot, searchCursor);
 }
 
 // Drop the results and put the parked folder listing back. Returns true when
 // there was a search to leave, so callers can skip a needless repaint.
 function exitSearch() {
   if (!inSearch()) return false;
-  searchQ = ''; searchRoot = ''; searchNote = '';
+  searchQ = ''; searchRoot = ''; searchCursor = null; searchLimit = null; searchScanned = 0;
   entries = parkedEntries || []; parkedEntries = null;
   selection = new Set(); lastIndex = null;
   renderSearchBar();
@@ -218,7 +244,10 @@ function renderSearchBar() {
   const bar = $('sbar');
   if (!inSearch()) { bar.style.display = 'none'; return; }
   $('sb-text').textContent =
-    '🔍 "' + searchQ + '" in ' + (searchRoot ? '/' + searchRoot : 'Home') + ' — ' + searchNote;
+    '🔍 "' + searchQ + '" in ' + (searchRoot ? '/' + searchRoot : 'Home') + ' — ' + searchNote();
+  const more = $('sb-more');
+  more.style.display = searchCursor ? '' : 'none';
+  more.disabled = searchBusy;
   bar.style.display = '';
 }
 
@@ -296,9 +325,14 @@ function attachRowEvents(el, e, idx) {
 function render() { rowEls.clear(); viewMode === 'grid' ? renderGrid() : renderList(); }
 
 // Empty-state text: distinguish "this folder is empty" from "the filter
-// matched nothing" so an active filter can't read as an empty folder.
-const emptyHtml = () =>
-  `<div class="empty">${inSearch() || filterText.trim() ? '— no matches —' : '— empty —'}</div>`;
+// matched nothing" so an active filter can't read as an empty folder — and, on
+// a paused search, from "nothing found *so far*", which is not the same claim
+// as "nothing is there".
+function emptyHtml() {
+  const msg = inSearch() && searchCursor ? '— nothing yet — press Continue to search further —'
+    : (inSearch() || filterText.trim() ? '— no matches —' : '— empty —');
+  return `<div class="empty">${msg}</div>`;
+}
 
 // Selection-only repaint (issue #41): toggle the `sel` class on the existing
 // rows/cards instead of rebuilding the whole DOM — in a 3,000-entry folder a
@@ -425,7 +459,8 @@ async function go(path, push = true) {
   if (changed) setFilter('');
   // Any navigation ends a search: the listing below replaces the results, so
   // the parked entries are dropped rather than restored.
-  searchQ = ''; searchRoot = ''; searchNote = ''; parkedEntries = null;
+  searchQ = ''; searchRoot = ''; searchCursor = null; searchLimit = null;
+  searchScanned = 0; parkedEntries = null;
   renderSearchBar();
   if (push && changed) history.pushState({ path }, '', urlForPath(path));
   cwd = path; selection = new Set(); lastIndex = null;
@@ -1183,6 +1218,7 @@ $('t-rename').onclick = doRename;
 $('t-cut').onclick = doCut; $('t-copy').onclick = doCopy; $('t-paste').onclick = doPaste;
 $('t-del').onclick = doDelete; $('t-refresh').onclick = doRefresh;
 $('sb-clear').onclick = () => { if (exitSearch()) { rebuild(); syncToolbar(); } $('t-filter').focus(); };
+$('sb-more').onclick = continueSearch;
 $('v-list').onclick = () => setView('list'); $('v-grid').onclick = () => setView('grid');
 $('t-select').onclick = () => setSelectMode(!selectMode);
 $('t-hidden').onclick = () => { showHidden = !showHidden; $('t-hidden').classList.toggle('on', showHidden);
