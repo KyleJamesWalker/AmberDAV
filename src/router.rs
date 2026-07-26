@@ -69,7 +69,9 @@ async fn access_log(req: Request, next: Next) -> Response {
 /// GET  /api/name          -   device name for the browser tab title (public)
 /// GET  /api/info          S   connection info for the Status tab
 /// GET  /api/list          S   read
-/// GET  /api/find          S   read; recursive name search under a folder
+/// GET  /api/find          S   read; recursive name search under a folder, one
+///                             capped page per request (`after` = the previous
+///                             page's `cursor` continues the walk)
 /// GET  /api/download      S   read
 /// GET  /api/zip           S   read
 /// GET  /api/raw           S   read; HTTP Range + conditional cache validators
@@ -1129,6 +1131,59 @@ mod tests {
         for uri in ["/api/find?q=", "/api/find?q=%20%20"] {
             let resp = send(&app, get_authed(uri)).await;
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    // `after` resumes the walk immediately past a given entry, which is how a
+    // tree bigger than one page's caps gets searched to completion. The walk is
+    // sorted pre-order, so what remains after a cursor is exactly determined.
+    #[tokio::test]
+    async fn find_after_resumes_the_walk_past_the_cursor() {
+        let root = TmpRoot::new("find-after");
+        find_tree(&root);
+        let app = app(&root, Permission::ReadOnly);
+
+        // Sorted pre-order from the root is: a.txt, other, other/save03.srm,
+        // saves, saves/deep, saves/deep/save02.srm, saves/notes.txt,
+        // saves/save01.srm — so only the last of those is still to come.
+        let json = find_json(&app, "/api/find?q=save&after=saves%2Fdeep%2Fsave02.srm").await;
+        assert_eq!(hit_paths(&json), vec!["saves/save01.srm"]);
+
+        // A cursor past everything yields nothing and offers no continuation.
+        let json = find_json(&app, "/api/find?q=save&after=saves%2Fsave01.srm").await;
+        assert_eq!(hit_paths(&json), Vec::<String>::new());
+        assert_eq!(json["cursor"], serde_json::Value::Null);
+
+        // A single-page search of this tree needs no cursor at all.
+        let json = find_json(&app, "/api/find?q=save").await;
+        assert_eq!(json["cursor"], serde_json::Value::Null);
+        assert_eq!(json["truncated"], false);
+    }
+
+    // The cursor is client-supplied path input, so it is validated like every
+    // other path surface: no traversal, and it must name an entry inside the
+    // folder actually being searched.
+    #[tokio::test]
+    async fn find_rejects_a_traversing_or_foreign_cursor() {
+        let outside = TmpRoot::new("find-cursor-outside");
+        std::fs::write(outside.0.join("secret.txt"), b"top secret").unwrap();
+        let root = TmpRoot::new("find-cursor");
+        find_tree(&root);
+        let app = app(&root, Permission::ReadOnly);
+
+        let sibling = outside.0.file_name().unwrap().to_str().unwrap().to_string();
+        for uri in [
+            // Traversal in the cursor.
+            format!("/api/find?q=secret&after=..%2F{sibling}%2Fsecret.txt"),
+            // A cursor rooted outside the folder being searched.
+            "/api/find?q=save&path=saves&after=other%2Fsave03.srm".to_string(),
+            // A cursor naming the search folder itself, not an entry in it.
+            "/api/find?q=save&path=saves&after=saves".to_string(),
+        ] {
+            let resp = send(&app, get_authed(&uri)).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = body_string(resp).await;
+            assert!(!body.contains("secret"), "{uri} leaked the file");
         }
     }
 

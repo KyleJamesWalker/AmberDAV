@@ -176,14 +176,34 @@ pub async fn list(_: Session, State(s): State<AppState>, Query(q): Query<PathQue
 
 // --- find -------------------------------------------------------------------
 
-/// Caps on one recursive search. The walk reads an SD card behind a handheld
-/// CPU, so it is bounded four ways instead of trusted to finish: the client
-/// gets a usable prefix plus `truncated`, never an open-ended stall. Every cap
-/// is a stop, not an error — partial results beat a spinner that never ends.
-const FIND_MAX_HITS: usize = 500;
-const FIND_MAX_SCANNED: usize = 50_000;
-const FIND_MAX_DEPTH: usize = 24;
-const FIND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Caps on **one page** of a recursive search. The walk reads an SD card behind
+/// a handheld CPU, so it is bounded four ways instead of trusted to finish.
+/// Hitting a cap is a pause, not an error and not the end: the response carries
+/// a `cursor` the client passes back as `after` to continue exactly where this
+/// page stopped. Trees that dwarf any fixed cap — a Steam Deck's
+/// `~/.local/share/Steam/steamapps/compatdata`, where a single Proton prefix is
+/// a whole Windows filesystem — are searchable a page at a time instead of
+/// silently cut off.
+struct FindLimits {
+    max_hits: usize,
+    max_scanned: usize,
+    max_depth: usize,
+    deadline: std::time::Duration,
+}
+
+impl Default for FindLimits {
+    fn default() -> Self {
+        FindLimits {
+            max_hits: 500,
+            max_scanned: 50_000,
+            // Depth is the one cap with no cursor behind it: a too-deep branch
+            // is skipped, not paused, so this has to be generous enough for
+            // real trees (a Proton prefix reaches ~15 below the mount).
+            max_depth: 40,
+            deadline: std::time::Duration::from_secs(5),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub struct FindQuery {
@@ -192,6 +212,9 @@ pub struct FindQuery {
     path: Option<String>,
     /// The name pattern — see [`name_matches`].
     q: String,
+    /// Resume point: a previous page's [`FindResult::cursor`]. The walk
+    /// continues immediately after that entry.
+    after: Option<String>,
 }
 
 /// One match. `parent` is the rel path of the containing folder (`""` = the
@@ -210,15 +233,20 @@ struct Hit {
 #[derive(Serialize)]
 struct FindResult {
     hits: Vec<Hit>,
-    /// True when a cap stopped the walk: `hits` is a prefix of the matches,
+    /// True when a cap stopped this page: `hits` is a prefix of the matches,
     /// not all of them.
     truncated: bool,
     /// Which cap fired — `"results"`, `"entries"`, `"time"`, or `"depth"`;
     /// `None` when the whole subtree was searched.
     limit: Option<&'static str>,
-    /// Directory entries examined, reported so the UI can say how much of the
-    /// tree the answer covers.
+    /// Directory entries examined on this page (the client accumulates across
+    /// pages), so the UI can say how much of the tree the answer covers.
     scanned: usize,
+    /// Rel path of the last entry examined. Pass it back as `after` to search
+    /// on from here. `None` means there is nothing left — either the subtree is
+    /// exhausted, or the only thing skipped was a branch deeper than
+    /// [`FindLimits::max_depth`], which no cursor can resume.
+    cursor: Option<String>,
 }
 
 /// True when `name` matches the search pattern `pat`.
@@ -282,19 +310,186 @@ fn join_rel(dir: &str, name: &str) -> String {
     }
 }
 
+/// One directory being iterated by [`walk_find`].
+///
+/// Names are read and **sorted** up front rather than streamed in readdir
+/// order. That costs a buffer per open directory, and it is what buys
+/// resumability: a total order over each directory makes the whole traversal
+/// deterministic, so "continue after this path" is a well-defined position
+/// instead of a guess. (`/api/list` deliberately does *not* sort — there the
+/// client re-sorts anyway and the order buys nothing.)
+struct Level {
+    /// Rel path of this directory.
+    rel: String,
+    path: PathBuf,
+    /// Child names, sorted.
+    names: Vec<String>,
+    /// Next child to examine.
+    idx: usize,
+    /// Levels below the search root.
+    depth: usize,
+    /// Resume-cursor segments that still apply at this level and below. Empty
+    /// once the walk has passed the cursor.
+    cursor: Vec<String>,
+}
+
+/// Open `path` as a walk level, positioned at the first name the cursor has
+/// not already passed. Returns `None` for an unreadable directory — one bad
+/// permission bit mid-tree must not discard the hits found everywhere else.
+async fn open_level(
+    path: PathBuf,
+    rel: String,
+    depth: usize,
+    cursor: Vec<String>,
+) -> Option<Level> {
+    let mut rd = tokio::fs::read_dir(&path).await.ok()?;
+    let mut names = Vec::new();
+    while let Ok(Some(ent)) = rd.next_entry().await {
+        names.push(ent.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    // Everything before the cursor's segment for this level was examined on an
+    // earlier page: skip straight past it instead of re-walking it.
+    let idx = match cursor.first() {
+        Some(seg) => names.partition_point(|n| n.as_str() < seg.as_str()),
+        None => 0,
+    };
+    Some(Level {
+        rel,
+        path,
+        names,
+        idx,
+        depth,
+        cursor,
+    })
+}
+
+/// Search `roots` in order for `pat`, pre-order, stopping at the first cap in
+/// `limits`.
+///
+/// Each root is `(absolute dir, its rel path, cursor segments below it)`. The
+/// caller has already resolved and confined every root, and every cursor
+/// segment has been validated as a plain name — this walk only ever joins
+/// plain names onto a confined root, so it cannot leave the served tree.
+///
+/// Entries are described by `symlink_metadata`, which does not traverse — so a
+/// hit renders exactly as the same entry does in its folder's `/api/list`, and
+/// a symlinked directory is never recursed into. That is `find`'s own default,
+/// and it is what keeps a cycle (`a/link -> a`) from looping forever — the trap
+/// issue #113 documents for the ZIP walker.
+///
+/// Cap checks come *after* a full examine, so every page advances by at least
+/// one entry and a `Continue` can never livelock on the same position.
+async fn walk_find(
+    roots: Vec<(PathBuf, String, Vec<String>)>,
+    pat: &str,
+    limits: &FindLimits,
+) -> FindResult {
+    let started = std::time::Instant::now();
+    let mut roots: std::collections::VecDeque<_> = roots.into();
+    let mut stack: Vec<Level> = Vec::new();
+    let mut hits: Vec<Hit> = Vec::new();
+    let mut scanned = 0usize;
+    let mut limit: Option<&'static str> = None;
+    // Rel path of the last entry examined — the cursor a `Continue` resumes at.
+    let mut last: Option<String> = None;
+
+    loop {
+        let Some(level) = stack.last_mut() else {
+            // Current root exhausted: start the next one, or finish.
+            let Some((path, rel, cursor)) = roots.pop_front() else {
+                break;
+            };
+            if let Some(l) = open_level(path, rel, 0, cursor).await {
+                stack.push(l);
+            }
+            continue;
+        };
+        if level.idx >= level.names.len() {
+            stack.pop();
+            continue;
+        }
+        let name = level.names[level.idx].clone();
+        level.idx += 1;
+        // The cursor's boundary entry can only ever be the first one taken at
+        // this level (`open_level` positioned `idx` there). It was examined on
+        // the previous page, so it is not re-tested — but its children were
+        // not, so it is still descended into.
+        let boundary = level.cursor.first().is_some_and(|s| *s == name);
+        let child_cursor = if boundary {
+            let rest = level.cursor[1..].to_vec();
+            level.cursor.clear(); // later siblings are all fresh
+            rest
+        } else {
+            Vec::new()
+        };
+        let parent_rel = level.rel.clone();
+        let child_path = level.path.join(&name);
+        let depth = level.depth;
+
+        // Unreadable entry: skip it, exactly as `list` does.
+        let Ok(meta) = tokio::fs::symlink_metadata(&child_path).await else {
+            continue;
+        };
+        let rel = join_rel(&parent_rel, &name);
+        scanned += 1;
+        last = Some(rel.clone());
+        if !boundary && name_matches(pat, &name) {
+            hits.push(Hit {
+                parent: parent_rel,
+                name,
+                dir: meta.is_dir(),
+                size: meta.len(),
+                modified: mtime_ms(&meta),
+            });
+        }
+        // `is_dir()` is false for a symlink to a directory, which is what stops
+        // the recursion at links.
+        if meta.is_dir() {
+            if depth + 1 > limits.max_depth {
+                // Too deep to follow, and no cursor can resume a skipped
+                // branch: flag the answer as partial and search on.
+                limit = Some("depth");
+            } else if let Some(l) = open_level(child_path, rel, depth + 1, child_cursor).await {
+                stack.push(l);
+            }
+        }
+
+        if hits.len() >= limits.max_hits {
+            limit = Some("results");
+            break;
+        }
+        if scanned >= limits.max_scanned {
+            limit = Some("entries");
+            break;
+        }
+        if started.elapsed() >= limits.deadline {
+            limit = Some("time");
+            break;
+        }
+    }
+
+    // Only offer a cursor when there is genuinely more to walk, so a Continue
+    // never comes back empty just to say "that was all".
+    let more = !roots.is_empty() || stack.iter().any(|l| l.idx < l.names.len());
+    FindResult {
+        hits,
+        truncated: limit.is_some(),
+        limit,
+        scanned,
+        cursor: more.then_some(last).flatten(),
+    }
+}
+
 /// Recursive name search under `path` — the tree-wide counterpart to the web
 /// UI's in-folder filter (`find -name`, over HTTP). Matches directories as
 /// well as files, and reports each hit's containing folder so the client can
 /// act on it or navigate there.
 ///
-/// Entries are described by `DirEntry::metadata`, which does not traverse
-/// symlinks — so a hit renders exactly as the same entry does in its folder's
-/// `/api/list`, and a symlinked directory is never recursed into. That is
-/// `find`'s own default, and it is what keeps a cycle (`a/link -> a`) from
-/// looping forever — the trap issue #113 documents for the ZIP walker.
-/// Containment therefore needs no per-entry `confine`: the walk only ever
-/// descends into real directories below an already-confined root, so it cannot
-/// leave the served tree.
+/// One request is one page: it stops at the first [`FindLimits`] cap and hands
+/// back a `cursor` to continue from, so a tree far larger than any cap is
+/// searched a page at a time. `after` carries that cursor back and is treated
+/// as fully untrusted input, validated exactly like `path`.
 pub async fn find(_: Session, State(s): State<AppState>, Query(q): Query<FindQuery>) -> Response {
     let pat = q.q.trim();
     if pat.is_empty() {
@@ -302,14 +497,48 @@ pub async fn find(_: Session, State(s): State<AppState>, Query(q): Query<FindQue
     }
     let rel = q.path.unwrap_or_default();
 
-    // Search roots as (absolute dir, its rel path, depth). The multi-root
-    // virtual root has no filesystem path of its own, so a search there fans
-    // out across every mount, each rooted at its own name.
-    let mut stack: Vec<(PathBuf, String, usize)> = Vec::new();
-    if s.mounts.is_virtual_root(&rel) {
-        for (name, root) in s.mounts.mounts() {
-            stack.push((root.clone(), name.clone(), 0));
-        }
+    // The resume cursor is a client-supplied path: every segment must be a
+    // plain name (no traversal, no separators) before the walk joins it onto a
+    // confined root.
+    let cursor: Vec<String> = q
+        .after
+        .as_deref()
+        .unwrap_or("")
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .map(str::to_string)
+        .collect();
+    if cursor.iter().any(|s| !plain_segment(s)) {
+        return bad("invalid cursor");
+    }
+
+    // Search roots, in walk order. The multi-root virtual root has no
+    // filesystem path of its own, so a search there fans out across every
+    // mount, each rooted at its own name.
+    let roots: Vec<(PathBuf, String, Vec<String>)> = if s.mounts.is_virtual_root(&rel) {
+        let mounts = s.mounts.mounts();
+        // Resuming: the cursor's first segment names the mount the last page
+        // stopped in. Mounts before it are done; mounts after it are fresh.
+        let start = match cursor.first() {
+            Some(first) => match mounts.iter().position(|(n, _)| n == first) {
+                Some(i) => i,
+                None => return bad("invalid cursor"),
+            },
+            None => 0,
+        };
+        mounts[start..]
+            .iter()
+            .enumerate()
+            .map(|(i, (name, root))| {
+                // Only the mount the cursor points into carries a resume
+                // position, and only when there is a cursor at all.
+                let below = match cursor.split_first() {
+                    Some((_, rest)) if i == 0 => rest.to_vec(),
+                    _ => Vec::new(),
+                };
+                (root.clone(), name.clone(), below)
+            })
+            .collect()
     } else {
         let Some((mount_root, dir)) = s.mounts.resolve(&rel) else {
             return bad("invalid path");
@@ -321,79 +550,24 @@ pub async fn find(_: Session, State(s): State<AppState>, Query(q): Query<FindQue
         // Normalize the request path the way the resolver does (drop empty and
         // `.` segments) so every `parent` we hand back is in the canonical
         // form the client's own paths use.
-        let base_rel = rel
+        let base: Vec<&str> = rel
             .split('/')
             .filter(|s| !s.is_empty() && *s != ".")
-            .collect::<Vec<_>>()
-            .join("/");
-        stack.push((dir, base_rel, 0));
-    }
-
-    let started = std::time::Instant::now();
-    let mut hits: Vec<Hit> = Vec::new();
-    let mut scanned = 0usize;
-    let mut limit: Option<&'static str> = None;
-
-    'walk: while let Some((dir, dir_rel, depth)) = stack.pop() {
-        let mut rd = match tokio::fs::read_dir(&dir).await {
-            Ok(rd) => rd,
-            // An unreadable subdirectory is skipped, not fatal: one bad
-            // permission bit mid-tree must not discard the hits found
-            // everywhere else.
-            Err(_) => continue,
-        };
-        while let Ok(Some(ent)) = rd.next_entry().await {
-            scanned += 1;
-            if scanned >= FIND_MAX_SCANNED {
-                limit = Some("entries");
-                break 'walk;
-            }
-            if started.elapsed() >= FIND_DEADLINE {
-                limit = Some("time");
-                break 'walk;
-            }
-            let name = ent.file_name().to_string_lossy().into_owned();
-            // Unreadable entry: skip it, exactly as `list` does.
-            let Ok(meta) = ent.metadata().await else {
-                continue;
-            };
-            if name_matches(pat, &name) {
-                hits.push(Hit {
-                    parent: dir_rel.clone(),
-                    name: name.clone(),
-                    dir: meta.is_dir(),
-                    size: meta.len(),
-                    modified: mtime_ms(&meta),
-                });
-                if hits.len() >= FIND_MAX_HITS {
-                    limit = Some("results");
-                    break 'walk;
-                }
-            }
-            // `is_dir()` is false for a symlink to a directory (the metadata
-            // above does not traverse), which is what stops the recursion at
-            // links.
-            if meta.is_dir() {
-                if depth + 1 > FIND_MAX_DEPTH {
-                    // Too deep to follow: flag the answer as partial but keep
-                    // searching the rest of the tree.
-                    limit = Some("depth");
-                    continue;
-                }
-                stack.push((ent.path(), join_rel(&dir_rel, &name), depth + 1));
-            }
+            .collect();
+        // A cursor must name an entry *inside* the folder being searched;
+        // anything else is a cursor from a different search.
+        if !cursor.is_empty()
+            && (cursor.len() <= base.len() || !base.iter().zip(&cursor).all(|(b, c)| b == c))
+        {
+            return bad("invalid cursor");
         }
-    }
+        let below = cursor.get(base.len()..).unwrap_or(&[]).to_vec();
+        (vec![(dir, base.join("/"), below)]) as _
+    };
 
-    // Deliberately unsorted, like `/api/list` (issue #58): the client re-sorts
-    // every listing by the user's chosen column anyway.
-    Json(FindResult {
-        hits,
-        truncated: limit.is_some(),
-        limit,
-        scanned,
-    })
-    .into_response()
+    // Hits are deliberately not re-sorted for presentation, like `/api/list`
+    // (issue #58): the client sorts by the user's chosen column anyway.
+    Json(walk_find(roots, pat, &FindLimits::default()).await).into_response()
 }
 
 // --- mkdir / delete / rename ------------------------------------------------
@@ -2755,6 +2929,138 @@ mod tests {
         store_thumb(&dir, "k.jpg", b"payload2").await;
         assert_eq!(std::fs::read(dir.join("k.jpg")).unwrap(), b"payload2");
         assert!(part_files(&dir).is_empty(), "no temp litter");
+    }
+
+    // --- find: paging through a tree bigger than the caps -------------------
+
+    /// Walk `root` for `pat` one tiny page at a time, following the cursor to
+    /// exhaustion exactly as the web UI's Continue button does. Returns the
+    /// `parent/name` of every hit, in the order the pages produced them, plus
+    /// the number of pages it took.
+    async fn find_all_pages(root: &Path, pat: &str, limits: FindLimits) -> (Vec<String>, usize) {
+        let mut found = Vec::new();
+        let mut cursor: Vec<String> = Vec::new();
+        let mut pages = 0;
+        loop {
+            let res = walk_find(
+                vec![(root.to_path_buf(), String::new(), cursor.clone())],
+                pat,
+                &limits,
+            )
+            .await;
+            pages += 1;
+            found.extend(res.hits.iter().map(|h| join_rel(&h.parent, &h.name)));
+            match res.cursor {
+                Some(c) => {
+                    cursor = c.split('/').map(str::to_string).collect();
+                }
+                None => return (found, pages),
+            }
+            assert!(pages < 200, "cursor never finished: {found:?}");
+        }
+    }
+
+    /// `n` numbered files in `root`, plus `sub/` holding `n` more.
+    fn wide_tree(root: &Path, n: usize) {
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        for i in 0..n {
+            std::fs::write(root.join(format!("f{i:03}.srm")), b"x").unwrap();
+            std::fs::write(root.join(format!("sub/g{i:03}.srm")), b"x").unwrap();
+        }
+    }
+
+    // The property the whole cursor exists for: paging with caps so small that
+    // every page stops early still yields every match exactly once — no gaps,
+    // no repeats. This is what lets a tree far bigger than any fixed cap (a
+    // Steam Deck's compatdata) be searched to completion.
+    #[tokio::test]
+    async fn paging_covers_every_match_exactly_once() {
+        let tree = TmpTree::new("find-paging");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        wide_tree(&root, 12);
+
+        // One match per page, so the cursor is exercised at every position.
+        let (paged, pages) = find_all_pages(
+            &root,
+            "*.srm",
+            FindLimits {
+                max_hits: 1,
+                ..FindLimits::default()
+            },
+        )
+        .await;
+        assert!(pages > 12, "expected many pages, got {pages}");
+
+        // Same set as an uncapped single-page walk, and no duplicates.
+        let (whole, pages) = find_all_pages(&root, "*.srm", FindLimits::default()).await;
+        assert_eq!(pages, 1, "the default caps fit this tree in one page");
+        let mut a = paged.clone();
+        let mut b = whole;
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 24);
+        let unique: std::collections::HashSet<_> = paged.iter().collect();
+        assert_eq!(unique.len(), paged.len(), "duplicate hits across pages");
+    }
+
+    // The scanned-entries cap is the one the Steam Deck report hit, and it can
+    // stop mid-directory rather than on a match — the cursor has to resume
+    // inside a partly-walked folder just as cleanly.
+    #[tokio::test]
+    async fn paging_resumes_mid_directory_on_the_entry_cap() {
+        let tree = TmpTree::new("find-paging-entries");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        wide_tree(&root, 10);
+
+        let (paged, pages) = find_all_pages(
+            &root,
+            "*.srm",
+            FindLimits {
+                max_scanned: 3,
+                ..FindLimits::default()
+            },
+        )
+        .await;
+        assert!(pages > 5, "expected several pages, got {pages}");
+        let mut sorted = paged.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 20, "every match, once: {paged:?}");
+    }
+
+    // A completed walk offers no cursor — a Continue must never be dangled
+    // when there is nothing left to search.
+    #[tokio::test]
+    async fn a_finished_walk_has_no_cursor() {
+        let tree = TmpTree::new("find-no-cursor");
+        let root = std::fs::canonicalize(&tree.0).unwrap();
+        wide_tree(&root, 3);
+
+        let res = walk_find(
+            vec![(root.clone(), String::new(), Vec::new())],
+            "*.srm",
+            &FindLimits::default(),
+        )
+        .await;
+        assert_eq!(res.cursor, None);
+        assert!(!res.truncated);
+        assert_eq!(res.limit, None);
+
+        // A page that stops on a cap *does* carry one, pointing at the last
+        // entry it examined.
+        let res = walk_find(
+            vec![(root, String::new(), Vec::new())],
+            "*.srm",
+            &FindLimits {
+                max_hits: 1,
+                ..FindLimits::default()
+            },
+        )
+        .await;
+        assert!(res.truncated);
+        assert_eq!(res.limit, Some("results"));
+        assert_eq!(res.cursor.as_deref(), Some("f000.srm"));
     }
 
     // --- find: the name matcher --------------------------------------------
