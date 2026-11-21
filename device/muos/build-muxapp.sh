@@ -43,7 +43,7 @@ out="$out_dir/$(basename "$out")"
 # Binary source: positional arg > env var > built from source.
 bin="${1:-${AMBER_DAV_BIN:-}}"
 if [ -z "$bin" ]; then
-  bin="$repo/target/$target/release/amber-dav"
+  bin="$(cd "$repo" && cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/$target/release/amber-dav"
   echo ">> Building amber-dav ($target, --features sdl)… (needs aarch64 Linux + libsdl2-dev)"
   ( cd "$repo" && cargo build --release --target "$target" --features sdl )
 fi

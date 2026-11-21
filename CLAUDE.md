@@ -40,6 +40,16 @@ cargo install cargo-zigbuild                   # once; Zig must be on PATH
 cargo zigbuild --release --target aarch64-unknown-linux-musl --features fb
 ```
 
+## Worktrees
+
+Make worktrees under `.claude/worktrees/` and run `scripts/share-target.sh` once
+in the main checkout: every worktree there then compiles into the main
+checkout's `target/`, so the dependencies build once instead of once per
+worktree. Binaries there are whichever worktree built last: find them with
+`cargo metadata`, never a literal `target/` in a script, and build and use them
+in one go. Parallel builds wait on cargo's lock. Remove a worktree once its PR
+merges.
+
 ## Feature matrix
 
 | Build    | Features         | Display sink                                                     | Linking                          |

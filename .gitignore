@@ -26,3 +26,5 @@ dist
 
 # Mac garbage
 .DS_Store
+
+/.claude/worktrees/
